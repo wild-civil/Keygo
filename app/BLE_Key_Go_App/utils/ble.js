@@ -16,6 +16,7 @@ export const BLE_CONFIG = {
   configCharUUID: '0000FF01-0000-1000-8000-00805F9B34FB',      // Write: 配置下发 / RSSI 注入
   statusCharUUID: '0000FF02-0000-1000-8000-00805F9B34FB',      // Read/Notify: 状态上报
   commandCharUUID: '0000FF03-0000-1000-8000-00805F9B34FB',     // Write: 手动命令 / BIND / UNBIND
+  serialCharUUID: '0000FF04-0000-1000-8000-00805F9B34FB',      // ★ v3.3: Read-Only 设备序列号（永久唯一）
 }
 
 // ==================== 蓝牙适配器 ====================
@@ -110,7 +111,8 @@ export function startScan(onDeviceFound, timeout = 10) {
               name: displayName,
               RSSI: device.RSSI,
               advertisData: device.advertisData,
-              localName: device.localName
+              localName: device.localName,
+              fingerprint: parseManufacturerFingerprint(device.advertisData)  // ★ v3.3: 设备指纹
             }
             devices.push(dev)
             if (typeof onDeviceFound === 'function') {
@@ -438,6 +440,57 @@ export function sendCommand(deviceId, command) {
   )
 }
 
+/**
+ * ★ v3.3: 读取设备序列号（FF04 特征值）
+ *
+ * 返回一个 Promise，收到设备响应后 resolve 为 hex 字符串。
+ * 内部通过 onBLECharacteristicValueChange 捕获 FF04 响应，
+ * 匹配到目标 deviceId + characteristicId 后立即移除监听。
+ *
+ * @param {string} deviceId - 已连接的设备 ID
+ * @param {number} timeoutMs - 超时（毫秒），默认 3000
+ * @returns {Promise<string>} 序列号 hex 字符串
+ */
+export function readSerialNumber(deviceId, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    let resolved = false
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true
+        try { uni.offBLECharacteristicValueChange(handler) } catch {}
+        reject(new Error('Read serial number timeout'))
+      }
+    }, timeoutMs)
+
+    const handler = (res) => {
+      if (resolved) return
+      if (res.deviceId !== deviceId) return
+      if ((res.characteristicId || '').toUpperCase() !== BLE_CONFIG.serialCharUUID.toUpperCase()) return
+
+      resolved = true
+      clearTimeout(timer)
+      try { uni.offBLECharacteristicValueChange(handler) } catch {}
+
+      const sn = arrayBufferToString(res.value)
+      console.log('[BLE] 设备序列号:', sn)
+      resolve(sn)
+    }
+
+    uni.onBLECharacteristicValueChange(handler)
+
+    // 触发读取
+    readBLECharacteristicValue(deviceId, BLE_CONFIG.serviceUUID, BLE_CONFIG.serialCharUUID)
+      .catch((err) => {
+        if (!resolved) {
+          resolved = true
+          clearTimeout(timer)
+          try { uni.offBLECharacteristicValueChange(handler) } catch {}
+          reject(err)
+        }
+      })
+  })
+}
+
 // ==================== 工具函数 ====================
 
 /**
@@ -594,4 +647,72 @@ function parseAdvertisName(advBuffer) {
   }
 
   return ''
+}
+
+/**
+ * ★ v3.3: 从广播原始数据中解析 Manufacturer Specific Data，提取设备指纹
+ *
+ * BLE AD Structure (TLV):
+ *   Type 0xFF = Manufacturer Specific Data
+ *   Format: [Company ID LSB][Company ID MSB][Data...]
+ *
+ * KeyGo 协议:
+ *   Company ID: 0xFFFF (测试/保留)
+ *   Data: "KG" (0x4B 0x47) + 3-byte MAC suffix
+ *   旧版 (v3.2): 仅有 "KG"→ 7 字节 → null（无指纹）
+ *   新版 (v3.3): "KG" + MAC[3-5] → 10 字节 → "71C65A"
+ *
+ * @param {ArrayBuffer} advBuffer - device.advertisData 原始数据
+ * @returns {string|null} MAC 后缀 6 位大写 hex，解析失败返回 null
+ */
+export function parseManufacturerFingerprint(advBuffer) {
+  if (!advBuffer || advBuffer.byteLength === 0) return null
+  try {
+    const data = new Uint8Array(advBuffer)
+    let i = 0
+
+    while (i < data.length - 1) {
+      const len = data[i]
+      const type = data[i + 1]
+      if (len === 0) break
+
+      const valStart = i + 2
+      const valEnd = valStart + (len - 1)
+      if (valEnd > data.length) break
+
+      // AD Type 0xFF = Manufacturer Specific Data
+      if (type === 0xFF && len >= 5) {
+        // 校验 Company ID = 0xFFFF
+        const companyId = data[valStart] | (data[valStart + 1] << 8)
+        if (companyId !== 0xFFFF) {
+          i = valEnd
+          continue
+        }
+
+        // 校验 "KG" 协议标记
+        const hasKG = data[valStart + 2] === 0x4B && data[valStart + 3] === 0x47
+        if (!hasKG) {
+          i = valEnd
+          continue
+        }
+
+        // ★ v3.3+: "KG" 后有 3 字节 MAC 后缀
+        if (valEnd - valStart >= 7) {
+          const mac = [
+            data[valStart + 4],
+            data[valStart + 5],
+            data[valStart + 6]
+          ]
+          return mac.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join('')
+        }
+        // v3.2: 无后缀 → 返回 null
+        return null
+      }
+
+      i = valEnd
+    }
+  } catch (e) {
+    // 字节解析失败，安全降级
+  }
+  return null
 }

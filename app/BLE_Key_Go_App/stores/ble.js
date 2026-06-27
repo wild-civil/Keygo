@@ -24,6 +24,7 @@ import {
   notifyBLECharacteristicValueChange,
   arrayBufferToString,
   tryParseJSON,
+  readSerialNumber,               // ★ v3.3: 读取设备序列号
 } from '@/utils/ble.js'
 
 export const useBleStore = defineStore('ble', {
@@ -40,6 +41,8 @@ export const useBleStore = defineStore('ble', {
     pinDefault: true,             // 配对 PIN 是否为出厂默认 123456
     pinChangeError: 0,            // PIN 修改错误码 (0=无,1=旧PIN错,2=格式错)
     customDeviceName: '',         // 设备自定义名称
+    serialNumber: '',             // ★ v3.3: 设备序列号（永久唯一，FF04 读取）
+    fingerprint: '',              // ★ v3.3: 扫描阶段指纹（MAC 后缀，来自广播包）
 
     // ★ v3.2 操作结果反馈（参考 v3.0 的 lr/lo 机制）
     lastOpResult: 0,              // 最近操作结果 0=idle 1=OK 2=失败
@@ -160,6 +163,13 @@ export const useBleStore = defineStore('ble', {
         this.connected = true
         this.lastDeviceId = deviceId
 
+        // ★ v3.3: 从扫描缓存中提取设备指纹
+        const cached = this.devices.find(d => d.deviceId === deviceId)
+        this.fingerprint = cached?.fingerprint || ''
+        if (this.fingerprint) {
+          console.log('[Store] 设备指纹（广播包）:', this.fingerprint)
+        }
+
         // ★ 重置 BLE Bonding 状态
         this.isEncrypted = false
         this.hasBondedDevices = false
@@ -216,6 +226,18 @@ export const useBleStore = defineStore('ble', {
               }
             }, 200)
           }
+        })
+
+        // ★ v3.3: 后台非阻塞读取设备序列号（不阻塞连接流程）
+        readSerialNumber(deviceId, 5000).then(sn => {
+          this.serialNumber = sn
+          console.log('[Store] 设备序列号（FF04）:', sn)
+          // 验证：与广播包指纹比对
+          if (this.fingerprint && sn.slice(-6).toUpperCase() !== this.fingerprint.toUpperCase()) {
+            console.warn('[Store] ⚠ 序列号指纹不匹配！广播:', this.fingerprint, '序列号:', sn.slice(-6))
+          }
+        }).catch(err => {
+          console.warn('[Store] 序列号读取失败（可能固件未升级 v3.3）:', err.message)
         })
 
         // ★ 启动手机端 RSSI 轮询
@@ -276,6 +298,8 @@ export const useBleStore = defineStore('ble', {
       this.pinDefault = true
       this.pinChangeError = 0
       this.customDeviceName = ''
+      this.serialNumber = ''              // ★ v3.3
+      this.fingerprint = ''               // ★ v3.3
       this.lastOpResult = 0
       this.lastOpType = 0
       this.deviceState = 'LOCKED'
@@ -396,8 +420,8 @@ export const useBleStore = defineStore('ble', {
      *   st=state r=rssi f=filteredRssi
      *   ul=unlockThreshold lk=lockThreshold hy=hystDb
      *   uc=unlockCountRequired lc=lockCountRequired mc=manualCooldown
-     *   dn=deviceName d2=customDeviceName pm=pairingMode
-     *   pd=pinDefault pce=pinChangeError
+     *   dn=deviceName d2=customDeviceName sn=serialNumber(MAC后缀)
+     *   pm=pairingMode pd=pinDefault pce=pinChangeError
      */
     _parseSingleStatus(jsonStr) {
       const data = tryParseJSON(jsonStr)
@@ -428,6 +452,7 @@ export const useBleStore = defineStore('ble', {
       if (data.pm !== undefined) this.pairingMode = data.pm === 1
       if (data.pd !== undefined) this.pinDefault = data.pd === 1
       if (data.pce !== undefined) this.pinChangeError = data.pce
+      if (data.sn !== undefined && data.sn !== '') this.fingerprint = data.sn  // ★ v3.3: 状态中的 MAC 后缀
     },
 
     // ==================== 命令 (v3.2) ====================
