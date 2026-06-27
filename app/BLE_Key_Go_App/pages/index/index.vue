@@ -3,16 +3,13 @@
     <!-- ★ 顶部状态卡片（继承 v3.0 设计：已连接/已配对 边框颜色区分） -->
     <view class="status-card" :class="{ connected: bleStore.connected, bonded: bleStore.hasBondedDevices }">
       <view class="status-icon">
-        <text v-if="bleStore.connected && bleStore.isEncrypted">🔗</text>
-        <text v-else-if="bleStore.connected && !bleStore.isEncrypted">⏳</text>
+        <text v-if="bleStore.connected">🔗</text>
         <text v-else>📡</text>
       </view>
       <view class="status-info">
         <text class="status-title">
-          {{ bleStore.connected
-              ? (bleStore.isEncrypted ? '已连接 · 已加密' : '已连接 · 等待加密...')
-              : '未连接' }}
-          <text v-if="bleStore.isEncrypted && bleStore.customDeviceName" class="custom-name-display">{{ bleStore.customDeviceName }}</text>
+          {{ bleStore.connected ? '已连接' : '未连接' }}
+          <text v-if="bleStore.connected && bleStore.customDeviceName" class="custom-name-display">{{ bleStore.customDeviceName }}</text>
         </text>
         <text class="status-sub" v-if="bleStore.connected">
           {{ bleStore.deviceName }}
@@ -45,33 +42,34 @@
       </view>
     </view>
 
-    <!-- ★ v3.2: 首次配对提示（继承 v3.0 提示卡片设计） -->
-    <view class="bind-hint" v-if="bleStore.connected && !bleStore.hasBondedDevices && !bleStore.isEncrypted">
+    <!-- ★ 首次配对提示 -->
+    <view class="bind-hint" v-if="bleStore.connected && !bleStore.hasBondedDevices">
       <text class="bind-hint-text">🔐 首次使用，等待手机弹出配对弹窗……</text>
-      <text class="takeover-sub">默认配对 PIN: <text class="highlight">123456</text>，配对后自动获得授权</text>
+      <text class="takeover-sub">默认配对 PIN: <text class="highlight">123456</text>，配对后获得授权</text>
     </view>
 
-    <!-- ★ v3.2: 已加密提示 + 默认 PIN 警告（继承 v3.0 warn 区块设计） -->
-    <view class="bind-hint paired" v-if="bleStore.connected && bleStore.isEncrypted">
-      <text class="bind-hint-text">🔒 BLE 加密连接已建立</text>
-      <text class="takeover-sub">所有命令通过加密通道发送，安全可靠</text>
-      <text class="takeover-sub" v-if="bleStore.pinDefault" style="color:#ffaa00;margin-top:8rpx;">
-        设备仍使用默认 PIN <text class="highlight">123456</text>，建议修改
-      </text>
-    </view>
-
-    <!-- ★ 配对模式提示（继承 v3.0 设计） -->
+    <!-- ★ 配对模式提示 -->
     <view class="bind-hint takeover-active" v-if="bleStore.pairingMode">
       <text class="bind-hint-text">🟢 配对模式已开启（30秒窗口）</text>
       <text class="takeover-sub">任何手机现在都可以配对连接此设备</text>
+    </view>
+
+    <!-- ★ 默认 PIN 警告 -->
+    <view class="default-pin-warn" v-if="bleStore.connected && bleStore.pinDefault">
+      <view class="warn-icon">⚠️</view>
+      <view class="warn-body">
+        <text class="warn-title">建议修改默认 PIN</text>
+        <text class="warn-desc">当前仍使用出厂 PIN <text class="highlight">123456</text>，安全性较低</text>
+      </view>
+      <text class="warn-arrow" @tap="showChangePinDialog">修改 ›</text>
     </view>
 
     <!-- 设备扫描区域 -->
     <view class="section" v-if="!bleStore.connected">
       <view class="section-header">
         <text class="section-title">附近设备</text>
-        <button class="btn-scan" @tap="handleScan" :disabled="bleStore.scanning">
-          {{ bleStore.scanning ? '扫描中...' : '扫描设备' }}
+        <button class="btn-scan" @tap="handleScanToggle">
+          {{ bleStore.scanning ? '停止扫描' : '扫描设备' }}
         </button>
       </view>
 
@@ -213,6 +211,22 @@ onShow(() => {
 
 // ==================== 扫描 & 连接 ====================
 
+async function handleScanToggle() {
+  if (bleStore.scanning) {
+    await bleStore.stopScanDevices()
+    return
+  }
+  try {
+    await bleStore.startScanDevices(12)
+    if (bleStore.devices.length === 0) {
+      toast.info('未发现设备，请确认 ESP32 已上电')
+    }
+  } catch {
+    toast.error('请先打开手机蓝牙')
+  }
+}
+
+// 保留旧名兼容 onShow 自动扫描调用
 async function handleScan() {
   if (bleStore.scanning) return
   try {
@@ -239,11 +253,17 @@ async function handleConnect(device) {
 }
 
 async function handleDisconnect() {
-  await bleStore.disconnect()
-  uni.removeStorageSync('ble_device_id')
-  bleStore.devices = []
-  _autoScanDone = false
-  toast.info('已断开连接')
+  uni.showLoading({ title: '断开中...', mask: true })
+  const ok = await bleStore.disconnect()
+  uni.hideLoading()
+  if (ok) {
+    uni.removeStorageSync('ble_device_id')
+    bleStore.devices = []
+    _autoScanDone = false
+    toast.info('已断开连接')
+  } else {
+    toast.error('断开失败，请重试')
+  }
 }
 
 // ==================== 车辆控制 ====================
@@ -674,6 +694,48 @@ async function onPinStep2() {
 
 .bind-hint.takeover-active .bind-hint-text {
   color: #00ff88;
+}
+
+/* ★ 默认 PIN 警告卡片 */
+.default-pin-warn {
+  background: linear-gradient(135deg, #332200, #2a1a00);
+  border: 1rpx solid #ff880044;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  margin-bottom: 30rpx;
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.warn-icon {
+  font-size: 36rpx;
+}
+
+.warn-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.warn-title {
+  font-size: 26rpx;
+  color: #ffaa00;
+  font-weight: 600;
+}
+
+.warn-desc {
+  font-size: 22rpx;
+  color: #8899aa;
+  line-height: 1.5;
+}
+
+.warn-arrow {
+  font-size: 28rpx;
+  color: #ffaa00;
+  font-weight: 600;
+  padding: 8rpx;
 }
 
 .bind-hint-text {

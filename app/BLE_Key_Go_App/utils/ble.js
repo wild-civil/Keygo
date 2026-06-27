@@ -123,17 +123,14 @@ export function startScan(onDeviceFound, timeout = 10) {
 
     uni.onBluetoothDeviceFound(_deviceFoundCallback)
 
-    // ★ v2.2: 开始扫描
-    //   注意：不指定 services 参数做系统级过滤，因为：
-    //     - NimBLE 的 128-bit UUID 广播在部分平台（Android 微信小程序）可能不被 services 过滤器识别
-    //     - 用设备名前缀 "KeyGo" 做软件层过滤同样精准，没有其他设备会叫 KeyGo-XXXXXX
-    //   如需启用 services 过滤，取消下面注释：
-    //     services: [BLE_CONFIG.serviceUUID],
+    // ★ v3.2 优化: services 硬件级过滤 + 高功率扫描，大幅加速设备发现
     uni.startBluetoothDevicesDiscovery({
+      services: [BLE_CONFIG.serviceUUID],
       allowDuplicatesKey: true,
       interval: 0,
+      powerLevel: 'high',
       success: () => {
-        console.log('[BLE] 扫描已开始 (no service filter, using name prefix: ' + BLE_CONFIG.deviceNamePrefix + ')')
+        console.log('[BLE] 扫描已开始 (services filter + high power)')
       },
       fail: (err) => {
         console.error('[BLE] 扫描失败', err)
@@ -243,12 +240,14 @@ export function connectDevice(deviceId) {
  * @param {string} deviceId 设备 ID
  */
 export function disconnectDevice(deviceId) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     uni.closeBLEConnection({
       deviceId,
       success: () => resolve(),
-      fail: () => resolve(),
-      complete: () => resolve()
+      fail: (err) => {
+        console.error('[BLE] 断开连接失败', deviceId, err)
+        reject(err)
+      }
     })
   })
 }

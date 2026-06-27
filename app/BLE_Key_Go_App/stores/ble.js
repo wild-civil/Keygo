@@ -110,12 +110,25 @@ export const useBleStore = defineStore('ble', {
 
       try { await initBluetooth() } catch {}
 
+      // ★ 防止快速切换导致的交叉污染：递增扫描序列号
+      this._scanSerial = (this._scanSerial || 0) + 1
+      const mySerial = this._scanSerial
+
       this.scanning = true
       this.devices = []
 
       try {
         const devices = await startScan(
-          (device) => { this.devices.push(device) },
+          (device) => {
+            // ★ 去重：deviceId 已存在则仅更新 RSSI，不重复添加
+            if (this._scanSerial !== mySerial) return
+            const idx = this.devices.findIndex(d => d.deviceId === device.deviceId)
+            if (idx >= 0) {
+              this.devices[idx] = { ...this.devices[idx], RSSI: Math.max(this.devices[idx].RSSI, device.RSSI) }
+            } else {
+              this.devices.push(device)
+            }
+          },
           timeout
         )
         if (this.connected || this._scanAborted) {
@@ -230,11 +243,29 @@ export const useBleStore = defineStore('ble', {
     async disconnect() {
       this._scanAborted = true
       this._stopRssiPolling()
+      const targetId = this.deviceId
+      if (targetId) {
+        try {
+          await disconnectDevice(targetId)
+          // ★ 等待系统确认断开（最多等待 1.5 秒）
+          await new Promise((resolve) => {
+            const done = () => { clearTimeout(timer); resolve() }
+            const timer = setTimeout(done, 1500)
+            const handler = (connected, devId) => {
+              if (devId === targetId && !connected) {
+                try { uni.offBLEConnectionStateChange(handler) } catch {}
+                done()
+              }
+            }
+            try { uni.onBLEConnectionStateChange(handler) } catch { done() }
+          })
+        } catch (err) {
+          console.error('[Store] 断开连接 API 调用失败', err)
+          return false
+        }
+      }
       try { uni.offBLEConnectionStateChange() } catch {}
       try { uni.offBLECharacteristicValueChange() } catch {}
-      if (this.deviceId) {
-        try { await disconnectDevice(this.deviceId) } catch {}
-      }
       this.connected = false
       this.deviceId = ''
       this.deviceName = ''
@@ -253,6 +284,7 @@ export const useBleStore = defineStore('ble', {
 
       this._coolingDown = true
       setTimeout(() => { this._coolingDown = false }, 500)
+      return true
     },
 
     async tryAutoConnect() {

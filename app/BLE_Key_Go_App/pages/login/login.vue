@@ -4,7 +4,7 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">BLE KeyGo</text>
-      <text class="login-subtitle">v3.2 · BLE Bonding 业界标准</text>
+      <text class="login-subtitle">使用帮助 · 快速指南</text>
     </view>
 
     <!-- 快速指南卡片 -->

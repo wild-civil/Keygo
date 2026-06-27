@@ -27,7 +27,7 @@
     {
       "path": "pages/login/login",
       "style": {
-        "navigationBarTitleText": "我的",
+        "navigationBarTitleText": "帮助",
         "navigationBarBackgroundColor": "#1a1a2e",
         "navigationBarTextStyle": "white"
       }
@@ -60,7 +60,7 @@
       },
       {
         "pagePath": "pages/login/login",
-        "text": "👤 我的"
+        "text": "❓ 帮助"
       }
     ]
   }
