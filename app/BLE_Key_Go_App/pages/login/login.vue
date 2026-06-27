@@ -87,17 +87,16 @@
 </template>
 
 <script setup>
-// v3.2: 纯信息展示页，无需用户登录
+// v3.2: 帮助信息展示页
 </script>
 
 <style scoped>
 .login-container {
-  min-height: 100vh;
   background: linear-gradient(180deg, #0a0a1a 0%, #1a1a2e 50%, #12122a 100%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 60rpx 40rpx;
+  padding: 60rpx 40rpx 30rpx;
 }
 
 /* ---- Header ---- */

@@ -140,8 +140,7 @@ async function setRSSI(value) {
 
 <style scoped>
 .page-control {
-  padding: 30rpx;
-  padding-bottom: 130rpx;
+  padding: 30rpx 30rpx 30rpx;
 }
 
 /* ★ 连接警告（继承 v3.0 设计） */

@@ -174,7 +174,6 @@ import { reactive } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { toast } from '@/utils/toast.js'
-
 const bleStore = useBleStore()
 let _autoScanDone = false
 
@@ -401,9 +400,7 @@ async function onPinStep2() {
 
 <style scoped>
 .page-index {
-  padding: 30rpx;
-  padding-bottom: 130rpx;
-  min-height: 100vh;
+  padding: 30rpx 30rpx 30rpx;
 }
 
 /* ★ 状态卡片（继承 v3.0 设计） */

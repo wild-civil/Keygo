@@ -206,8 +206,7 @@ async function handleSubmit() {
 
 <style scoped>
 .page-config {
-  padding: 30rpx;
-  padding-bottom: 130rpx;  /* ★ 为自定义 tabBar 留空间 */
+  padding: 30rpx 30rpx 30rpx;
 }
 
 .conn-warning {
