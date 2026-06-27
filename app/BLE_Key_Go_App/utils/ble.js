@@ -204,14 +204,12 @@ function clearTimeoutSafe() {
  */
 export function connectDevice(deviceId) {
   return new Promise((resolve, reject) => {
-    // 连接前先停止扫描
     stopScan().then(() => {
       uni.createBLEConnection({
         deviceId,
         timeout: 10000,
         success: () => {
           console.log('[BLE] 连接成功', deviceId)
-          // 请求更大的 MTU 以支持长 JSON 数据
           setTimeout(() => {
             uni.setBLEMTU({
               deviceId,
@@ -222,9 +220,7 @@ export function connectDevice(deviceId) {
               fail: (err) => {
                 console.warn('[BLE] MTU 设置失败（可能使用默认20字节）:', err.errMsg)
               },
-              complete: () => {
-                resolve()
-              }
+              complete: () => resolve()
             })
           }, 500)
         },
@@ -349,7 +345,10 @@ export function readBLECharacteristicValue(deviceId, serviceId, characteristicId
       success: (res) => {
         resolve(res)
       },
-      fail: (err) => reject(err)
+      fail: (err) => {
+        // ★ uni-app 错误对象格式不统一，包装成标准 Error
+        reject(new Error(err?.errMsg || err?.message || JSON.stringify(err)))
+      }
     })
   })
 }
@@ -454,6 +453,7 @@ export function sendCommand(deviceId, command) {
 export function readSerialNumber(deviceId, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     let resolved = false
+
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true
@@ -476,18 +476,48 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
       resolve(sn)
     }
 
+    /**
+     * ★ 读取前先显式做一次 GATT 特征发现，并打印设备实际暴露的特征列表。
+     *    用于诊断"property not support"到底是因为固件没 FF04，还是手机端没发现。
+     */
+    const doRead = () => {
+      readBLECharacteristicValue(deviceId, BLE_CONFIG.serviceUUID, BLE_CONFIG.serialCharUUID)
+        .catch((err) => {
+          if (!resolved) {
+            resolved = true
+            clearTimeout(timer)
+            try { uni.offBLECharacteristicValueChange(handler) } catch {}
+            reject(new Error(err?.errMsg || err?.message || '读序列号失败'))
+          }
+        })
+    }
+
     uni.onBLECharacteristicValueChange(handler)
 
-    // 触发读取
-    readBLECharacteristicValue(deviceId, BLE_CONFIG.serviceUUID, BLE_CONFIG.serialCharUUID)
-      .catch((err) => {
-        if (!resolved) {
-          resolved = true
-          clearTimeout(timer)
-          try { uni.offBLECharacteristicValueChange(handler) } catch {}
-          reject(err)
-        }
-      })
+    // ★ 先获取设备特征列表，诊断性打印
+    getBLEDeviceServices(deviceId).then(services => {
+      console.log('[Serial] 服务发现完成:', services.length, '个服务')
+      return getBLEDeviceCharacteristics(deviceId, BLE_CONFIG.serviceUUID)
+    }).then(chars => {
+      const uuidList = chars.map(c => c.uuid).join(', ')
+      console.log('[Serial] FF00 特征值列表:', uuidList)
+      // 检查 FF04 是否在列表中
+      const hasFF04 = chars.some(c => c.uuid.toUpperCase() === BLE_CONFIG.serialCharUUID.toUpperCase())
+      if (hasFF04) {
+        console.log('[Serial] 已发现 FF04，准备读取...')
+        doRead()
+      } else {
+        // ★ FF04 不在特征列表中 → 固件确实没暴露，或版本不对
+        resolved = true
+        clearTimeout(timer)
+        try { uni.offBLECharacteristicValueChange(handler) } catch {}
+        reject(new Error(`FF04 not in characteristic list. Found: [${uuidList}]`))
+      }
+    }).catch(err => {
+      // 发现失败，仍尝试读取（降级兜底）
+      console.warn('[Serial] 特征发现失败，直接尝试读取:', err?.errMsg || err?.message)
+      doRead()
+    })
   })
 }
 

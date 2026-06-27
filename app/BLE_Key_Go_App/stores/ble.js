@@ -237,7 +237,15 @@ export const useBleStore = defineStore('ble', {
             console.warn('[Store] ⚠ 序列号指纹不匹配！广播:', this.fingerprint, '序列号:', sn.slice(-6))
           }
         }).catch(err => {
-          console.warn('[Store] 序列号读取失败（可能固件未升级 v3.3）:', err.message)
+          const msg = err?.message || String(err)
+          // ★ 根据错误类型分类处理
+          if (/not support|no characteristic|FF04 not in/i.test(msg)) {
+            console.log('[Store] 固件不支持 FF04 序列号（需升级 v3.3）:', msg)
+          } else if (/timeout/i.test(msg)) {
+            console.log('[Store] 序列号读取超时:', msg)
+          } else {
+            console.warn('[Store] 序列号读取失败:', msg)
+          }
         })
 
         // ★ 启动手机端 RSSI 轮询
