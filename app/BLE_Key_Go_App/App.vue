@@ -6,15 +6,17 @@
 </template>
 
 <script setup>
-import { onLaunch } from '@dcloudio/uni-app'
+import { onLaunch, onShow, onHide } from '@dcloudio/uni-app'
 import CustomTabBar from '@/components/CustomTabBar.vue'
 import { useThemeStore } from '@/stores/theme.js'
+
+const themeStore = useThemeStore()
 
 onLaunch(() => {
   console.log('[BLE-KeyGo] App launched')
 
-  // ★ 初始化主题（读取持久化 → 检测系统主题 → 监听变化）
-  useThemeStore().init()
+  // ★ 初始化主题（读取持久化 → 检测系统主题 → 监听变化 → 启动 auto 轮询）
+  themeStore.init()
 
   // 初始化蓝牙适配器
   uni.openBluetoothAdapter({
@@ -25,6 +27,16 @@ onLaunch(() => {
       console.error('[BLE] 蓝牙适配器初始化失败', err)
     }
   })
+})
+
+// ★ App 回到前台 → 立刻重新检测系统主题（覆盖用户在系统设置切换主题的场景）
+onShow(() => {
+  themeStore.onAppShow()
+})
+
+// ★ App 进入后台 → 停止轮询省电
+onHide(() => {
+  themeStore.onAppHide()
 })
 </script>
 

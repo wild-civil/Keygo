@@ -17,14 +17,37 @@ const STORAGE_KEY = 'app_theme_mode'
 
 function getSystemTheme() {
   try {
+    // 1. 微信小程序原生 API（最可靠）
+    // #ifdef MP-WEIXIN
+    if (typeof wx !== 'undefined' && wx.getSystemInfoSync) {
+      const wxInfo = wx.getSystemInfoSync()
+      if (wxInfo.theme) {
+        console.log('[Theme] wx.getSystemInfoSync 检测:', wxInfo.theme)
+        return wxInfo.theme
+      }
+    }
+    // #endif
+
+    // 2. uni-app 通用 API
     const info = uni.getSystemInfoSync()
-    // ★ info.theme 在微信基础库≥2.16 / 部分真机可用，开发者工具可能为 undefined
-    // 返回 'light' 当无法检测时，因为绝大多数情况下亮色是默认，避免暗色误判
-    const t = (info.theme || 'light')
-    console.log('[Theme] 系统检测 theme =', t, '(raw:', info.theme, ')')
-    return t
-  } catch {
-    console.log('[Theme] getSystemInfoSync 异常，降级为 light')
+
+    // ★ uni-app 不同平台字段名不同：
+    //    - iOS/部分版本: info.theme
+    //    - Android:       info.osTheme  (系统主题)
+    //    - 宿主(微信等):    info.hostTheme
+    // 优先级: theme > osTheme > hostTheme
+    const t = info.theme || info.osTheme || info.hostTheme
+    console.log('[Theme] 系统检测 theme=', info.theme,
+      '| osTheme=', info.osTheme,
+      '| hostTheme=', info.hostTheme,
+      '→ 使用:', t)
+    if (t) return t
+
+    // 全部不可用
+    console.warn('[Theme] ⚠️ 所有途径无法检测系统主题，降级为 light')
+    return 'light'
+  } catch (e) {
+    console.error('[Theme] getSystemInfoSync 异常:', e)
     return 'light'
   }
 }
@@ -33,6 +56,10 @@ export const useThemeStore = defineStore('theme', () => {
   // ---- state ----
   const mode = ref('auto')   // 'light' | 'dark' | 'auto'，默认跟随系统
   const systemTheme = ref('dark')
+
+  // ★ auto 模式轮询定时器（用于实时检测系统主题变化）
+  let pollTimer = null
+  const POLL_INTERVAL = 3000  // 每 3 秒检测一次
 
   // ---- getters ----
   const effective = computed(() => {
@@ -64,11 +91,73 @@ export const useThemeStore = defineStore('theme', () => {
     } catch { /* ignore */ }
   }
 
+  // ============================================================
+  //  ★ auto 模式轮询 — 实时跟随系统主题变化
+  //  原理：uni.onThemeChange() 仅小程序有效，独立 App 需要轮询 + onShow 双保险。
+  //     - App 在前台且 mode='auto' → 每 3s 读 osTheme
+  //     - App 进入后台 → 停止轮询省电
+  //     - App 回到前台 (onShow) → 立刻检测 + 恢复轮询
+  // ============================================================
+
+  function startPoll() {
+    stopPoll()
+    // ★ 只在 auto 模式下启动轮询
+    if (mode.value !== 'auto') return
+    console.log('[Theme] 启动 auto 轮询（每', POLL_INTERVAL, 'ms）')
+    pollTimer = setInterval(() => {
+      const latest = getSystemTheme()
+      if (latest !== systemTheme.value) {
+        console.log('[Theme] 轮询检测到系统主题变化:', systemTheme.value, '→', latest)
+        systemTheme.value = latest
+        applyNavBar()
+      }
+    }, POLL_INTERVAL)
+  }
+
+  function stopPoll() {
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
+      console.log('[Theme] 停止 auto 轮询')
+    }
+  }
+
+  /** App 回到前台 → 立刻重新检测系统主题（覆盖"切出去换主题再回来"的场景） */
+  function onAppShow() {
+    console.log('[Theme] App 回到前台，重新检测系统主题')
+    const latest = getSystemTheme()
+    if (latest !== systemTheme.value) {
+      console.log('[Theme] onShow 检测到系统主题变化:', systemTheme.value, '→', latest)
+      systemTheme.value = latest
+      if (mode.value === 'auto') {
+        applyNavBar()
+      }
+    }
+    // 恢复轮询（不管有没有变化都重新启动）
+    startPoll()
+  }
+
+  /** App 进入后台 → 停止轮询省电 */
+  function onAppHide() {
+    console.log('[Theme] App 进入后台，停止轮询')
+    stopPoll()
+  }
+
   /** 切换模式并持久化 */
   function setMode(newMode) {
     if (!['light', 'dark', 'auto'].includes(newMode)) return
     mode.value = newMode
     uni.setStorageSync(STORAGE_KEY, newMode)
+
+    // ★ 切换到 auto → 立刻重新探测系统主题 + 启动轮询
+    if (newMode === 'auto') {
+      systemTheme.value = getSystemTheme()
+      startPoll()
+    } else {
+      // ★ 切换到 light/dark → 停止轮询省电
+      stopPoll()
+    }
+
     applyNavBar()
     uni.$emit('themeChange', { mode: newMode })
   }
@@ -96,10 +185,11 @@ export const useThemeStore = defineStore('theme', () => {
     // 3. 应用导航栏
     applyNavBar()
 
-    // 4. 监听系统主题变化
+    // 4. 监听系统主题变化（小程序平台有效）
     try {
       uni.onThemeChange((res) => {
-        const newTheme = res.theme || 'light'
+        // ★ 优先用事件携带的值，不可用时重新探测
+        const newTheme = res.theme || getSystemTheme()
         console.log('[Theme] 系统主题变更:', newTheme)
         systemTheme.value = newTheme
         if (mode.value === 'auto') {
@@ -107,6 +197,9 @@ export const useThemeStore = defineStore('theme', () => {
         }
       })
     } catch { /* ignore */ }
+
+    // 5. ★ 启动 auto 轮询（独立 App 无 onThemeChange，靠轮询检测系统主题变化）
+    startPoll()
   }
 
   return {
@@ -114,5 +207,6 @@ export const useThemeStore = defineStore('theme', () => {
     isDark, isLight, themeClass,
     modeLabel,
     init, setMode, cycleMode, applyNavBar,
+    onAppShow, onAppHide,
   }
 })
