@@ -82,6 +82,7 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
@@ -89,7 +90,7 @@ import { sendConfig } from '@/utils/ble.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
-const themeClass = themeStore.themeClass
+const themeClass = computed(() => themeStore.themeClass)
 
 function goToIndex() {
   uni.switchTab({ url: '/pages/index/index' })

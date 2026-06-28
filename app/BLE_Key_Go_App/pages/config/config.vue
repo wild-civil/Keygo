@@ -125,7 +125,7 @@ import { toast } from '@/utils/toast.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
-const themeClass = themeStore.themeClass
+const themeClass = computed(() => themeStore.themeClass)
 
 // ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
 const sliderTrackColor = computed(() => themeStore.isDark ? '#2a2a5e' : '#e0e4e8')

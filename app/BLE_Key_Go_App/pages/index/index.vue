@@ -168,14 +168,14 @@
 
 
 <script setup>
-import { reactive } from 'vue'
+import { reactive, computed } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
-const themeClass = themeStore.themeClass
+const themeClass = computed(() => themeStore.themeClass)
 let _autoScanDone = false
 
 // ★ 通用 pwModal

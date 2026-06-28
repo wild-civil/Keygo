@@ -47,7 +47,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
@@ -58,7 +58,7 @@ import LoginPage from '@/pages/login/login.vue'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
-const themeClass = themeStore.themeClass
+const themeClass = computed(() => themeStore.themeClass)
 
 const tabs = [
   { icon: '📡', name: '连接', path: '/pages/index/index' },
@@ -112,10 +112,17 @@ onShow(async () => {
 .tab-swiper {
   flex: 1;
   width: 100%;
+  background: var(--bg-page);
+}
+
+/* ★ swiper-item 原生组件有默认白色背景，需要显式覆盖 */
+:deep(swiper-item) {
+  background: var(--bg-page);
 }
 
 .swiper-scroll {
   height: 100%;
+  background: var(--bg-page);
 }
 
 /* ★ 自定义底部 tab 栏 */

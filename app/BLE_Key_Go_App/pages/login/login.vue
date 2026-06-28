@@ -107,11 +107,11 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useThemeStore } from '@/stores/theme.js'
 
 const themeStore = useThemeStore()
-const themeClass = themeStore.themeClass
+const themeClass = computed(() => themeStore.themeClass)
 
 const themeOptions = ref([
   { value: 'light', label: '浅色', icon: '☀️' },

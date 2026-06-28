@@ -18,9 +18,14 @@ const STORAGE_KEY = 'app_theme_mode'
 function getSystemTheme() {
   try {
     const info = uni.getSystemInfoSync()
-    return info.theme || 'dark'
+    // ★ info.theme 在微信基础库≥2.16 / 部分真机可用，开发者工具可能为 undefined
+    // 返回 'light' 当无法检测时，因为绝大多数情况下亮色是默认，避免暗色误判
+    const t = (info.theme || 'light')
+    console.log('[Theme] 系统检测 theme =', t, '(raw:', info.theme, ')')
+    return t
   } catch {
-    return 'dark'
+    console.log('[Theme] getSystemInfoSync 异常，降级为 light')
+    return 'light'
   }
 }
 
@@ -94,7 +99,9 @@ export const useThemeStore = defineStore('theme', () => {
     // 4. 监听系统主题变化
     try {
       uni.onThemeChange((res) => {
-        systemTheme.value = res.theme || 'dark'
+        const newTheme = res.theme || 'light'
+        console.log('[Theme] 系统主题变更:', newTheme)
+        systemTheme.value = newTheme
         if (mode.value === 'auto') {
           applyNavBar()
         }
