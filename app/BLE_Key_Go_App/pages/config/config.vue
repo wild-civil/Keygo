@@ -1,5 +1,5 @@
 <template>
-  <view class="page-config">
+  <view class="page-config" :class="themeClass">
     <!-- 连接状态提示 -->
     <view class="conn-warning" v-if="!bleStore.connected">
       <text>⚠️ 请先在「连接」页面连接设备</text>
@@ -16,7 +16,8 @@
         </view>
         <view class="config-desc">RSSI 高于此值持续 {{ localConfig.uc }} 次 → 触发解锁</view>
         <slider class="config-slider" :min="-90" :max="-20" :step="1"
-          :value="localConfig.unlock" @change="onUnlockChange" activeColor="#00d4ff" backgroundColor="#2a2a5e"
+          :value="localConfig.unlock" @change="onUnlockChange"
+          :activeColor="sliderActiveGreen" :backgroundColor="sliderTrackColor"
           block-size="24" />
         <view class="slider-labels">
           <text>-90</text>
@@ -32,7 +33,8 @@
         </view>
         <view class="config-desc">RSSI 低于此值持续 {{ localConfig.lc }} 次 → 触发锁车</view>
         <slider class="config-slider" :min="-90" :max="-20" :step="1"
-          :value="localConfig.lock" @change="onLockChange" activeColor="#ff8800" backgroundColor="#2a2a5e"
+          :value="localConfig.lock" @change="onLockChange"
+          :activeColor="sliderActiveOrange" :backgroundColor="sliderTrackColor"
           block-size="24" />
         <view class="slider-labels">
           <text>-90</text>
@@ -43,7 +45,6 @@
       <view class="divider"></view>
       <view class="section-title">确认次数设置</view>
 
-      <!-- 解锁确认次数 -->
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">解锁确认次数</text>
@@ -57,7 +58,6 @@
         </view>
       </view>
 
-      <!-- 锁车确认次数 -->
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">锁车确认次数</text>
@@ -74,7 +74,6 @@
       <view class="divider"></view>
       <view class="section-title">其他设置</view>
 
-      <!-- RSSI 采样间隔 -->
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">RSSI 采样间隔</text>
@@ -82,7 +81,8 @@
         </view>
         <view class="config-desc">设备端 RSSI 采样频率</view>
         <slider class="config-slider" :min="100" :max="2000" :step="100"
-          :value="localConfig.interval" @change="onIntervalChange" activeColor="#00ff88" backgroundColor="#2a2a5e"
+          :value="localConfig.interval" @change="onIntervalChange"
+          :activeColor="sliderActiveGreen" :backgroundColor="sliderTrackColor"
           block-size="24" />
         <view class="slider-labels">
           <text>100ms</text>
@@ -90,7 +90,6 @@
         </view>
       </view>
 
-      <!-- 断连自动锁车延时 -->
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">断连自动锁车延时</text>
@@ -98,7 +97,8 @@
         </view>
         <view class="config-desc">蓝牙断开连接后，延迟多久自动锁车（0=不自动锁车）</view>
         <slider class="config-slider" :min="0" :max="30000" :step="1000"
-          :value="localConfig.dlock" @change="onDlockChange" activeColor="#ff4488" backgroundColor="#2a2a5e"
+          :value="localConfig.dlock" @change="onDlockChange"
+          :activeColor="sliderActivePink" :backgroundColor="sliderTrackColor"
           block-size="24" />
         <view class="slider-labels">
           <text>0</text>
@@ -118,13 +118,21 @@
 </template>
 
 <script setup>
-import { reactive, watch, onMounted } from 'vue'
+import { reactive, computed, watch, onMounted } from 'vue'
 import { useBleStore } from '@/stores/ble.js'
+import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 
 const bleStore = useBleStore()
+const themeStore = useThemeStore()
+const themeClass = themeStore.themeClass
 
-// 本地编辑副本
+// ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
+const sliderTrackColor = computed(() => themeStore.isDark ? '#2a2a5e' : '#e0e4e8')
+const sliderActiveGreen = computed(() => themeStore.isDark ? '#00ff88' : '#00aa55')
+const sliderActiveOrange = computed(() => themeStore.isDark ? '#ff8800' : '#cc6600')
+const sliderActivePink = computed(() => themeStore.isDark ? '#ff4488' : '#cc3366')
+
 const localConfig = reactive({
   unlock: -45,
   lock: -65,
@@ -134,57 +142,34 @@ const localConfig = reactive({
   dlock: 5000,
 })
 
-// 同步 store 中的配置到本地副本
 function syncFromStore() {
   localConfig.unlock = bleStore.unlockThreshold
   localConfig.lock = bleStore.lockThreshold
   localConfig.uc = bleStore.unlockCountRequired
   localConfig.lc = bleStore.lockCountRequired
-  localConfig.interval = 500  // 默认值，store 中暂未存储
+  localConfig.interval = 500
   localConfig.dlock = bleStore.disconnectLockDelayMs
 }
 
-onMounted(() => {
-  syncFromStore()
-})
+onMounted(() => { syncFromStore() })
 
-// 监听 store 变化（设备通过 Notify 上报配置变更时同步）
 watch(() => bleStore.unlockThreshold, () => { localConfig.unlock = bleStore.unlockThreshold })
 watch(() => bleStore.lockThreshold, () => { localConfig.lock = bleStore.lockThreshold })
 watch(() => bleStore.unlockCountRequired, () => { localConfig.uc = bleStore.unlockCountRequired })
 watch(() => bleStore.lockCountRequired, () => { localConfig.lc = bleStore.lockCountRequired })
 
-function onUnlockChange(e) {
-  localConfig.unlock = e.detail.value
-}
-
-function onLockChange(e) {
-  localConfig.lock = e.detail.value
-}
-
-function onUcChange(delta) {
-  localConfig.uc = Math.max(1, Math.min(20, localConfig.uc + delta))
-}
-
-function onLcChange(delta) {
-  localConfig.lc = Math.max(1, Math.min(30, localConfig.lc + delta))
-}
-
-function onIntervalChange(e) {
-  localConfig.interval = e.detail.value
-}
-
-function onDlockChange(e) {
-  localConfig.dlock = e.detail.value
-}
+function onUnlockChange(e) { localConfig.unlock = e.detail.value }
+function onLockChange(e) { localConfig.lock = e.detail.value }
+function onUcChange(delta) { localConfig.uc = Math.max(1, Math.min(20, localConfig.uc + delta)) }
+function onLcChange(delta) { localConfig.lc = Math.max(1, Math.min(30, localConfig.lc + delta)) }
+function onIntervalChange(e) { localConfig.interval = e.detail.value }
+function onDlockChange(e) { localConfig.dlock = e.detail.value }
 
 async function handleSubmit() {
-  // 验证解锁阈值 > 锁车阈值
   if (localConfig.unlock <= localConfig.lock) {
     toast.error('解锁阈值必须大于锁车阈值')
     return
   }
-
   uni.showLoading({ title: '下发配置中...' })
   try {
     await bleStore.updateConfig({
@@ -206,35 +191,39 @@ async function handleSubmit() {
 
 <style scoped>
 .page-config {
+  min-height: 100vh;
+  background: var(--bg-page);
+  color: var(--text-primary);
   padding: 30rpx 30rpx 30rpx;
+  transition: background-color 0.3s, color 0.3s;
 }
 
 .conn-warning {
-  background: #332200;
-  border: 1rpx solid #664400;
+  background: var(--bg-warning);
+  border: 1rpx solid var(--border-warning);
   border-radius: 16rpx;
   padding: 24rpx;
   text-align: center;
-  color: #ffaa00;
+  color: var(--accent-orange);
   font-size: 26rpx;
 }
 
 .section-title {
   font-size: 28rpx;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
   margin-bottom: 20rpx;
   margin-top: 10rpx;
 }
 
 .divider {
   height: 1rpx;
-  background: #2a2a5e;
+  background: var(--border);
   margin: 30rpx 0;
 }
 
 .config-item {
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-bottom: 20rpx;
@@ -249,34 +238,32 @@ async function handleSubmit() {
 
 .config-label {
   font-size: 26rpx;
-  color: #e0e0e0;
+  color: var(--config-label);
 }
 
 .config-value {
   font-size: 26rpx;
   font-weight: 600;
-  color: #00d4ff;
+  color: var(--accent);
 }
 
 .config-desc {
   font-size: 22rpx;
-  color: #556677;
+  color: var(--text-muted);
   margin-bottom: 16rpx;
 }
 
-.config-slider {
-  margin: 0;
-}
+.config-slider { margin: 0; }
 
 .slider-labels {
   display: flex;
   justify-content: space-between;
   font-size: 18rpx;
-  color: #556677;
+  color: var(--text-muted);
   margin-top: -8rpx;
 }
 
-/* 步进器 */
+/* ===== 步进器 ===== */
 .stepper {
   display: flex;
   align-items: center;
@@ -287,8 +274,8 @@ async function handleSubmit() {
 .step-btn {
   width: 64rpx;
   height: 64rpx;
-  background: #2a2a5e;
-  color: #00d4ff;
+  background: var(--border);
+  color: var(--accent);
   font-size: 32rpx;
   border-radius: 12rpx;
   display: flex;
@@ -301,13 +288,13 @@ async function handleSubmit() {
 .step-value {
   font-size: 36rpx;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-primary);
   margin: 0 40rpx;
   min-width: 60rpx;
   text-align: center;
 }
 
-/* 提交按钮 */
+/* ===== 提交按钮 ===== */
 .submit-section {
   margin-top: 40rpx;
   display: flex;
@@ -317,7 +304,7 @@ async function handleSubmit() {
 
 .btn-submit {
   width: 100%;
-  background: linear-gradient(135deg, #00d4ff 0%, #0088cc 100%);
+  background: var(--gradient-accent);
   color: #fff;
   font-size: 30rpx;
   font-weight: 600;
@@ -325,17 +312,12 @@ async function handleSubmit() {
   border-radius: 16rpx;
 }
 
-.btn-submit:active {
-  opacity: 0.8;
-}
-
-.btn-submit[disabled] {
-  opacity: 0.3;
-}
+.btn-submit:active { opacity: 0.8; }
+.btn-submit[disabled] { opacity: 0.3; }
 
 .submit-hint {
   font-size: 22rpx;
-  color: #556677;
+  color: var(--text-muted);
   margin-top: 12rpx;
 }
 </style>

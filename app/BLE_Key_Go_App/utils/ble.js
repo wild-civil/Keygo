@@ -505,7 +505,8 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
       const hasFF04 = chars.some(c => c.uuid.toUpperCase() === BLE_CONFIG.serialCharUUID.toUpperCase())
       if (hasFF04) {
         console.log('[Serial] 已发现 FF04，准备读取...')
-        doRead()
+        // ★ 小幅延迟 150ms 再读取，让 GATT 数据库缓存就绪，防止 property not support
+        setTimeout(() => doRead(), 150)
       } else {
         // ★ FF04 不在特征列表中 → 固件确实没暴露，或版本不对
         resolved = true

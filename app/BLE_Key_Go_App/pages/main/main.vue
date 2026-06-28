@@ -1,5 +1,5 @@
 <template>
-  <view class="main-root">
+  <view class="main-root" :class="themeClass">
     <!-- ★ swiper 承载 4 个 tab 页面，支持平滑滑动切换 -->
     <swiper
       class="tab-swiper"
@@ -50,12 +50,15 @@
 import { ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
+import { useThemeStore } from '@/stores/theme.js'
 import IndexPage from '@/pages/index/index.vue'
 import ControlPage from '@/pages/control/control.vue'
 import ConfigPage from '@/pages/config/config.vue'
 import LoginPage from '@/pages/login/login.vue'
 
 const bleStore = useBleStore()
+const themeStore = useThemeStore()
+const themeClass = themeStore.themeClass
 
 const tabs = [
   { icon: '📡', name: '连接', path: '/pages/index/index' },
@@ -74,7 +77,7 @@ function onSwiperChange(e) {
   tabIndex.value = e.detail.current
 }
 
-// ★ 页面首次显示时的自动扫描（原 index.vue 的 onShow 逻辑，现由 main.vue 统一管理）
+// ★ 首次显示时的自动扫描
 let _autoScanDone = false
 onShow(async () => {
   if (bleStore.connected) return
@@ -101,8 +104,9 @@ onShow(async () => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #0f0f1a;
+  background: var(--bg-page);
   overflow: hidden;
+  transition: background 0.3s;
 }
 
 .tab-swiper {
@@ -118,10 +122,11 @@ onShow(async () => {
 .custom-tabbar {
   display: flex;
   height: 100rpx;
-  background: #12122a;
-  border-top: 1rpx solid #1e2a3a;
+  background: var(--bg-tabbar);
+  border-top: 1rpx solid var(--border-light);
   padding-bottom: env(safe-area-inset-bottom);
   flex-shrink: 0;
+  transition: background 0.3s, border-color 0.3s;
 }
 
 .tabbar-item {
@@ -146,6 +151,6 @@ onShow(async () => {
 
 .tabbar-text {
   font-size: 20rpx;
-  color: #00d4ff;
+  color: var(--accent);
 }
 </style>

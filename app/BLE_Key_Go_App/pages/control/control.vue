@@ -1,17 +1,17 @@
 <template>
-  <view class="page-control">
-    <!-- ★ 连接状态提示（继承 v3.0 多状态判断） -->
+  <view class="page-control" :class="themeClass">
+    <!-- ★ 连接状态提示 -->
     <view class="conn-warning" v-if="!bleStore.connected">
       <text>⚠️ 请先在「连接」页面连接设备</text>
     </view>
     <view class="conn-warning" v-else-if="!bleStore.isEncrypted">
       <text>⏳ 正在建立加密连接，请稍候...</text>
-      <text style="font-size:22rpx;color:#8899aa;margin-top:8rpx;">首次使用需在系统弹出的配对框中输入 PIN</text>
+      <text style="font-size:22rpx;color:var(--text-tertiary);margin-top:8rpx;">首次使用需在系统弹出的配对框中输入 PIN</text>
       <button class="btn-go-link" @tap="goToIndex">前往连接页</button>
     </view>
 
     <template v-else>
-      <!-- ★ 车辆状态大卡（继承 v3.0 设计） -->
+      <!-- ★ 车辆状态大卡 -->
       <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
         <view class="car-icon">🚗</view>
         <view class="car-status">
@@ -21,7 +21,7 @@
         </view>
       </view>
 
-      <!-- ★ RSSI 实时信息（继承 v3.0 四格设计） -->
+      <!-- ★ RSSI 实时信息 -->
       <view class="info-grid">
         <view class="info-item">
           <text class="info-label">原始 RSSI</text>
@@ -41,7 +41,7 @@
         </view>
       </view>
 
-      <!-- ★ 主要控制按钮（继承 v3.0 大按钮设计） -->
+      <!-- ★ 主要控制按钮 -->
       <view class="main-actions">
         <button class="ctrl-btn unlock" @tap="handleUnlock">
           <view class="ctrl-btn-icon">🔓</view>
@@ -66,7 +66,7 @@
         </button>
       </view>
 
-      <!-- ★ 手动 RSSI 模拟（继承 v3.0，用于无原生 RSSI 的 ESP32） -->
+      <!-- ★ 手动 RSSI 模拟 -->
       <view class="rssi-sim-section">
         <view class="rssi-sim-title">📶 手动 RSSI 模拟</view>
         <view class="rssi-sim-hint">ESP32 无原生 RSSI 时，手动注入信号值测试逻辑</view>
@@ -83,10 +83,13 @@
 
 <script setup>
 import { useBleStore } from '@/stores/ble.js'
+import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 import { sendConfig } from '@/utils/ble.js'
 
 const bleStore = useBleStore()
+const themeStore = useThemeStore()
+const themeClass = themeStore.themeClass
 
 function goToIndex() {
   uni.switchTab({ url: '/pages/index/index' })
@@ -140,17 +143,21 @@ async function setRSSI(value) {
 
 <style scoped>
 .page-control {
+  min-height: 100vh;
+  background: var(--bg-page);
+  color: var(--text-primary);
   padding: 30rpx 30rpx 30rpx;
+  transition: background-color 0.3s, color 0.3s;
 }
 
-/* ★ 连接警告（继承 v3.0 设计） */
+/* ===== 连接警告 ===== */
 .conn-warning {
-  background: #332200;
-  border: 1rpx solid #664400;
+  background: var(--bg-warning);
+  border: 1rpx solid var(--border-warning);
   border-radius: 16rpx;
   padding: 24rpx;
   text-align: center;
-  color: #ffaa00;
+  color: var(--accent-orange);
   font-size: 26rpx;
   display: flex;
   flex-direction: column;
@@ -163,7 +170,7 @@ async function setRSSI(value) {
   width: 240rpx;
   height: 60rpx;
   border-radius: 12rpx;
-  background: linear-gradient(135deg, #00d4ff 0%, #0088cc 100%);
+  background: var(--gradient-accent);
   color: #fff;
   font-size: 24rpx;
   font-weight: 600;
@@ -172,49 +179,46 @@ async function setRSSI(value) {
   justify-content: center;
 }
 
-/* ★ 车辆状态卡片（继承 v3.0 设计） */
+/* ===== 车辆状态卡片 ===== */
 .car-card {
-  background: linear-gradient(135deg, #1a1a3e 0%, #16213e 100%);
+  background: var(--gradient-card);
   border-radius: 24rpx;
   padding: 50rpx;
   text-align: center;
   margin-bottom: 30rpx;
-  border: 2rpx solid #2a2a5e;
+  border: 2rpx solid var(--border);
   transition: all 0.3s;
 }
 
 .car-card.unlocked {
-  background: linear-gradient(135deg, #0a2818 0%, #0d3721 100%);
-  border-color: #00ff8833;
+  background: var(--gradient-unlock);
+  border-color: var(--green-alpha-33);
 }
 
-.car-icon {
-  font-size: 80rpx;
-  margin-bottom: 16rpx;
-}
+.car-icon { font-size: 80rpx; margin-bottom: 16rpx; }
 
 .car-state-text {
   font-size: 36rpx;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-primary);
   display: block;
 }
 
 .car-rssi {
   font-size: 24rpx;
-  color: #8899aa;
+  color: var(--text-tertiary);
   margin-top: 8rpx;
   display: block;
 }
 
 .car-cooldown {
   font-size: 22rpx;
-  color: #ffaa00;
+  color: var(--accent-orange);
   margin-top: 6rpx;
   display: block;
 }
 
-/* ★ 信息网格（继承 v3.0 设计） */
+/* ===== 信息网格 ===== */
 .info-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -223,14 +227,14 @@ async function setRSSI(value) {
 }
 
 .info-item {
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx;
 }
 
 .info-label {
   font-size: 22rpx;
-  color: #556677;
+  color: var(--text-muted);
   display: block;
   margin-bottom: 8rpx;
 }
@@ -238,10 +242,10 @@ async function setRSSI(value) {
 .info-value {
   font-size: 28rpx;
   font-weight: 600;
-  color: #00d4ff;
+  color: var(--accent);
 }
 
-/* ★ 主要控制按钮（继承 v3.0 大按钮设计） */
+/* ===== 主要控制按钮 ===== */
 .main-actions {
   display: flex;
   gap: 20rpx;
@@ -258,38 +262,33 @@ async function setRSSI(value) {
   border: 2rpx solid;
 }
 
-.ctrl-btn:active {
-  transform: scale(0.96);
-}
+.ctrl-btn:active { transform: scale(0.96); }
 
 .ctrl-btn.unlock {
-  background: linear-gradient(135deg, #0d2818 0%, #0a1a10 100%);
-  border-color: #00ff8844;
+  background: var(--gradient-unlock);
+  border-color: var(--green-alpha-27);
 }
 
 .ctrl-btn.lock {
-  background: linear-gradient(135deg, #281a1a 0%, #1a0a0a 100%);
-  border-color: #ff444444;
+  background: var(--gradient-lock);
+  border-color: var(--red-alpha-27);
 }
 
-.ctrl-btn-icon {
-  font-size: 56rpx;
-  margin-bottom: 12rpx;
-}
+.ctrl-btn-icon { font-size: 56rpx; margin-bottom: 12rpx; }
 
 .ctrl-btn-text {
   font-size: 30rpx;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .ctrl-btn-hint {
   font-size: 20rpx;
-  color: #556677;
+  color: var(--text-muted);
   margin-top: 6rpx;
 }
 
-/* 次要操作 */
+/* ===== 次要操作 ===== */
 .secondary-actions {
   display: flex;
   gap: 20rpx;
@@ -297,32 +296,22 @@ async function setRSSI(value) {
 
 .sec-btn {
   flex: 1;
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  border: 1rpx solid #2a2a5e;
+  border: 1rpx solid var(--border);
 }
 
-.sec-btn:active {
-  opacity: 0.7;
-}
+.sec-btn:active { opacity: 0.7; }
+.sec-icon { font-size: 36rpx; margin-bottom: 6rpx; }
+.sec-text { font-size: 24rpx; color: var(--text-tertiary); }
 
-.sec-icon {
-  font-size: 36rpx;
-  margin-bottom: 6rpx;
-}
-
-.sec-text {
-  font-size: 24rpx;
-  color: #8899aa;
-}
-
-/* ★ 手动 RSSI 模拟（继承 v3.0 设计） */
+/* ===== 手动 RSSI 模拟 ===== */
 .rssi-sim-section {
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-top: 30rpx;
@@ -330,13 +319,13 @@ async function setRSSI(value) {
 
 .rssi-sim-title {
   font-size: 24rpx;
-  color: #ccd;
+  color: var(--text-secondary);
   margin-bottom: 8rpx;
 }
 
 .rssi-sim-hint {
   font-size: 20rpx;
-  color: #667;
+  color: var(--signal-empty-muted);
   margin-bottom: 16rpx;
 }
 
@@ -360,12 +349,10 @@ async function setRSSI(value) {
   padding: 0;
 }
 
-.rssi-preset.near { background: #1a3a1a; color: #00ff88; border-color: #00ff8844; }
-.rssi-preset.close { background: #1a2a3a; color: #00d4ff; border-color: #00d4ff44; }
-.rssi-preset.mid { background: #2a2a1a; color: #ffdd00; border-color: #ffdd0044; }
-.rssi-preset.far { background: #2a1a1a; color: #ff8888; border-color: #ff888844; }
+.rssi-preset.near { background: var(--rssi-near-bg); color: var(--accent-green); border-color: var(--green-alpha-27); }
+.rssi-preset.close { background: var(--rssi-close-bg); color: var(--accent); border-color: var(--alpha-27); }
+.rssi-preset.mid { background: var(--rssi-mid-bg); color: var(--accent-yellow); border-color: var(--yellow-alpha-27); }
+.rssi-preset.far { background: var(--rssi-far-bg); color: var(--rssi-far-color); border-color: var(--rssi-far-border); }
 
-.rssi-preset:active {
-  opacity: 0.7;
-}
+.rssi-preset:active { opacity: 0.7; }
 </style>

@@ -1,5 +1,5 @@
 <template>
-  <view class="custom-tabbar">
+  <view class="custom-tabbar" :class="themeClass">
     <view
       v-for="tab in tabs"
       :key="tab.path"
@@ -15,6 +15,10 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useThemeStore } from '@/stores/theme.js'
+
+const themeStore = useThemeStore()
+const themeClass = themeStore.themeClass
 
 const currentPath = ref('')
 
@@ -40,10 +44,10 @@ const tabs = [
 
 function switchTab(path) {
   if (currentPath.value === path) return
-  currentPath.value = path  // 立即切换，不等 uni.switchTab 回调
+  currentPath.value = path
   uni.switchTab({
     url: path,
-    fail: () => updatePath()  // 失败时回退
+    fail: () => updatePath()
   })
 }
 </script>
@@ -58,11 +62,12 @@ function switchTab(path) {
   display: flex;
   align-items: center;
   justify-content: space-around;
-  background: #12122a;
-  border-top: 1rpx solid #1e1e3e;
+  background: var(--bg-tabbar);
+  border-top: 1rpx solid var(--border-light);
   padding-bottom: env(safe-area-inset-bottom);
   box-sizing: content-box;
   z-index: 9999;
+  transition: background 0.3s, border-color 0.3s;
 }
 
 .tabbar-item {
@@ -84,19 +89,18 @@ function switchTab(path) {
 
 .tabbar-text {
   font-size: 20rpx;
-  color: #667799;
+  color: var(--text-muted);
   line-height: 1.3;
   transition: all 0.2s;
 }
 
-/* 激活态 */
 .tabbar-item.active .tabbar-icon {
   opacity: 1;
   transform: scale(1.1);
 }
 
 .tabbar-item.active .tabbar-text {
-  color: #00d4ff;
+  color: var(--accent);
   font-weight: 600;
 }
 

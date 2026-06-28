@@ -1,6 +1,6 @@
 <template>
-  <view class="page-index">
-    <!-- ★ 顶部状态卡片（继承 v3.0 设计：已连接/已配对 边框颜色区分） -->
+  <view class="page-index" :class="themeClass">
+    <!-- ★ 顶部状态卡片 -->
     <view class="status-card" :class="{ connected: bleStore.connected, bonded: bleStore.hasBondedDevices }">
       <view class="status-icon">
         <text v-if="bleStore.connected">🔗</text>
@@ -25,7 +25,7 @@
       </view>
     </view>
 
-    <!-- ★ 信号强度条（继承 v3.0 设计：距离+百分比条+阈值） -->
+    <!-- ★ 信号强度条 -->
     <view class="signal-section" v-if="bleStore.connected">
       <view class="signal-header">
         <text class="signal-label">信号强度</text>
@@ -100,18 +100,16 @@
       </view>
     </view>
 
-    <!-- ★ 设备管理（继承 v3.0 的 password-mgmt 风格：带箭头的条目式入口） -->
+    <!-- ★ 设备管理 -->
     <view class="password-mgmt" v-if="bleStore.connected && bleStore.isEncrypted">
       <text class="section-title mgmt-title">🔐 设备管理</text>
       <view class="mgmt-rows">
-        <!-- 设备名称 -->
         <view class="mgmt-row" @tap="showNameDialog">
           <text class="mgmt-label">设备名称</text>
           <text class="mgmt-val" v-if="bleStore.customDeviceName">{{ bleStore.customDeviceName }}</text>
           <text class="mgmt-val name-hint" v-else>点击设置（如车牌号）</text>
           <text class="mgmt-arrow">›</text>
         </view>
-        <!-- 配对 PIN -->
         <view class="mgmt-row" @tap="showChangePinDialog">
           <text class="mgmt-label">修改配对 PIN</text>
           <text class="mgmt-val" v-if="bleStore.pinDefault">默认 123456</text>
@@ -124,7 +122,7 @@
       </view>
     </view>
 
-    <!-- ★ v3.2: 快捷操作（继承 v3.0 的 quick-actions 设计） -->
+    <!-- ★ 快捷操作 -->
     <view class="quick-actions" v-if="bleStore.connected && bleStore.isEncrypted">
       <button class="action-btn unlock-btn" @tap="handleUnlock">
         <text class="action-icon">🔓</text>
@@ -145,7 +143,7 @@
       <button class="btn-disconnect" @tap="handleDisconnect">断开连接</button>
     </view>
 
-    <!-- ★ pwModal 通用弹窗（继承 v3.0 的 pin-dialog 设计，适配 v3.2 单 PIN 体系） -->
+    <!-- ★ pwModal 通用弹窗 -->
     <view class="pin-overlay" v-if="pwModal.visible" @tap.stop>
       <view class="pin-dialog" @tap.stop>
         <text class="pin-title">{{ pwModal.title }}</text>
@@ -173,11 +171,14 @@
 import { reactive } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
+import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 const bleStore = useBleStore()
+const themeStore = useThemeStore()
+const themeClass = themeStore.themeClass
 let _autoScanDone = false
 
-// ★ 通用 pwModal（继承 v3.0 设计，适配 v3.2 单 PIN + 设备名称）
+// ★ 通用 pwModal
 const pwModal = reactive({
   visible: false,
   title: '',
@@ -188,7 +189,7 @@ const pwModal = reactive({
   defaultHint: '',
   maxLen: 6,
   confirmText: '确定',
-  mode: '',           // 'changePinStep1' | 'changePinStep2' | 'setName'
+  mode: '',
   oldPin: '',
   onConfirm: () => {}
 })
@@ -225,7 +226,6 @@ async function handleScanToggle() {
   }
 }
 
-// 保留旧名兼容 onShow 自动扫描调用
 async function handleScan() {
   if (bleStore.scanning) return
   try {
@@ -294,7 +294,7 @@ async function handleTrunk() {
   }
 }
 
-// ==================== ★ 设备名称（继承 v3.0 弹窗设计） ====================
+// ==================== 设备名称 ====================
 
 function showNameDialog() {
   if (!bleStore.connected || !bleStore.isEncrypted) {
@@ -332,7 +332,7 @@ async function handleSetName() {
   }
 }
 
-// ==================== ★ PIN 修改（继承 v3.0 两步式 pwModal 设计） ====================
+// ==================== PIN 修改 ====================
 
 function showChangePinDialog() {
   if (!bleStore.connected || !bleStore.isEncrypted) {
@@ -400,33 +400,37 @@ async function onPinStep2() {
 
 <style scoped>
 .page-index {
+  min-height: 100vh;
+  background: var(--bg-page);
+  color: var(--text-primary);
   padding: 30rpx 30rpx 30rpx;
+  transition: background-color 0.3s, color 0.3s;
 }
 
-/* ★ 状态卡片（继承 v3.0 设计） */
+/* ===== 状态卡片 ===== */
 .status-card {
-  background: linear-gradient(135deg, #1a1a3e 0%, #16213e 100%);
+  background: var(--gradient-card);
   border-radius: 24rpx;
   padding: 40rpx;
   display: flex;
   align-items: center;
   margin-bottom: 30rpx;
-  border: 2rpx solid #2a2a5e;
+  border: 2rpx solid var(--border);
   transition: all 0.3s;
 }
 
 .status-card.connected {
-  background: linear-gradient(135deg, #0a1628 0%, #0d2137 100%);
-  border-color: #00d4ff33;
+  background: var(--gradient-connected);
+  border-color: var(--alpha-33);
 }
 
 .status-card.bonded {
-  border-color: #00ff8833;
+  border-color: var(--green-alpha-33);
 }
 
 .badge-bound {
-  background: #00ff8833;
-  color: #00ff88;
+  background: var(--green-alpha-33);
+  color: var(--accent-green);
   font-size: 20rpx;
   padding: 2rpx 10rpx;
   border-radius: 8rpx;
@@ -434,8 +438,8 @@ async function onPinStep2() {
 }
 
 .badge-unbound {
-  background: #ff880033;
-  color: #ffaa00;
+  background: var(--orange-alpha-33);
+  color: var(--accent-orange);
   font-size: 20rpx;
   padding: 2rpx 10rpx;
   border-radius: 8rpx;
@@ -443,53 +447,45 @@ async function onPinStep2() {
 }
 
 .custom-name-display {
-  color: #00d4ff;
+  color: var(--accent);
   font-weight: bold;
   font-size: inherit;
 }
 
-.status-icon {
-  font-size: 48rpx;
-  margin-right: 24rpx;
-}
-
-.status-info {
-  flex: 1;
-}
+.status-icon { font-size: 48rpx; margin-right: 24rpx; }
+.status-info { flex: 1; }
 
 .status-title {
   font-size: 32rpx;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
   display: block;
 }
 
 .status-sub {
   font-size: 24rpx;
-  color: #8899aa;
+  color: var(--text-tertiary);
   margin-top: 6rpx;
   display: block;
 }
 
-.status-rssi {
-  text-align: center;
-}
+.status-rssi { text-align: center; }
 
 .rssi-value {
   font-size: 44rpx;
   font-weight: 700;
-  color: #00d4ff;
+  color: var(--accent);
   display: block;
 }
 
 .rssi-unit {
   font-size: 20rpx;
-  color: #8899aa;
+  color: var(--text-tertiary);
 }
 
-/* ★ 信号强度（继承 v3.0 设计） */
+/* ===== 信号强度 ===== */
 .signal-section {
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-bottom: 30rpx;
@@ -501,44 +497,32 @@ async function onPinStep2() {
   margin-bottom: 16rpx;
 }
 
-.signal-label {
-  font-size: 26rpx;
-  color: #8899aa;
-}
-
-.signal-dist {
-  font-size: 26rpx;
-  color: #00d4ff;
-}
+.signal-label { font-size: 26rpx; color: var(--text-tertiary); }
+.signal-dist { font-size: 26rpx; color: var(--accent); }
 
 .signal-bar-bg {
   height: 12rpx;
-  background: #2a2a5e;
+  background: var(--border);
   border-radius: 6rpx;
   overflow: hidden;
   margin-bottom: 16rpx;
 }
 
-.signal-bar-fill {
-  height: 100%;
-  border-radius: 6rpx;
-  transition: width 0.5s ease;
-}
-
-.signal-bar-fill.weak { background: linear-gradient(90deg, #ff4444, #ff8800); }
-.signal-bar-fill.medium { background: linear-gradient(90deg, #ff8800, #ffdd00); }
-.signal-bar-fill.strong { background: linear-gradient(90deg, #00d4ff, #00ff88); }
+.signal-bar-fill { height: 100%; border-radius: 6rpx; transition: width 0.5s ease; }
+.signal-bar-fill.weak { background: linear-gradient(90deg, var(--accent-red), var(--accent-orange)); }
+.signal-bar-fill.medium { background: linear-gradient(90deg, var(--accent-orange), var(--accent-yellow)); }
+.signal-bar-fill.strong { background: linear-gradient(90deg, var(--accent), var(--accent-green)); }
 
 .signal-thresholds {
   display: flex;
   justify-content: space-between;
   font-size: 22rpx;
-  color: #556677;
+  color: var(--text-muted);
 }
 
-/* 设备区域 */
+/* ===== 设备区域 ===== */
 .section {
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-bottom: 30rpx;
@@ -554,16 +538,16 @@ async function onPinStep2() {
 .section-title {
   font-size: 28rpx;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .btn-scan {
-  background: #00d4ff22;
-  color: #00d4ff;
+  background: var(--alpha-12);
+  color: var(--accent);
   font-size: 24rpx;
   padding: 12rpx 24rpx;
   border-radius: 20rpx;
-  border: 1rpx solid #00d4ff44;
+  border: 1rpx solid var(--alpha-27);
 }
 
 .scanning-hint {
@@ -571,14 +555,14 @@ async function onPinStep2() {
   align-items: center;
   justify-content: center;
   padding: 30rpx 0;
-  color: #8899aa;
+  color: var(--text-tertiary);
   font-size: 24rpx;
 }
 
 .scanning-dot {
   width: 16rpx;
   height: 16rpx;
-  background: #00d4ff;
+  background: var(--accent);
   border-radius: 50%;
   margin-right: 12rpx;
   animation: pulse 1s infinite;
@@ -595,53 +579,41 @@ async function onPinStep2() {
   padding: 20rpx 16rpx;
   border-radius: 12rpx;
   margin-bottom: 8rpx;
-  background: #16213e;
+  background: var(--bg-card-alt);
   transition: background 0.2s;
 }
 
 .device-item.active {
-  background: #00d4ff11;
-  border: 1rpx solid #00d4ff33;
+  background: var(--alpha-07);
+  border: 1rpx solid var(--alpha-20);
 }
 
-.device-info {
-  flex: 1;
-}
+.device-info { flex: 1; }
 
 .device-name {
   font-size: 28rpx;
-  color: #fff;
+  color: var(--text-primary);
   display: block;
 }
 
 .device-id {
   font-size: 20rpx;
-  color: #556677;
+  color: var(--text-muted);
   margin-top: 4rpx;
   display: block;
 }
 
-.device-rssi {
-  text-align: center;
-  margin-right: 16rpx;
-}
+.device-rssi { text-align: center; margin-right: 16rpx; }
 
 .device-rssi-val {
   font-size: 28rpx;
   font-weight: 600;
-  color: #00d4ff;
+  color: var(--accent);
   display: block;
 }
 
-.device-rssi-unit {
-  font-size: 18rpx;
-  color: #556677;
-}
-
-.device-arrow {
-  font-size: 36rpx;
-  color: #556677;
-}
+.device-rssi-unit { font-size: 18rpx; color: var(--text-muted); }
+.device-arrow { font-size: 36rpx; color: var(--text-muted); }
 
 .empty-state {
   display: flex;
@@ -650,26 +622,14 @@ async function onPinStep2() {
   padding: 60rpx 0;
 }
 
-.empty-icon {
-  font-size: 60rpx;
-  margin-bottom: 16rpx;
-}
+.empty-icon { font-size: 60rpx; margin-bottom: 16rpx; }
+.empty-text { font-size: 26rpx; color: var(--text-tertiary); }
+.empty-sub { font-size: 22rpx; color: var(--text-muted); margin-top: 8rpx; }
 
-.empty-text {
-  font-size: 26rpx;
-  color: #8899aa;
-}
-
-.empty-sub {
-  font-size: 22rpx;
-  color: #556677;
-  margin-top: 8rpx;
-}
-
-/* ★ 配对提示（继承 v3.0 bind-hint 设计） */
+/* ===== 配对提示 ===== */
 .bind-hint {
-  background: #332200;
-  border: 1rpx solid #664400;
+  background: var(--bg-warning);
+  border: 1rpx solid var(--border-warning);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-bottom: 30rpx;
@@ -679,24 +639,34 @@ async function onPinStep2() {
   gap: 16rpx;
 }
 
-.bind-hint.paired {
-  background: #003322;
-  border-color: #006644;
-}
-
 .bind-hint.takeover-active {
-  background: #003322;
-  border-color: #00ff8866;
+  background: var(--bg-success);
+  border-color: var(--green-alpha-40);
 }
 
 .bind-hint.takeover-active .bind-hint-text {
-  color: #00ff88;
+  color: var(--accent-green);
 }
 
-/* ★ 默认 PIN 警告卡片 */
+.bind-hint-text {
+  color: var(--accent-orange);
+  font-size: 24rpx;
+  text-align: center;
+}
+
+.takeover-sub {
+  color: var(--text-tertiary);
+  font-size: 22rpx;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.highlight { color: var(--accent); font-weight: 700; }
+
+/* ===== 默认 PIN 警告卡片 ===== */
 .default-pin-warn {
-  background: linear-gradient(135deg, #332200, #2a1a00);
-  border: 1rpx solid #ff880044;
+  background: var(--gradient-warn-card);
+  border: 1rpx solid var(--orange-alpha-27);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-bottom: 30rpx;
@@ -705,9 +675,7 @@ async function onPinStep2() {
   gap: 16rpx;
 }
 
-.warn-icon {
-  font-size: 36rpx;
-}
+.warn-icon { font-size: 36rpx; }
 
 .warn-body {
   flex: 1;
@@ -718,101 +686,56 @@ async function onPinStep2() {
 
 .warn-title {
   font-size: 26rpx;
-  color: #ffaa00;
+  color: var(--accent-orange);
   font-weight: 600;
 }
 
 .warn-desc {
   font-size: 22rpx;
-  color: #8899aa;
+  color: var(--text-tertiary);
   line-height: 1.5;
 }
 
 .warn-arrow {
   font-size: 28rpx;
-  color: #ffaa00;
+  color: var(--accent-orange);
   font-weight: 600;
   padding: 8rpx;
 }
 
-.bind-hint-text {
-  color: #ffaa00;
-  font-size: 24rpx;
-  text-align: center;
-}
-
-.bind-hint.paired .bind-hint-text {
-  color: #00ff88;
-}
-
-.takeover-sub {
-  color: #8899aa;
-  font-size: 22rpx;
-  text-align: center;
-  line-height: 1.6;
-}
-
-.highlight {
-  color: #00d4ff;
-  font-weight: 700;
-}
-
-/* ★ 设备管理（继承 v3.0 password-mgmt 设计） */
+/* ===== 设备管理 ===== */
 .password-mgmt {
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 24rpx;
   margin-bottom: 24rpx;
 }
 
-.mgmt-title {
-  margin-bottom: 16rpx;
-}
+.mgmt-title { margin-bottom: 16rpx; }
 
-.mgmt-rows {
-  margin-bottom: 12rpx;
-}
+.mgmt-rows { margin-bottom: 12rpx; }
 
 .mgmt-row {
   display: flex;
   align-items: center;
   padding: 20rpx 0;
-  border-bottom: 1rpx solid #2a2a5e;
+  border-bottom: 1rpx solid var(--border);
 }
 
-.mgmt-row:last-child {
-  border-bottom: none;
-}
+.mgmt-row:last-child { border-bottom: none; }
 
-.mgmt-label {
-  flex: 1;
-  font-size: 26rpx;
-  color: #ccd;
-}
-
-.mgmt-val {
-  font-size: 24rpx;
-  color: #6677aa;
-  margin-right: 12rpx;
-}
-
-.mgmt-val.name-hint {
-  color: #888;
-  font-size: 24rpx;
-}
-
-.mgmt-arrow {
-  font-size: 28rpx;
-  color: #556677;
-}
+.mgmt-label { flex: 1; font-size: 26rpx; color: var(--text-secondary); }
+.mgmt-val { font-size: 24rpx; color: var(--mgmt-val); margin-right: 12rpx; }
+.mgmt-val.name-hint { color: var(--text-muted); font-size: 24rpx; }
+.mgmt-arrow { font-size: 28rpx; color: var(--text-muted); }
 
 .mgmt-hint {
   font-size: 20rpx;
-  color: #ff880088;
+  color: var(--mgmt-hint);
   line-height: 1.4;
 }
 
-/* ★ 快捷操作（继承 v3.0 设计） */
+/* ===== 快捷操作 ===== */
 .quick-actions {
   display: flex;
   gap: 16rpx;
@@ -821,34 +744,28 @@ async function onPinStep2() {
 
 .action-btn {
   flex: 1;
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 16rpx;
   padding: 30rpx 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  border: 1rpx solid #2a2a5e;
+  border: 1rpx solid var(--border);
 }
 
-.action-btn:active {
-  opacity: 0.7;
-}
-
-.action-icon {
-  font-size: 44rpx;
-  margin-bottom: 8rpx;
-}
+.action-btn:active { opacity: 0.7; }
+.action-icon { font-size: 44rpx; margin-bottom: 8rpx; }
 
 .action-text {
   font-size: 24rpx;
-  color: #fff;
+  color: var(--text-primary);
 }
 
-.unlock-btn { border-color: #00d4ff44; }
-.lock-btn { border-color: #ff880044; }
-.trunk-btn { border-color: #00ff8844; }
+.unlock-btn { border-color: var(--alpha-27); }
+.lock-btn { border-color: var(--orange-alpha-27); }
+.trunk-btn { border-color: var(--green-alpha-27); }
 
-/* 断开连接 */
+/* ===== 断开连接 ===== */
 .disconnect-section {
   display: flex;
   justify-content: center;
@@ -856,21 +773,18 @@ async function onPinStep2() {
 
 .btn-disconnect {
   background: transparent;
-  color: #ff4444;
+  color: var(--accent-red);
   font-size: 24rpx;
   padding: 16rpx 48rpx;
-  border: 1rpx solid #ff444444;
+  border: 1rpx solid var(--red-alpha-27);
   border-radius: 20rpx;
 }
 
-/* ★ pwModal 弹窗（继承 v3.0 pin-dialog 设计） */
+/* ===== pwModal 弹窗 ===== */
 .pin-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.7);
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg-overlay);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -879,10 +793,10 @@ async function onPinStep2() {
 
 .pin-dialog {
   width: 560rpx;
-  background: #1a1a3e;
+  background: var(--bg-card);
   border-radius: 24rpx;
   padding: 48rpx 40rpx;
-  border: 1rpx solid #2a2a5e;
+  border: 1rpx solid var(--border);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -892,28 +806,26 @@ async function onPinStep2() {
 .pin-title {
   font-size: 32rpx;
   font-weight: 600;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .pin-hint {
   font-size: 24rpx;
-  color: #8899aa;
+  color: var(--text-tertiary);
   text-align: center;
   line-height: 1.5;
 }
 
-.pin-input-wrap {
-  width: 100%;
-}
+.pin-input-wrap { width: 100%; }
 
 .pin-input {
   width: 100%;
   height: 80rpx;
-  background: #16213e;
-  border: 1rpx solid #2a2a5e;
+  background: var(--bg-card-alt);
+  border: 1rpx solid var(--border);
   border-radius: 12rpx;
   font-size: 28rpx;
-  color: #fff;
+  color: var(--text-primary);
   text-align: center;
   letter-spacing: 8rpx;
   padding: 0 24rpx;
@@ -922,7 +834,7 @@ async function onPinStep2() {
 
 .pin-default-hint {
   font-size: 22rpx;
-  color: #ffaa00;
+  color: var(--accent-orange);
   margin-top: -12rpx;
 }
 
@@ -946,12 +858,12 @@ async function onPinStep2() {
 
 .pin-cancel {
   background: transparent;
-  color: #8899aa;
-  border: 1rpx solid #2a2a5e;
+  color: var(--text-tertiary);
+  border: 1rpx solid var(--border);
 }
 
 .pin-confirm {
-  background: linear-gradient(135deg, #00d4ff 0%, #0088cc 100%);
+  background: var(--gradient-accent);
   color: #fff;
 }
 </style>
