@@ -42,10 +42,23 @@
       </view>
     </view>
 
-    <!-- ★ 首次配对提示 -->
-    <view class="bind-hint" v-if="bleStore.connected && !bleStore.hasBondedDevices">
-      <text class="bind-hint-text">🔐 首次使用，等待手机弹出配对弹窗……</text>
-      <text class="takeover-sub">默认配对 PIN: <text class="highlight">123456</text>，配对后获得授权</text>
+    <!-- ★ v3.5.10: Just Works 加密后 PIN 验证提示（新配对 / bond 失效后重连） -->
+    <view class="bind-hint" v-if="bleStore.connected && bleStore.isEncrypted && !bleStore.pinVerified">
+      <text class="bind-hint-text">🔐 请输入设备 PIN 完成验证</text>
+      <text class="takeover-sub">输入正确的 PIN 后才能控制车辆</text>
+      <view class="verify-pin-row">
+        <input class="verify-pin-input" v-model="verifyPinInput" type="number" password
+               :maxlength="6" placeholder="设备 PIN（默认 123456）" />
+        <button class="verify-pin-btn" @tap="handleVerifyPin">验证</button>
+      </view>
+      <text class="verify-error" v-if="bleStore.pinVerifyFail">❌ PIN 错误，请重试</text>
+      <text class="takeover-sub" v-if="bleStore.pinDefault">💡 出厂默认 PIN: <text class="highlight">123456</text></text>
+    </view>
+
+    <!-- ★ 等待加密提示 -->
+    <view class="bind-hint" v-if="bleStore.connected && !bleStore.isEncrypted">
+      <text class="bind-hint-text">⏳ 正在建立加密连接，请稍候...</text>
+      <text class="takeover-sub">首次使用 Just Works 静默加密，无需手动配对</text>
     </view>
 
     <!-- ★ 配对模式提示 -->
@@ -100,8 +113,8 @@
       </view>
     </view>
 
-    <!-- ★ 设备管理 -->
-    <view class="password-mgmt" v-if="bleStore.connected && bleStore.isEncrypted">
+    <!-- ★ 设备管理（需 PIN 验证通过） -->
+    <view class="password-mgmt" v-if="bleStore.connected && bleStore.isEncrypted && bleStore.pinVerified">
       <text class="section-title mgmt-title">🔐 设备管理</text>
       <view class="mgmt-rows">
         <view class="mgmt-row" @tap="showNameDialog">
@@ -122,8 +135,8 @@
       </view>
     </view>
 
-    <!-- ★ 快捷操作 -->
-    <view class="quick-actions" v-if="bleStore.connected && bleStore.isEncrypted">
+    <!-- ★ 快捷操作（需 PIN 验证通过） -->
+    <view class="quick-actions" v-if="bleStore.connected && bleStore.isEncrypted && bleStore.pinVerified">
       <button class="action-btn unlock-btn" @tap="handleUnlock">
         <text class="action-icon">🔓</text>
         <text class="action-text">解锁</text>
@@ -168,7 +181,7 @@
 
 
 <script setup>
-import { reactive, computed } from 'vue'
+import { reactive, ref, computed } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
@@ -177,6 +190,9 @@ const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 let _autoScanDone = false
+
+// ★ v3.5.10: PIN 验证输入
+const verifyPinInput = ref('')
 
 // ★ 通用 pwModal
 const pwModal = reactive({
@@ -262,6 +278,30 @@ async function handleDisconnect() {
     toast.info('已断开连接')
   } else {
     toast.error('断开失败，请重试')
+  }
+}
+
+// ★ v3.5.10: PIN 验证
+async function handleVerifyPin() {
+  const pin = verifyPinInput.value.trim()
+  if (!pin || !/^\d{4,6}$/.test(pin)) {
+    toast.info('请输入 4-6 位数字 PIN')
+    return
+  }
+  uni.showLoading({ title: '验证中...', mask: true })
+  try {
+    const result = await bleStore.verifyPin(pin)
+    uni.hideLoading()
+    if (result.success) {
+      verifyPinInput.value = ''
+      toast.success('验证成功，设备已授权')
+    } else {
+      verifyPinInput.value = ''
+      toast.error('PIN 错误，请重试')
+    }
+  } catch (err) {
+    uni.hideLoading()
+    toast.error(err.message || '验证失败')
   }
 }
 
@@ -662,6 +702,49 @@ async function onPinStep2() {
 }
 
 .highlight { color: var(--accent); font-weight: 700; }
+
+/* ===== v3.5.10: PIN 验证输入行 ===== */
+.verify-pin-row {
+  display: flex;
+  gap: 16rpx;
+  width: 100%;
+  align-items: center;
+}
+
+.verify-pin-input {
+  flex: 1;
+  height: 72rpx;
+  background: var(--bg-card);
+  border: 1rpx solid var(--border);
+  border-radius: 12rpx;
+  font-size: 26rpx;
+  color: var(--text-primary);
+  text-align: center;
+  letter-spacing: 6rpx;
+  padding: 0 20rpx;
+  box-sizing: border-box;
+}
+
+.verify-pin-btn {
+  width: 140rpx;
+  height: 72rpx;
+  background: var(--gradient-accent);
+  color: #fff;
+  font-size: 26rpx;
+  font-weight: 600;
+  border-radius: 12rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+}
+
+.verify-error {
+  color: var(--accent-red);
+  font-size: 22rpx;
+  text-align: center;
+  margin-top: 4rpx;
+}
 
 /* ===== 默认 PIN 警告卡片 ===== */
 .default-pin-warn {

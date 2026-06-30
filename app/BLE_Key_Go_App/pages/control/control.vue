@@ -6,8 +6,14 @@
     </view>
     <view class="conn-warning" v-else-if="!bleStore.isEncrypted">
       <text>⏳ 正在建立加密连接，请稍候...</text>
-      <text style="font-size:22rpx;color:var(--text-tertiary);margin-top:8rpx;">首次使用需在系统弹出的配对框中输入 PIN</text>
-      <button class="btn-go-link" @tap="goToIndex">前往连接页</button>
+      <text style="font-size:22rpx;color:var(--text-tertiary);margin-top:8rpx;">Just Works 配对中，无需手动操作</text>
+    </view>
+
+    <!-- ★ v3.5.10: 已加密但未通过 PIN 验证 -->
+    <view class="conn-warning" v-else-if="bleStore.isEncrypted && !bleStore.pinVerified">
+      <text>🔐 需要验证设备 PIN</text>
+      <text style="font-size:22rpx;color:var(--text-tertiary);margin-top:8rpx;">请输入设备 PIN 以获得控制权限</text>
+      <button class="btn-go-link" @tap="goToIndex">前往验证</button>
     </view>
 
     <template v-else>

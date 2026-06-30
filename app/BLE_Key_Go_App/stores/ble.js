@@ -37,6 +37,8 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.2: BLE Bonding 安全状态
     isEncrypted: false,           // 当前连接是否已加密
     hasBondedDevices: false,      // 设备是否有已绑定的设备
+    pinVerified: false,           // ★ v3.5.10: 应用层 PIN 验证是否通过
+    pinVerifyFail: false,         // ★ v3.5.10: 上次 VERIFY 是否失败（用于 UI 错误提示）
     pairingMode: false,           // 设备是否处于配对模式
     pinDefault: true,             // 配对 PIN 是否为出厂默认 123456
     pinChangeError: 0,            // PIN 修改错误码 (0=无,1=旧PIN错,2=格式错)
@@ -173,6 +175,8 @@ export const useBleStore = defineStore('ble', {
         // ★ 重置 BLE Bonding 状态
         this.isEncrypted = false
         this.hasBondedDevices = false
+        this.pinVerified = false            // ★ v3.5.10
+        this.pinVerifyFail = false          // ★ v3.5.10
         this.pinDefault = true
         this.pinChangeError = 0
         this.lastOpResult = 0
@@ -187,6 +191,8 @@ export const useBleStore = defineStore('ble', {
             this._stopRssiPolling()
             this.connected = false
             this.isEncrypted = false
+            this.pinVerified = false         // ★ v3.5.10
+            this.pinVerifyFail = false       // ★ v3.5.10
             this.deviceState = 'LOCKED'
             this.rssi = -999
             this.filteredRssi = -999
@@ -260,13 +266,20 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
-     * ★ v3.2: 首次收到状态后的处理
+     * ★ v3.2 / v3.5.10: 首次收到状态后的处理
+     *   Just Works 配对（NimBLE）: 加密后 pinVerified=false → 需要 App 弹 PIN 框
+     *   静态 PIN 配对（Bluedroid）: 加密后 pinVerified=true → 直接授权
+     *   旧 bond 重连: 加密后 pinVerified=true → 免密
      */
     _onFirstStatusReceived() {
       if (this.isEncrypted) {
-        console.log('[Store] BLE 加密连接已建立，设备已授权')
+        if (this.pinVerified) {
+          console.log('[Store] 设备已授权（加密 + PIN 验证通过）')
+        } else {
+          console.log('[Store] 链路已加密，等待应用层 PIN 验证...')
+        }
       } else {
-        console.log('[Store] 等待 BLE Bonding 完成...')
+        console.log('[Store] 等待 BLE 加密完成...')
       }
     },
 
@@ -302,6 +315,8 @@ export const useBleStore = defineStore('ble', {
       this.scanning = false
       this.isEncrypted = false
       this.hasBondedDevices = false
+      this.pinVerified = false              // ★ v3.5.10
+      this.pinVerifyFail = false            // ★ v3.5.10
       this.pairingMode = false
       this.pinDefault = true
       this.pinChangeError = 0
@@ -455,6 +470,13 @@ export const useBleStore = defineStore('ble', {
       if (data.c !== undefined) this.connected = data.c === 1
       if (data.enc !== undefined) this.isEncrypted = data.enc === 1
       if (data.bdd !== undefined) this.hasBondedDevices = data.bdd === 1
+      if (data.pinv !== undefined) {
+        const newPinVerified = data.pinv === 1
+        if (this.pinVerified !== newPinVerified) {
+          console.log('[Store] PIN 验证状态变化:', newPinVerified ? '已通过' : '未通过')
+        }
+        this.pinVerified = newPinVerified
+      }
       if (data.dn !== undefined) this.deviceName = data.dn
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
       if (data.pm !== undefined) this.pairingMode = data.pm === 1
@@ -546,6 +568,44 @@ export const useBleStore = defineStore('ble', {
           setTimeout(check, 200)
         }
         setTimeout(check, 500)
+      })
+    },
+
+    /**
+     * ★ v3.5.10: 应用层 PIN 验证 — 通过 FF03 发送 VERIFY:<pin>
+     *   Just Works 配对后，用户输入 PIN，App 发送到固件验证
+     * @param {string} pin 用户输入的 PIN（4-6位数字）
+     * @returns {Promise<{success: boolean}>}
+     */
+    async verifyPin(pin) {
+      if (!this.connected) throw new Error('未连接设备')
+      if (!this.isEncrypted) throw new Error('连接未加密')
+      if (!pin || !/^\d{4,6}$/.test(pin)) throw new Error('PIN 须为 4-6 位数字')
+
+      this.pinVerifyFail = false
+      await sendCommand(this.deviceId, `VERIFY:${pin}`)
+      console.log('[Store] VERIFY 命令已发送')
+
+      // 等待固件返回 pinv 状态变化（通过 Notify）
+      return new Promise((resolve) => {
+        let waited = 0
+        const check = () => {
+          if (!this.connected) {
+            return resolve({ success: false })
+          }
+          if (this.pinVerified) {
+            console.log('[Store] PIN 验证成功')
+            return resolve({ success: true })
+          }
+          waited += 200
+          if (waited >= 3000) {
+            // 超时，固件可能拒绝了但没断开
+            this.pinVerifyFail = true
+            return resolve({ success: false })
+          }
+          setTimeout(check, 200)
+        }
+        setTimeout(check, 300)
       })
     },
 

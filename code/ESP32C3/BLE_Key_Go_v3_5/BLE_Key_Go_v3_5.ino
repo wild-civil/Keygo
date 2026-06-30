@@ -191,6 +191,11 @@ unsigned long disconnectTimestampMs = 0;
 unsigned long manualCommandTimestampMs = 0;
 bool manualCommandCooldown = false;
 #define MANUAL_COMMAND_COOLDOWN_MS 8000
+
+// ★ v3.5.10: 应用层 PIN 验证（NimBLE Just Works 配对后，App 发送 VERIFY:<pin> 验证）
+bool pinVerified = false;                      // 当前连接是否已通过应用层 PIN 验证
+int  pinVerifyFailCount = 0;                   // PIN 验证失败次数（防暴力破解）
+#define PIN_VERIFY_MAX_FAILS 3                 // 最多允许 3 次错误尝试
 bool nativeRssiWarningPrinted = false;
 
 // 按键去抖
@@ -239,6 +244,8 @@ static void gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t
         if (param->auth_cmpl.success) {
             hasBondedDevices = true;
             encryptionEstablished = true;    // ★ v3.4: GAP 层认证成功
+            pinVerified = true;              // ★ v3.5.10: Bluedroid 静态 PIN 验证成功 → 授权
+            pinVerifyFailCount = 0;
             Serial.println("[SEC] Bonding complete — device authorized & encrypted");
         } else {
             Serial.printf("[SEC] Bonding failed: reason=0x%02x\n", param->auth_cmpl.fail_reason);
@@ -305,6 +312,8 @@ class SecurityCallbacks : public BLESecurityCallbacks {
             // 重置 bond 标记（配对成功后会在 onAuthenticationComplete 中重新设为 true）
             hasBondedDevices = false;
             encryptionEstablished = false;
+            pinVerified = false;             // ★ v3.5.10
+            pinVerifyFailCount = 0;          // ★ v3.5.10
             wasBondedOnConnect = false;
             securityRequestPending = false;  // ★ v3.5
             Serial.println("[SEC] Old bond & custom name cleared → proceeding as fresh pairing");
@@ -330,6 +339,8 @@ class SecurityCallbacks : public BLESecurityCallbacks {
         if (auth_cmpl.success) {
             hasBondedDevices = true;
             encryptionEstablished = true;    // ★ v3.4: 仅认证成功才标记加密完成
+            pinVerified = true;              // ★ v3.5.10: Bluedroid 静态 PIN 验证成功 → 授权
+            pinVerifyFailCount = 0;
             Serial.println("[SEC] authentication complete — bonded & encrypted");
         } else {
             Serial.printf("[SEC] authentication failed: reason=0x%02x\n", auth_cmpl.fail_reason);
@@ -351,7 +362,11 @@ class SecurityCallbacks : public BLESecurityCallbacks {
         if (desc) {
             hasBondedDevices = true;
             encryptionEstablished = true;    // ★ v3.4: 仅认证成功才标记加密完成
-            Serial.println("[SEC] authentication complete — bonded & encrypted");
+            // ★ v3.5.10: 旧 bond 复用 → 自动通过 PIN 验证（已配对手机信任链）
+            //   新配对（Just Works 静默加密）→ pinVerified 保持 false，需应用层 VERIFY
+            pinVerified = wasBondedOnConnect;
+            pinVerifyFailCount = 0;
+            Serial.printf("[SEC] auth complete — pinVerified=%s (bond reused)\n", pinVerified ? "auto" : "REQUIRED");
         } else {
             Serial.println("[SEC] authentication failed");
             // ★ v3.5: 旧 bond 失效（手机端取消配对）→ 自动清除
@@ -373,6 +388,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         deviceConnected = true;
         encryptionEstablished = false;       // ★ v3.4: 连接 ≠ 加密，reset
         wasBondedOnConnect = hasBondedDevices; // ★ v3.5: 记录连接前 bond 状态
+        pinVerified = false;                 // ★ v3.5.10: 新连接必须重新验证或自动续约
+        pinVerifyFailCount = 0;              // ★ v3.5.10: 重置暴力破解计数
         securityRequestPending = true;       // ★ v3.5: 延迟后主动发起加密请求
         securityRequestAtMs = millis();
         connectionId = param->connect.conn_id;
@@ -391,6 +408,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         deviceConnected = false;
         encryptionEstablished = false;       // ★ v3.4: 断开即清除加密标记
         wasBondedOnConnect = false;          // ★ v3.5
+        pinVerified = false;                 // ★ v3.5.10
+        pinVerifyFailCount = 0;              // ★ v3.5.10
         securityRequestPending = false;      // ★ v3.5
         latestRSSI = -999;
         disconnectTimestampMs = millis();
@@ -408,6 +427,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         deviceConnected = true;
         encryptionEstablished = false;       // ★ v3.4: 连接 ≠ 加密，reset
         wasBondedOnConnect = hasBondedDevices; // ★ v3.5: 记录连接前 bond 状态
+        pinVerified = false;                 // ★ v3.5.10: 新连接必须重新验证（onAuthComplete 中自动续约）
+        pinVerifyFailCount = 0;              // ★ v3.5.10: 重置暴力破解计数
         securityRequestPending = true;       // ★ v3.5: 延迟后主动发起加密请求
         securityRequestAtMs = millis();
         nimbleConnHandle = desc->conn_handle;
@@ -426,6 +447,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         deviceConnected = false;
         encryptionEstablished = false;       // ★ v3.4: 断开即清除加密标记
         wasBondedOnConnect = false;          // ★ v3.5
+        pinVerified = false;                 // ★ v3.5.10
+        pinVerifyFailCount = 0;              // ★ v3.5.10
         securityRequestPending = false;      // ★ v3.5
         latestRSSI = -999;
         nimbleConnHandle = 0;
@@ -444,6 +467,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         deviceConnected = true;
         encryptionEstablished = false;       // ★ v3.4
         wasBondedOnConnect = hasBondedDevices; // ★ v3.5
+        pinVerified = false;                 // ★ v3.5.10
+        pinVerifyFailCount = 0;              // ★ v3.5.10
         securityRequestPending = true;       // ★ v3.5
         securityRequestAtMs = millis();
         resetKalmanFilter();
@@ -458,6 +483,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         deviceConnected = false;
         encryptionEstablished = false;       // ★ v3.4
         wasBondedOnConnect = false;          // ★ v3.5
+        pinVerified = false;                 // ★ v3.5.10
+        pinVerifyFailCount = 0;              // ★ v3.5.10
         securityRequestPending = false;      // ★ v3.5
         latestRSSI = -999;
         disconnectTimestampMs = millis();
@@ -491,6 +518,19 @@ public:
         cmd.trim();
         String upper = cmd;
         upper.toUpperCase();
+
+        // ★ v3.5.10: 应用层 PIN 验证 — 唯一不需要 pinVerified 的命令
+        if (upper.startsWith("VERIFY:")) {
+            handleVerify(cmd.substring(7));
+            return;
+        }
+
+        // ★ v3.5.10: 所有敏感命令需要应用层 PIN 验证
+        //   Just Works 配对后链路已加密，但未验证用户身份
+        if (!pinVerified) {
+            Serial.printf("[SEC] Command rejected (pinVerified=false): %s\n", cmd.c_str());
+            return;
+        }
 
         // ★ v3.2: 设置设备名称
         if (upper.startsWith("NAME:")) {
@@ -526,6 +566,41 @@ public:
         } else {
             Serial.printf("[BLE] unknown command: %s\n", cmd.c_str());
         }
+    }
+
+    // ★ v3.5.10: 应用层 PIN 验证 — Just Works 配对后 App 发送 VERIFY:<pin>
+    void handleVerify(String pinInput) {
+        pinInput.trim();
+
+        // 防暴力破解
+        if (pinVerifyFailCount >= PIN_VERIFY_MAX_FAILS) {
+            Serial.printf("[SEC] VERIFY blocked — too many failures (%d), disconnecting...\n", pinVerifyFailCount);
+            if (pServer && deviceConnected) {
+                pServer->disconnect(connectionId);
+            }
+            return;
+        }
+
+        if (pinInput == pairingPIN) {
+            pinVerified = true;
+            pinVerifyFailCount = 0;
+            Serial.println("[SEC] PIN VERIFY OK — device authorized");
+        } else {
+            pinVerifyFailCount++;
+            pinVerified = false;
+            Serial.printf("[SEC] PIN VERIFY FAIL (%d/%d) — wrong PIN: '%s'\n",
+                          pinVerifyFailCount, PIN_VERIFY_MAX_FAILS, pinInput.c_str());
+            if (pinVerifyFailCount >= PIN_VERIFY_MAX_FAILS) {
+                Serial.println("[SEC] Max failures reached, disconnecting...");
+                notifyStatus();
+                delay(100);
+                if (pServer && deviceConnected) {
+                    pServer->disconnect(connectionId);
+                }
+                return;
+            }
+        }
+        notifyStatus();  // ★ 推送 pinv 状态变化给 App
     }
 
     // ★ v3.2: 设置设备自定义名称
@@ -679,12 +754,14 @@ void setup() {
     pSecurity->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
     pSecurity->setCallbacks(new SecurityCallbacks());
 #elif BLE_KEY_GO_STACK_NIMBLE
+    // ★ v3.5.10: Just Works — NimBLE 不支持静态 PIN 验证，改为链路层静默加密
+    //   真正的 PIN 校验移到应用层：App 通过 FF03 发送 VERIFY:<pin> 命令
     BLESecurity *pSecurity = new BLESecurity();
-    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);   // SC + Bonding (NimBLE uses ESP_ prefix)
-    pSecurity->setCapability(BLE_SM_IO_CAP_DISP_ONLY);            // phone PIN prompt (NimBLE uses BLE_SM_ prefix)
+    pSecurity->setAuthenticationMode(ESP_LE_AUTH_BOND);           // Legacy pairing + Bonding（无 SC）
+    pSecurity->setCapability(BLE_HS_IO_NO_INPUT_OUTPUT);          // Just Works: 无用户交互，静默加密
     pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
     pSecurity->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-    BLEDevice::setSecurityCallbacks(new SecurityCallbacks());     // callback returns static PIN
+    BLEDevice::setSecurityCallbacks(new SecurityCallbacks());     // 仅用于追踪 auth 完成事件
 #endif
 
 #if BLE_KEY_GO_STACK_BLUEDROID
@@ -855,6 +932,8 @@ void deleteAllBonds() {
     hasBondedDevices = false;
     encryptionEstablished = false;    // ★ v3.4: 清 bond 即取消加密标记
     wasBondedOnConnect = false;       // ★ v3.5: 跟踪变量同步清除
+    pinVerified = false;              // ★ v3.5.10: 清 bond 同时清除验证状态
+    pinVerifyFailCount = 0;           // ★ v3.5.10
     securityRequestPending = false;   // ★ v3.5: 安全请求标记同步清除
 
     // ★ v3.5: 清除自定义设备名称（取消配对 = 设备回到出厂空白状态）
@@ -972,6 +1051,11 @@ void startAdvertising() {
     //   根因：BLE 广播包仅 31 字节，Flags(3) + 128bit UUID(18) + 完整名 "KeyGo-71C65A"(15) = 36 > 31
     //   修复：UUID 移到 Scan Response，广播包只放完整名，手机蓝牙列表直接显示 "KeyGo-71C65A"
     BLEAdvertisementData advertData;
+
+    advertData.setAppearance(0x00C1);                            // ★ Appearance: 外观：通用手表
+    // advertData.setCompleteServices(BLEUUID((uint16_t)0x180F));   // ★ 服务：Battery Service (电池服务)  UUID — 触发手机图标
+
+
     advertData.setName(String(deviceName));               // ★ 完整名 "KeyGo-71C65A"
 
     // Scan Response: Service UUID + 厂商数据（App 靠厂商数据筛选，不依赖 UUID）
@@ -1201,11 +1285,12 @@ void notifyStatus() {
     // st=state r/f=rssi ul/lk/hy/uc/lc=config mc=cooldown
     // dn=deviceName d2=customName(★ v3.5: 仅加密时发送实际值，未加密时为空)
     // sn=serialNumber(MAC后缀)
-    // pm=pairingMode pd=pinDefault pce=pin_change_error
+    // pm=pairingMode pd=pinDefault pce=pin_change_error pinv=pinVerified(★ v3.5.10)
     String p = "{";
     p += "\"c\":" + String(deviceConnected ? 1 : 0);
     p += ",\"enc\":" + String(encryptionEstablished ? 1 : 0);   // ★ v3.4: 真实加密状态，非连接状态
     p += ",\"bdd\":" + String(hasBondedDevices ? 1 : 0);
+    p += ",\"pinv\":" + String(pinVerified ? 1 : 0);            // ★ v3.5.10: 应用层 PIN 验证状态
     p += ",\"st\":\"" + stateToString() + "\"";
     p += ",\"r\":" + String(latestRSSI);
     p += ",\"f\":" + String((int)filteredRSSI);
