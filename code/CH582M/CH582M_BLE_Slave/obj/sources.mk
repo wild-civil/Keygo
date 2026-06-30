@@ -27,6 +27,7 @@ SECONDARY_SIZE :=
 CALLGRAPH_DOT := callgraph.dot \
 # Every subdirectory with source files must be described here
 SUBDIRS := \
+HAL \
 RVMSIS \
 Startup \
 StdPeriphDriver \
