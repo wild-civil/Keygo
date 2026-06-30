@@ -972,6 +972,10 @@ void startAdvertising() {
     //   根因：BLE 广播包仅 31 字节，Flags(3) + 128bit UUID(18) + 完整名 "KeyGo-71C65A"(15) = 36 > 31
     //   修复：UUID 移到 Scan Response，广播包只放完整名，手机蓝牙列表直接显示 "KeyGo-71C65A"
     BLEAdvertisementData advertData;
+
+    // advertData.setAppearance(0x00C1);                            // ★ Appearance: 外观：通用手表
+    // advertData.setCompleteServices(BLEUUID((uint16_t)0x180D));   // ★ 服务：Battery Service (电池服务)  UUID — 触发手机图标
+
     advertData.setName(String(deviceName));               // ★ 完整名 "KeyGo-71C65A"
 
     // Scan Response: Service UUID + 厂商数据（App 靠厂商数据筛选，不依赖 UUID）
