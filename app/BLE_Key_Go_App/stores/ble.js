@@ -50,9 +50,13 @@ export const useBleStore = defineStore('ble', {
     lockCountRequired: 5,
     disconnectLockDelayMs: 5000,
     manualCooldown: false,        // 手动命令冷却中
+    rssiStateMismatch: false,     // ★ RSSI 与实际状态不一致警告（设备端阈值异常）
 
     // 连接历史（自动重连用）
     lastDeviceId: '',
+
+    // ★ v3.5: 持久化恢复标记
+    _restored: false,
   }),
 
   getters: {
@@ -83,9 +87,48 @@ export const useBleStore = defineStore('ble', {
   },
 
   actions: {
+    // ==================== 持久化配置 ====================
+
+    /** 从本地存储恢复配置（每次 store 初始化时调用一次） */
+    _restoreConfig() {
+      if (this._restored) return
+      this._restored = true
+      try {
+        const saved = uni.getStorageSync('ble_config_v1')
+        if (saved) {
+          if (saved.unlockThreshold !== undefined) this.unlockThreshold = saved.unlockThreshold
+          if (saved.lockThreshold !== undefined) this.lockThreshold = saved.lockThreshold
+          if (saved.unlockCountRequired !== undefined) this.unlockCountRequired = saved.unlockCountRequired
+          if (saved.lockCountRequired !== undefined) this.lockCountRequired = saved.lockCountRequired
+          if (saved._rssiPollInterval !== undefined) this._rssiPollInterval = saved._rssiPollInterval
+          if (saved.disconnectLockDelayMs !== undefined) this.disconnectLockDelayMs = saved.disconnectLockDelayMs
+          console.log('[Store] 已从本地存储恢复配置:', JSON.stringify(saved))
+        }
+      } catch (e) {
+        console.warn('[Store] 配置恢复失败:', e)
+      }
+    },
+
+    /** 持久化当前配置到本地存储 */
+    _persistConfig() {
+      try {
+        uni.setStorageSync('ble_config_v1', {
+          unlockThreshold: this.unlockThreshold,
+          lockThreshold: this.lockThreshold,
+          unlockCountRequired: this.unlockCountRequired,
+          lockCountRequired: this.lockCountRequired,
+          _rssiPollInterval: this._rssiPollInterval || 800,
+          disconnectLockDelayMs: this.disconnectLockDelayMs,
+        })
+      } catch (e) {
+        console.warn('[Store] 配置持久化失败:', e)
+      }
+    },
+
     // ==================== 扫描 ====================
 
     async startScanDevices(timeout = 10) {
+      this._restoreConfig()  // ★ 首次进入扫描页时恢复配置
       if (this._coolingDown) {
         await new Promise(r => {
           const check = () => {
@@ -144,6 +187,7 @@ export const useBleStore = defineStore('ble', {
 
     async connect(deviceId, deviceName = '') {
       try {
+        this._restoreConfig()  // ★ 确保连接前配置已恢复
         await connectDevice(deviceId)
         this.deviceId = deviceId
         this.deviceName = deviceName || 'KeyGo'
@@ -220,7 +264,7 @@ export const useBleStore = defineStore('ble', {
           }
         })
 
-        // ★ 启动手机端 RSSI 轮询
+        // ★ 启动手机端 RSSI 轮询（手机测 RSSI → 通过 FF01 写入设备）
         this._startRssiPolling()
 
         return true
@@ -267,8 +311,11 @@ export const useBleStore = defineStore('ble', {
       this.deviceState = 'LOCKED'
       this.rssi = -999
       this.filteredRssi = -999
+      this.rssiStateMismatch = false
 
       this._coolingDown = true
+      this.manualCooldown = false
+      if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null }
       setTimeout(() => { this._coolingDown = false }, 500)
       return true
     },
@@ -290,10 +337,12 @@ export const useBleStore = defineStore('ble', {
     _rssiScanTimeout: null,
     _rssiScanListener: null,
     _scanAborted: false,
+    _cooldownTimer: null,
 
     _startRssiPolling() {
       this._stopRssiPolling()
-      console.log('[Store] 手机端 RSSI 轮询已启动（每800ms）')
+      const interval = this._rssiPollInterval || 800
+      console.log('[Store] 手机端 RSSI 轮询已启动（每' + interval + 'ms）')
 
       this._rssiScanListener = (res) => {
         for (const device of res.devices) {
@@ -312,7 +361,7 @@ export const useBleStore = defineStore('ble', {
           return
         }
         this._doRssiScan()
-      }, 800)
+      }, interval)
     },
 
     _stopRssiPolling() {
@@ -354,6 +403,12 @@ export const useBleStore = defineStore('ble', {
       if (!this.connected || !this.deviceId) return
       this.rssi = rssiValue
       this.filteredRssi = rssiValue
+      // ★ RSSI 恢复到合理范围后自动清除冲突警告
+      if (this.rssiStateMismatch && rssiValue >= this.unlockThreshold) {
+        this.rssiStateMismatch = false
+      }
+      // ★ 手动命令冷却期间暂停 RSSI 上报到设备（避免设备端状态机立即覆盖手动操作）
+      if (this.manualCooldown) return
       try {
         await sendConfig(this.deviceId, { rssi: rssiValue })
       } catch {}
@@ -386,11 +441,44 @@ export const useBleStore = defineStore('ble', {
 
       // 连接与车辆状态
       if (data.c !== undefined) this.connected = data.c === 1
-      if (data.st !== undefined) this.deviceState = data.st
 
-      // RSSI
+      // RSSI（先更新，后续校验要用）
       if (data.r !== undefined && data.r > -999) this.rssi = data.r
       if (data.f !== undefined && data.f > -999) this.filteredRssi = data.f
+
+      // ★ 客户端 RSSI 合理性校验：如果设备报告的锁状态与当前 RSSI 严重不符，
+      //    说明设备端阈值没生效或比较方向错误，强制覆盖为 LOCKED
+      if (data.st !== undefined) {
+        const currentRssi = this.filteredRssi > -999 ? this.filteredRssi : this.rssi
+        if (currentRssi > -999) {
+          // UNLOCKED 但 RSSI 比锁车阈值还弱 → 设备端阈值逻辑异常，强制回退
+          if (data.st === 'UNLOCKED' && currentRssi < this.lockThreshold) {
+            console.warn(
+              '[Store] ⚠ RSSI 冲突：设备上报 UNLOCKED 但 RSSI=' + currentRssi +
+              ' < 锁车阈值=' + this.lockThreshold + '（解锁阈值=' + this.unlockThreshold + '），已强制回退为 LOCKED'
+            )
+            this.deviceState = 'LOCKED'   // ★ 覆盖：不显示错误状态
+            this.rssiStateMismatch = true
+            return
+          }
+          // UNLOCKED 但 RSSI 没达到解锁阈值 → 标记警告但不强制修正（可能是连续采样中）
+          if (data.st === 'UNLOCKED' && currentRssi < this.unlockThreshold) {
+            console.warn(
+              '[Store] ⚠ RSSI 可疑：设备上报 UNLOCKED 但 RSSI=' + currentRssi +
+              ' < 解锁阈值=' + this.unlockThreshold
+            )
+            // ★ 不再信任设备的 UNLOCKED 状态，也强制回退
+            this.deviceState = 'LOCKED'
+            this.rssiStateMismatch = true
+          } else if (data.st === 'LOCKED') {
+            this.rssiStateMismatch = false
+          }
+        }
+        // 只有通过校验的合法状态才更新 deviceState
+        if (!this.rssiStateMismatch || data.st === 'LOCKED') {
+          this.deviceState = data.st
+        }
+      }
 
       // 自定义名称
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
@@ -401,6 +489,21 @@ export const useBleStore = defineStore('ble', {
     async updateConfig(config) {
       if (!this.deviceId) throw new Error('未连接设备')
       await sendConfig(this.deviceId, config)
+      // ★ 同步到本地 store（控制页 UI 实时反映下发后的阈值）
+      if (config.unlock !== undefined) this.unlockThreshold = config.unlock
+      if (config.lock !== undefined) this.lockThreshold = config.lock
+      if (config.uc !== undefined) this.unlockCountRequired = config.uc
+      if (config.lc !== undefined) this.lockCountRequired = config.lc
+      if (config.interval !== undefined) {
+        this._rssiPollInterval = Math.max(300, config.interval)  // 下限 300ms，避免扫描过热
+        // ★ 重新启动 RSSI 轮询以应用新间隔
+        if (this.connected && this.deviceId) {
+          this._startRssiPolling()
+        }
+      }
+      if (config.dlock !== undefined) this.disconnectLockDelayMs = config.dlock
+      // ★ 持久化到本地存储（退出应用后重新进入不丢失）
+      this._persistConfig()
     },
 
     async sendCommand(command) {
@@ -414,11 +517,27 @@ export const useBleStore = defineStore('ble', {
     async unlock() {
       if (!this.connected) throw new Error('未连接设备')
       await this.sendCommand('UNLOCK')
+      // ★ 手动解锁后 RSSI 状态机冷却 8 秒（防止设备端立即根据 RSSI 自动锁车）
+      this.manualCooldown = true
+      if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
+      this._cooldownTimer = setTimeout(() => {
+        this.manualCooldown = false
+        this._cooldownTimer = null
+        console.log('[Store] RSSI 状态机冷却结束')
+      }, 8000)
     },
 
     async lock() {
       if (!this.connected) throw new Error('未连接设备')
       await this.sendCommand('LOCK')
+      // ★ 手动锁车后 RSSI 状态机冷却 8 秒（防止设备端立即根据 RSSI 自动解锁）
+      this.manualCooldown = true
+      if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
+      this._cooldownTimer = setTimeout(() => {
+        this.manualCooldown = false
+        this._cooldownTimer = null
+        console.log('[Store] RSSI 状态机冷却结束')
+      }, 8000)
     },
 
     async trunk() {

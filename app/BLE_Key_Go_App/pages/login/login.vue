@@ -32,15 +32,15 @@
           <text class="step-num">3</text>
           <view class="step-content">
             <text class="step-title">自动连接</text>
-            <text class="step-desc">配对成功后，以后打开 App 自动连接，无需任何操作</text>
+            <text class="step-desc">配对成功后，打开 App 自动连接，无需任何操作</text>
           </view>
         </view>
 
         <view class="guide-step">
           <text class="step-num">4</text>
           <view class="step-content">
-            <text class="step-title">换手机</text>
-            <text class="step-desc">按一下 ESP32 物理按钮（PIN 9）清除绑定，新手机重新配对即可</text>
+            <text class="step-title">恢复出厂</text>
+            <text class="step-desc">长按设备按键 5 秒恢复出厂设置，所有参数恢复默认</text>
           </view>
         </view>
       </view>
@@ -48,15 +48,11 @@
 
     <!-- 物理按键说明 -->
     <view class="login-card" style="margin-top: 24rpx;">
-      <text class="card-title">🔘 物理按键（ESP32 PIN 9）</text>
+      <text class="card-title">🔘 设备物理按键</text>
       <view class="info-rows">
         <view class="info-row">
-          <text class="info-label">&lt;2s 短按</text>
-          <text class="info-val">删除所有已配对设备（进入配对模式）</text>
-        </view>
-        <view class="info-row">
           <text class="info-label">&gt;5s 长按</text>
-          <text class="info-val">恢复出厂设置（PIN + 配置全部重置）</text>
+          <text class="info-val">恢复出厂设置（所有配置参数恢复默认）</text>
         </view>
       </view>
     </view>
@@ -101,17 +97,22 @@
     <!-- 底部 -->
     <view class="login-footer">
       <text class="footer-text">BLE KeyGo v3.2 · 纯本地 · 安全可靠</text>
-      <text class="footer-ver">Built on ESP32 Arduino BLE + uni-app</text>
+      <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
+import { onShow } from '@dcloudio/uni-app'
 import { useThemeStore } from '@/stores/theme.js'
 
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
+
+onShow(() => {
+  themeStore.applyNavBar()
+})
 
 const themeOptions = ref([
   { value: 'light', label: '浅色', icon: '☀️' },

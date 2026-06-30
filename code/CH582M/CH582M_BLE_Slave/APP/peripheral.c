@@ -309,9 +309,10 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         KeyGo_ResetState();
 
-        tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,    SBP_PERIODIC_EVT_PERIOD);
-        tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,SBP_PARAM_UPDATE_DELAY);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,   SBP_READ_RSSI_EVT_PERIOD);
+        tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,      SBP_PERIODIC_EVT_PERIOD);
+        tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
+        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     SBP_READ_RSSI_EVT_PERIOD);
+        tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
     }
@@ -428,13 +429,80 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
 {
     switch (paramID) {
 
-        case SIMPLEPROFILE_CHAR1:  // FF01: RSSI
+        case SIMPLEPROFILE_CHAR1:  // FF01: RSSI + 配置下发
         {
             char buf[SIMPLEPROFILE_CHAR1_LEN + 1];
             uint16_t copyLen = (len > SIMPLEPROFILE_CHAR1_LEN) ? SIMPLEPROFILE_CHAR1_LEN : len;
             tmos_memcpy(buf, pValue, copyLen);
             buf[copyLen] = '\0';
-            KeyGo_RssiProcess((int8_t)atoi(buf));
+
+            // ★ v3.5: 区分三种数据格式:
+            //   ① 裸数字:          "-54"           → RSSI 注入
+            //   ② rssi=-54: 首个 key 是 rssi      → RSSI 注入
+            //   ③ 配置:   首个 key 是 unlock/lock/uc/lc... → 配置更新
+
+            // 跳过前导空格
+            uint16_t start = 0;
+            while (start < copyLen && buf[start] == ' ') start++;
+
+            // 判断是否为配置字符串: 看第一个 key 是否以 "rssi=" 开头
+            int isConfig = 0;
+            {
+                // 查找第一个 '='
+                uint16_t eqPos;
+                int hasEq = 0;
+                for (eqPos = start; eqPos < copyLen; eqPos++) {
+                    if (buf[eqPos] == '=') { hasEq = 1; break; }
+                    if (buf[eqPos] == ' ') break;  // 无 '=' 的裸数字
+                }
+                if (hasEq) {
+                    // 有 '=' → 判断第一个 key 是不是 "rssi"
+                    uint8_t firstKeyLen = (uint8_t)(eqPos - start);
+                    if (!(firstKeyLen == 4 && buf[start] == 'r' && buf[start+1] == 's' &&
+                          buf[start+2] == 's' && buf[start+3] == 'i')) {
+                        // 第一个 key 不是 "rssi" → 配置字符串
+                        isConfig = 1;
+                    }
+                }
+            }
+
+            if (isConfig) {
+                // ── ③ 配置字符串: 解析并更新配置变量 ──
+                uint8_t configChanged = KeyGo_ParseConfig(buf);
+                if (configChanged) {
+                    KeyGo_NotifyStatus();  // ★ 配置变更后通知 App 最新状态
+                }
+                // ★ 同时检查是否包含 rssi key (混合下发)
+                {
+                    uint16_t ri;
+                    for (ri = 0; ri + 5 <= copyLen; ri++) {
+                        if (buf[ri] == 'r' && buf[ri+1] == 's' && buf[ri+2] == 's' && buf[ri+3] == 'i' && buf[ri+4] == '=') {
+                            int8_t rssiVal = (int8_t)atoi(&buf[ri + 5]);
+                            if (rssiVal < 0) {
+                                KeyGo_RssiProcess(rssiVal);
+                            }
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // ── ①② 纯 RSSI 值: 注入到 Kalman 滤波器 ──
+                int8_t rssiVal = 0;
+                if (buf[start] == '-' || (buf[start] >= '0' && buf[start] <= '9')) {
+                    // 裸数字: -54
+                    rssiVal = (int8_t)atoi(&buf[start]);
+                } else {
+                    // rssi=-54 格式 (兜底)
+                    uint16_t i;
+                    for (i = start; i < copyLen; i++) {
+                        if (buf[i] == '=') {
+                            rssiVal = (int8_t)atoi(&buf[i + 1]);
+                            break;
+                        }
+                    }
+                }
+                KeyGo_RssiProcess(rssiVal);
+            }
             break;
         }
 

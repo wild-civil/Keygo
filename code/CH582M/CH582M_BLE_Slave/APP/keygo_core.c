@@ -7,19 +7,26 @@
 
 #include "keygo_core.h"
 #include "gattprofile.h"
+#include <stdlib.h>   /* atoi */
 
 /* ─────────────────────────────────────────────────────────────────
  * 宏定义 (模块内部)
  * ───────────────────────────────────────────────────────────────── */
 
-// RSSI 阈值
-#define RSSI_UNLOCK_THRESHOLD   -55
-#define RSSI_LOCK_THRESHOLD     -75
-#define UNLOCK_COUNT_REQUIRED   3
-#define LOCK_COUNT_REQUIRED     5
 #define SPIKE_DISCARD_COUNT     2
 #define MANUAL_COOLDOWN_MS      3000
 #define STATUS_JSON_MAX_LEN     180
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ v3.5: 可运行时配置的 RSSI 阈值 (替代原来的 #define 硬编码)
+ *    由 App 通过 FF01 下发 "unlock=-30 lock=-45 uc=2..." 更新
+ *    默认值与 App 端 store 初始值保持一致
+ * ───────────────────────────────────────────────────────────────── */
+int16_t  g_cfgUnlockThreshold   = -45;   // RSSI 解锁阈值
+int16_t  g_cfgLockThreshold     = -65;   // RSSI 锁车阈值
+uint8_t  g_cfgUnlockCount       = 3;     // 解锁需连续满足次数
+uint8_t  g_cfgLockCount         = 5;     // 锁车需连续满足次数
+uint16_t g_cfgDisconnectLockMs  = 5000;  // 断连自动锁车延时 ms
 
 /* ─────────────────────────────────────────────────────────────────
  * 模块内部状态 (仅 keygo_core 可见)
@@ -205,22 +212,25 @@ void KeyGo_ProcessStateMachine(void)
 
     if (g_filteredRSSI == -999.0f || g_actionActive) return;
 
-    if (g_filteredRSSI > RSSI_UNLOCK_THRESHOLD) {
+    // ★ v3.5: 使用可运行时配置的阈值变量 (非 #define 硬编码)
+    if (g_filteredRSSI > g_cfgUnlockThreshold) {
         g_unlockCounter++;
         g_lockCounter = 0;
-        if (g_unlockCounter >= UNLOCK_COUNT_REQUIRED && g_keyState != KSTATE_UNLOCKED) {
+        if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED) {
             g_keyState = KSTATE_UNLOCKED;
             g_unlockCounter = 0;
-            PRINT("[STATE] unlock threshold reached\n");
+            PRINT("[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
+                  (int)g_filteredRSSI, g_cfgUnlockThreshold, g_cfgUnlockCount);
             KeyGo_Unlock();
         }
-    } else if (g_filteredRSSI < RSSI_LOCK_THRESHOLD) {
+    } else if (g_filteredRSSI < g_cfgLockThreshold) {
         g_lockCounter++;
         g_unlockCounter = 0;
-        if (g_lockCounter >= LOCK_COUNT_REQUIRED && g_keyState != KSTATE_LOCKED) {
+        if (g_lockCounter >= g_cfgLockCount && g_keyState != KSTATE_LOCKED) {
             g_keyState = KSTATE_LOCKED;
             g_lockCounter = 0;
-            PRINT("[STATE] lock threshold reached\n");
+            PRINT("[STATE] lock threshold reached (RSSI=%d < %d, count=%d)\n",
+                  (int)g_filteredRSSI, g_cfgLockThreshold, g_cfgLockCount);
             KeyGo_Lock();
         }
     } else {
@@ -327,6 +337,87 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
     }
 
     PRINT("[CMD] unknown: %s\n", cmd);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ v3.5: FF01 配置解析 (KeyGo_ParseConfig)
+ *
+ *   解析 App 通过 FF01 下发的配置文本:
+ *     "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000"
+ *
+ *   与 ESP32 版本的 parseConfigLine() 功能等效。
+ *   返回: 0=无配置变更, 1=有配置变更
+ *
+ *   注意: 纯 RSSI 值 ("-50") 或 "rssi=-50" 由此函数的外部调用者处理，
+ *         本函数只处理非 RSSI 的配置 key。
+ * ───────────────────────────────────────────────────────────────── */
+uint8_t KeyGo_ParseConfig(const char *line)
+{
+    if (!line || line[0] == '\0') return 0;
+
+    uint8_t changed = 0;
+    const char *p = line;
+
+    while (*p) {
+        // 跳过前导空格
+        while (*p == ' ') p++;
+        if (*p == '\0') break;
+
+        // 找到 '='
+        const char *eq = p;
+        while (*eq && *eq != '=' && *eq != ' ') eq++;
+        if (*eq != '=') { p = eq; continue; }
+
+        // 提取 key (p 到 eq)
+        uint8_t keyLen = (uint8_t)(eq - p);
+        if (keyLen == 0) { p = eq + 1; continue; }
+
+        // ★ 跳过 "rssi" key — RSSI 值由外部调用者处理
+        if (keyLen == 4 && p[0] == 'r' && p[1] == 's' && p[2] == 's' && p[3] == 'i') {
+            p = eq + 1;
+            while (*p && *p != ' ') p++;
+            continue;
+        }
+
+        // 提取 value (eq+1 到下一个空格或结束)
+        const char *valStart = eq + 1;
+        const char *valEnd = valStart;
+        while (*valEnd && *valEnd != ' ') valEnd++;
+
+        int val = 0;
+        {
+            const char *vp = valStart;
+            int sign = 1;
+            if (*vp == '-') { sign = -1; vp++; }
+            else if (*vp == '+') { vp++; }
+            while (*vp >= '0' && *vp <= '9') {
+                val = val * 10 + (*vp - '0');
+                vp++;
+            }
+            val *= sign;
+        }
+
+        // ── 匹配 key 并更新对应变量 ──
+        if      (keyLen == 6 && tmos_memcmp(p, "unlock", 6))   { g_cfgUnlockThreshold = (int16_t)val; changed = 1; }
+        else if (keyLen == 4 && tmos_memcmp(p, "lock", 4))     { g_cfgLockThreshold = (int16_t)val;   changed = 1; }
+        else if (keyLen == 2 && tmos_memcmp(p, "uc", 2))       { g_cfgUnlockCount = (uint8_t)val;     changed = 1; }
+        else if (keyLen == 2 && tmos_memcmp(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
+        else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) { /* App 轮询间隔，固件不直接使用 */ changed = 1; }
+        else if (keyLen == 5 && tmos_memcmp(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
+
+        p = valEnd;
+    }
+
+    if (changed) {
+        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d\n",
+              g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
+              g_cfgLockCount, g_cfgDisconnectLockMs);
+        // ★ 配置变更后重置计数器，避免旧阈值下的累积计数影响新阈值判断
+        g_unlockCounter = 0;
+        g_lockCounter   = 0;
+    }
+
+    return changed;
 }
 
 /*********************************************************************

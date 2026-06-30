@@ -80,6 +80,7 @@ function onSwiperChange(e) {
 // ★ 首次显示时的自动扫描
 let _autoScanDone = false
 onShow(async () => {
+  themeStore.applyNavBar()
   if (bleStore.connected) return
   if (_autoScanDone) return
   _autoScanDone = true

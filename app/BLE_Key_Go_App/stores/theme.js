@@ -182,8 +182,8 @@ export const useThemeStore = defineStore('theme', () => {
     // 2. 检测当前系统主题
     systemTheme.value = getSystemTheme()
 
-    // 3. 应用导航栏
-    applyNavBar()
+    // 3. 应用导航栏（延迟 300ms 确保首屏页面已挂载，否则 setNavigationBarColor 无效）
+    setTimeout(() => applyNavBar(), 300)
 
     // 4. 监听系统主题变化（小程序平台有效）
     try {

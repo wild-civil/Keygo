@@ -9,7 +9,7 @@
  *   - 新增 deviceNamePrefix 用于名字前缀匹配
  */
 
-// BLE GATT 服务 UUID（与 ESP32 固件一致）
+// BLE GATT 服务 UUID（与 KeyGo 设备固件一致）
 export const BLE_CONFIG = {
   deviceNamePrefix: 'KeyGo',                                    // ★ v2.2: 前缀匹配，设备名为 KeyGo-XXXXXX
   serviceUUID: '0000FF00-0000-1000-8000-00805F9B34FB',

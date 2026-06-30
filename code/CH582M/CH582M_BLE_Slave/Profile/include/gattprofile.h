@@ -3,11 +3,11 @@
  * Author             : KeyGo v3.5 (CH582M 移植)
  * Date               : 2026/06/30
  * Description        : BLE Key-Go GATT 服务 (UUID=0xFF00)
- *                       FF01: RSSI 写入 (WO, 加密)
- *                       FF02: 状态通知 (Notify, 加密)
- *                       FF03: 命令写入 (WO, 加密)
- *                       FF04: 设备序列号 (RO, 加密)
- *                       全部特征值要求加密链路
+ *                       FF01: RSSI 写入 (WO, 无加密)
+ *                       FF02: 状态通知 (Notify, 无加密)
+ *                       FF03: 命令写入 (WO, 无加密)
+ *                       FF04: 设备序列号 (RO, 无加密)
+ *                       连接即可读写，无加密要求
  *********************************************************************************/
 
 #ifndef GATTPROFILE_H
@@ -24,10 +24,10 @@ extern "C" {
  */
 
 // Profile Parameter IDs
-#define SIMPLEPROFILE_CHAR1         0  // FF01: RSSI 值 (Write Only, encrypted)
-#define SIMPLEPROFILE_CHAR2         1  // FF02: 状态通知 (Notify, encrypted)
-#define SIMPLEPROFILE_CHAR3         2  // FF03: 命令 (Write Only, encrypted)
-#define SIMPLEPROFILE_CHAR4         3  // FF04: 序列号 (Read Only, encrypted)
+#define SIMPLEPROFILE_CHAR1         0  // FF01: RSSI 值 (Write Only)
+#define SIMPLEPROFILE_CHAR2         1  // FF02: 状态通知 (Notify)
+#define SIMPLEPROFILE_CHAR3         2  // FF03: 命令 (Write Only)
+#define SIMPLEPROFILE_CHAR4         3  // FF04: 序列号 (Read Only)
 
 // Simple Profile Service UUID
 #define SIMPLEPROFILE_SERV_UUID     0xFF00
@@ -42,7 +42,8 @@ extern "C" {
 #define SIMPLEPROFILE_SERVICE       0x00000001
 
 // ★ v3.5: Characteristic buffer lengths (MTU=23 默认, 建议协商至 247+)
-#define SIMPLEPROFILE_CHAR1_LEN     20    // FF01: RSSI 文本 (e.g. "-50\0")
+//   ★ v3.5.1: FF01 从 20→80 — 需容纳配置字符串 "unlock=-39 lock=-46 uc=2 lc=3 dlock=5000" (~45 字节)
+#define SIMPLEPROFILE_CHAR1_LEN     80    // FF01: RSSI 注入 + 配置下发 (key=value 格式)
 #define SIMPLEPROFILE_CHAR2_LEN     200   // FF02: JSON 状态
 #define SIMPLEPROFILE_CHAR3_LEN     50    // FF03: 命令文本
 #define SIMPLEPROFILE_CHAR4_LEN     12    // FF04: 序列号 (12 hex chars)

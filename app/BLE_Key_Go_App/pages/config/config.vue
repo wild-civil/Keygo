@@ -111,14 +111,15 @@
         <button class="btn-submit" @tap="handleSubmit" :disabled="!bleStore.connected">
           下发配置到设备
         </button>
-        <text class="submit-hint">配置将保存到 ESP32 的 NVS 中，断电不丢失</text>
+        <text class="submit-hint">配置将保存到设备内置存储中，断电不丢失</text>
       </view>
     </template>
   </view>
 </template>
 
 <script setup>
-import { reactive, computed, watch, onMounted } from 'vue'
+import { reactive, computed, watch } from 'vue'
+import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
@@ -126,6 +127,11 @@ import { toast } from '@/utils/toast.js'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
+
+onShow(() => {
+  themeStore.applyNavBar()
+  syncFromStore()  // ★ 每次显示配置页时从 store 同步（包括退出重进后恢复的持久化值）
+})
 
 // ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
 const sliderTrackColor = computed(() => themeStore.isDark ? '#2a2a5e' : '#e0e4e8')
@@ -147,11 +153,9 @@ function syncFromStore() {
   localConfig.lock = bleStore.lockThreshold
   localConfig.uc = bleStore.unlockCountRequired
   localConfig.lc = bleStore.lockCountRequired
-  localConfig.interval = 500
+  localConfig.interval = bleStore._rssiPollInterval || 800  // ★ 从 store 读取，不再硬编码 500
   localConfig.dlock = bleStore.disconnectLockDelayMs
 }
-
-onMounted(() => { syncFromStore() })
 
 watch(() => bleStore.unlockThreshold, () => { localConfig.unlock = bleStore.unlockThreshold })
 watch(() => bleStore.lockThreshold, () => { localConfig.lock = bleStore.lockThreshold })

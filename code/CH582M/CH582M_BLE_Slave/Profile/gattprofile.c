@@ -2,7 +2,7 @@
  * File Name          : gattprofile.c
  * Author             : KeyGo v3.5 (CH582M 移植)
  * Date               : 2026/06/30
- * Description        : BLE Key-Go GATT 服务 — 4 个加密特征值
+ * Description        : BLE Key-Go GATT 服务 — 4 个无加密特征值
  *                       FF01(RSSI) = WO, FF02(Status) = Notify,
  *                       FF03(Command) = WO, FF04(Serial) = RO
  *********************************************************************************/

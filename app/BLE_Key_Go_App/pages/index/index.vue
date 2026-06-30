@@ -71,7 +71,7 @@
       <view class="empty-state" v-if="!bleStore.scanning && bleStore.devices.length === 0">
         <text class="empty-icon">🔍</text>
         <text class="empty-text">点击"扫描设备"搜索附近 KeyGo 设备</text>
-        <text class="empty-sub">确保 ESP32-C3 已上电并广播中（LED 闪烁）</text>
+        <text class="empty-sub">确保 KeyGo 设备已上电并广播中</text>
       </view>
     </view>
 
@@ -160,6 +160,7 @@ const pwModal = reactive({
 })
 
 onShow(() => {
+  themeStore.applyNavBar()
   if (bleStore.connected) return
   if (_autoScanDone) return
   _autoScanDone = true
@@ -184,7 +185,7 @@ async function handleScanToggle() {
   try {
     await bleStore.startScanDevices(12)
     if (bleStore.devices.length === 0) {
-      toast.info('未发现设备，请确认 ESP32 已上电')
+      toast.info('未发现设备，请确认 KeyGo 设备已上电')
     }
   } catch {
     toast.error('请先打开手机蓝牙')
@@ -196,7 +197,7 @@ async function handleScan() {
   try {
     await bleStore.startScanDevices(12)
     if (bleStore.devices.length === 0) {
-      toast.info('未发现设备，请确认 ESP32 已上电')
+      toast.info('未发现设备，请确认 KeyGo 设备已上电')
     }
   } catch {
     toast.error('请先打开手机蓝牙')
