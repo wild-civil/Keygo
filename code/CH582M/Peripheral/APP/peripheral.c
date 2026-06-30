@@ -85,39 +85,25 @@
 static uint8_t Peripheral_TaskID = INVALID_TASK_ID; // Task ID for internal task/event processing
 
 // GAP - SCAN RSP data (max size = 31 bytes)
-static uint8_t scanRspData[] = {
-    // complete name
-    0x12, // length of this data
-    GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    'S',
-    'i',
-    'm',
-    'p',
-    'l',
-    'e',
-    ' ',
-    'P',
-    'e',
-    'r',
-    'i',
-    'p',
-    'h',
-    'e',
-    'r',
-    'a',
-    'l',
-    // connection interval range
-    0x05, // length of this data
-    GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE,
-    LO_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL), // 100ms
-    HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL),
-    LO_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL), // 1s
-    HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),
+static uint8_t scanRspData[] =
+{
+  // complete name: BLE-Key-Go
+  0x0A,   // length = 1(类型Type 字节) + 10(数据) = 11 = 0x0B
+  GAP_ADTYPE_LOCAL_NAME_COMPLETE,
+  'B','L','E','-','K','e','y','-','G','o',
 
-    // Tx power level
-    0x02, // length of this data
-    GAP_ADTYPE_POWER_LEVEL,
-    0 // 0dBm
+  // connection interval range
+  0x05,   // length of this data
+  GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE,
+  LO_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL), // 100ms
+  HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL),
+  LO_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL), // 1s
+  HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),
+
+  // Tx power level
+  0x02,   // length of this data
+  GAP_ADTYPE_POWER_LEVEL,
+  0       // 0dBm
 };
 
 // GAP - Advertisement data (max size = 31 bytes, though this is
@@ -130,12 +116,12 @@ static uint8_t advertData[] = {
     GAP_ADTYPE_FLAGS,
     DEFAULT_DISCOVERABLE_MODE | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
 
-    // service UUID, to notify central devices what services are included
+    // service UUID, to notify central devices what services are included : 0xFF00
     // in this peripheral
     0x03,                  // length of this data
     GAP_ADTYPE_16BIT_MORE, // some of the UUID's, but not all
-    LO_UINT16(SIMPLEPROFILE_SERV_UUID),
-    HI_UINT16(SIMPLEPROFILE_SERV_UUID)
+    0x00,   // FF00 低字节在前（小端）
+    0xFF,   // FF00 高字节在后 ? 小知识：BLE 是小端模式（Little Endian），低字节在前。 所以 0xFF00 写成 [0x00, 0xFF]。
 };
 
 // GAP GATT Attributes

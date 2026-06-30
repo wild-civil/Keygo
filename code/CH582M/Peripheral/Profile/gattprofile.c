@@ -56,9 +56,9 @@ const uint8_t simpleProfilechar3UUID[ATT_BT_UUID_SIZE] = {
 const uint8_t simpleProfilechar4UUID[ATT_BT_UUID_SIZE] = {
     LO_UINT16(SIMPLEPROFILE_CHAR4_UUID), HI_UINT16(SIMPLEPROFILE_CHAR4_UUID)};
 
-// Characteristic 5 UUID: 0xFFF5
-const uint8_t simpleProfilechar5UUID[ATT_BT_UUID_SIZE] = {
-    LO_UINT16(SIMPLEPROFILE_CHAR5_UUID), HI_UINT16(SIMPLEPROFILE_CHAR5_UUID)};
+// // Characteristic 5 UUID: 0xFFF5
+// const uint8_t simpleProfilechar5UUID[ATT_BT_UUID_SIZE] = {
+//     LO_UINT16(SIMPLEPROFILE_CHAR5_UUID), HI_UINT16(SIMPLEPROFILE_CHAR5_UUID)};
 
 /*********************************************************************
  * EXTERNAL VARIABLES
@@ -243,12 +243,12 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
         0,
         &simpleProfileChar5Props},
 
-    // Characteristic Value 5
-    {
-        {ATT_BT_UUID_SIZE, simpleProfilechar5UUID},
-        GATT_PERMIT_AUTHEN_READ,
-        0,
-        simpleProfileChar5},
+    // // Characteristic Value 5
+    // {
+    //     {ATT_BT_UUID_SIZE, simpleProfilechar5UUID},
+    //     GATT_PERMIT_AUTHEN_READ,
+    //     0,
+    //     simpleProfileChar5},
 
     // Characteristic 5 User Description
     {
@@ -569,17 +569,17 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle, gattAttribute_t *
                 tmos_memcpy(pValue, pAttr->pValue, *pLen);
                 break;
 
-            case SIMPLEPROFILE_CHAR5_UUID:
-                if(maxLen > SIMPLEPROFILE_CHAR5_LEN)
-                {
-                    *pLen = SIMPLEPROFILE_CHAR5_LEN;
-                }
-                else
-                {
-                    *pLen = maxLen;
-                }
-                tmos_memcpy(pValue, pAttr->pValue, *pLen);
-                break;
+            // case SIMPLEPROFILE_CHAR5_UUID:
+            //     if(maxLen > SIMPLEPROFILE_CHAR5_LEN)
+            //     {
+            //         *pLen = SIMPLEPROFILE_CHAR5_LEN;
+            //     }
+            //     else
+            //     {
+            //         *pLen = maxLen;
+            //     }
+            //     tmos_memcpy(pValue, pAttr->pValue, *pLen);
+            //     break;
 
             default:
                 // Should never get here! (characteristics 3 and 4 do not have read permissions)
