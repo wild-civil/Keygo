@@ -1,7 +1,7 @@
 <template>
   <view class="page-index" :class="themeClass">
     <!-- ★ 顶部状态卡片 -->
-    <view class="status-card" :class="{ connected: bleStore.connected, bonded: bleStore.hasBondedDevices }">
+    <view class="status-card" :class="{ connected: bleStore.connected }">
       <view class="status-icon">
         <text v-if="bleStore.connected">🔗</text>
         <text v-else>📡</text>
@@ -12,10 +12,7 @@
           <text v-if="bleStore.connected && bleStore.customDeviceName" class="custom-name-display">{{ bleStore.customDeviceName }}</text>
         </text>
         <text class="status-sub" v-if="bleStore.connected">
-          {{ bleStore.deviceName }}
-          <text v-if="bleStore.hasBondedDevices" class="badge-bound">已绑定</text>
-          <text v-else class="badge-unbound">未配对</text>
-          | {{ bleStore.stateText }}
+          {{ bleStore.deviceName }} | {{ bleStore.stateText }}
         </text>
         <text class="status-sub" v-else>扫描下方设备进行连接</text>
       </view>
@@ -40,41 +37,6 @@
         <text>锁车 {{ bleStore.lockThreshold }} dBm</text>
         <text>解锁 {{ bleStore.unlockThreshold }} dBm</text>
       </view>
-    </view>
-
-    <!-- ★ v3.5.10: Just Works 加密后 PIN 验证提示（新配对 / bond 失效后重连） -->
-    <view class="bind-hint" v-if="bleStore.connected && bleStore.isEncrypted && !bleStore.pinVerified">
-      <text class="bind-hint-text">🔐 请输入设备 PIN 完成验证</text>
-      <text class="takeover-sub">输入正确的 PIN 后才能控制车辆</text>
-      <view class="verify-pin-row">
-        <input class="verify-pin-input" v-model="verifyPinInput" type="number" password
-               :maxlength="6" placeholder="设备 PIN（默认 123456）" />
-        <button class="verify-pin-btn" @tap="handleVerifyPin">验证</button>
-      </view>
-      <text class="verify-error" v-if="bleStore.pinVerifyFail">❌ PIN 错误，请重试</text>
-      <text class="takeover-sub" v-if="bleStore.pinDefault">💡 出厂默认 PIN: <text class="highlight">123456</text></text>
-    </view>
-
-    <!-- ★ 等待加密提示 -->
-    <view class="bind-hint" v-if="bleStore.connected && !bleStore.isEncrypted">
-      <text class="bind-hint-text">⏳ 正在建立加密连接，请稍候...</text>
-      <text class="takeover-sub">首次使用 Just Works 静默加密，无需手动配对</text>
-    </view>
-
-    <!-- ★ 配对模式提示 -->
-    <view class="bind-hint takeover-active" v-if="bleStore.pairingMode">
-      <text class="bind-hint-text">🟢 配对模式已开启（30秒窗口）</text>
-      <text class="takeover-sub">任何手机现在都可以配对连接此设备</text>
-    </view>
-
-    <!-- ★ 默认 PIN 警告 -->
-    <view class="default-pin-warn" v-if="bleStore.connected && bleStore.pinDefault">
-      <view class="warn-icon">⚠️</view>
-      <view class="warn-body">
-        <text class="warn-title">建议修改默认 PIN</text>
-        <text class="warn-desc">当前仍使用出厂 PIN <text class="highlight">123456</text>，安全性较低</text>
-      </view>
-      <text class="warn-arrow" @tap="showChangePinDialog">修改 ›</text>
     </view>
 
     <!-- 设备扫描区域 -->
@@ -113,9 +75,9 @@
       </view>
     </view>
 
-    <!-- ★ 设备管理（需 PIN 验证通过） -->
-    <view class="password-mgmt" v-if="bleStore.connected && bleStore.isEncrypted && bleStore.pinVerified">
-      <text class="section-title mgmt-title">🔐 设备管理</text>
+    <!-- ★ 设备管理 -->
+    <view class="password-mgmt" v-if="bleStore.connected">
+      <text class="section-title mgmt-title">⚙️ 设备管理</text>
       <view class="mgmt-rows">
         <view class="mgmt-row" @tap="showNameDialog">
           <text class="mgmt-label">设备名称</text>
@@ -123,20 +85,11 @@
           <text class="mgmt-val name-hint" v-else>点击设置（如车牌号）</text>
           <text class="mgmt-arrow">›</text>
         </view>
-        <view class="mgmt-row" @tap="showChangePinDialog">
-          <text class="mgmt-label">修改配对 PIN</text>
-          <text class="mgmt-val" v-if="bleStore.pinDefault">默认 123456</text>
-          <text class="mgmt-val" v-else>已自定义</text>
-          <text class="mgmt-arrow">›</text>
-        </view>
-      </view>
-      <view class="mgmt-hint">
-        <text>修改 PIN 后将清空所有配对记录，所有手机需重新配对</text>
       </view>
     </view>
 
-    <!-- ★ 快捷操作（需 PIN 验证通过） -->
-    <view class="quick-actions" v-if="bleStore.connected && bleStore.isEncrypted && bleStore.pinVerified">
+    <!-- ★ 快捷操作 -->
+    <view class="quick-actions" v-if="bleStore.connected">
       <button class="action-btn unlock-btn" @tap="handleUnlock">
         <text class="action-icon">🔓</text>
         <text class="action-text">解锁</text>
@@ -181,7 +134,7 @@
 
 
 <script setup>
-import { reactive, ref, computed } from 'vue'
+import { reactive, computed } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
@@ -190,9 +143,6 @@ const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 let _autoScanDone = false
-
-// ★ v3.5.10: PIN 验证输入
-const verifyPinInput = ref('')
 
 // ★ 通用 pwModal
 const pwModal = reactive({
@@ -203,10 +153,9 @@ const pwModal = reactive({
   value: '',
   showDefaultHint: false,
   defaultHint: '',
-  maxLen: 6,
+  maxLen: 20,
   confirmText: '确定',
   mode: '',
-  oldPin: '',
   onConfirm: () => {}
 })
 
@@ -281,30 +230,6 @@ async function handleDisconnect() {
   }
 }
 
-// ★ v3.5.10: PIN 验证
-async function handleVerifyPin() {
-  const pin = verifyPinInput.value.trim()
-  if (!pin || !/^\d{4,6}$/.test(pin)) {
-    toast.info('请输入 4-6 位数字 PIN')
-    return
-  }
-  uni.showLoading({ title: '验证中...', mask: true })
-  try {
-    const result = await bleStore.verifyPin(pin)
-    uni.hideLoading()
-    if (result.success) {
-      verifyPinInput.value = ''
-      toast.success('验证成功，设备已授权')
-    } else {
-      verifyPinInput.value = ''
-      toast.error('PIN 错误，请重试')
-    }
-  } catch (err) {
-    uni.hideLoading()
-    toast.error(err.message || '验证失败')
-  }
-}
-
 // ==================== 车辆控制 ====================
 
 async function handleUnlock() {
@@ -337,8 +262,8 @@ async function handleTrunk() {
 // ==================== 设备名称 ====================
 
 function showNameDialog() {
-  if (!bleStore.connected || !bleStore.isEncrypted) {
-    toast.info('请先连接并配对设备')
+  if (!bleStore.connected) {
+    toast.info('请先连接设备')
     return
   }
   pwModal.mode = 'setName'
@@ -372,70 +297,6 @@ async function handleSetName() {
   }
 }
 
-// ==================== PIN 修改 ====================
-
-function showChangePinDialog() {
-  if (!bleStore.connected || !bleStore.isEncrypted) {
-    toast.info('请先连接并配对设备')
-    return
-  }
-  pwModal.mode = 'changePinStep1'
-  pwModal.title = '输入当前 PIN'
-  pwModal.hint = '请输入设备当前的配对 PIN'
-  pwModal.placeholder = '当前 PIN'
-  pwModal.value = ''
-  pwModal.showDefaultHint = bleStore.pinDefault
-  pwModal.defaultHint = '出厂默认: 123456'
-  pwModal.maxLen = 6
-  pwModal.confirmText = '下一步'
-  pwModal.onConfirm = onPinStep1
-  pwModal.visible = true
-}
-
-function onPinStep1() {
-  const pin = pwModal.value.trim()
-  if (!pin || !/^\d{4,6}$/.test(pin)) {
-    toast.info('请输入 4-6 位数字 PIN')
-    return
-  }
-  pwModal.oldPin = pin
-  pwModal.mode = 'changePinStep2'
-  pwModal.title = '设置新 PIN'
-  pwModal.hint = '4-6 位数字，修改后将清空所有配对记录'
-  pwModal.placeholder = '新 PIN（4-6位数字）'
-  pwModal.value = ''
-  pwModal.showDefaultHint = false
-  pwModal.defaultHint = ''
-  pwModal.maxLen = 6
-  pwModal.confirmText = '确认修改'
-  pwModal.onConfirm = onPinStep2
-}
-
-async function onPinStep2() {
-  const newPin = pwModal.value.trim()
-  if (!newPin || !/^\d{4,6}$/.test(newPin)) {
-    toast.info('新 PIN 须为 4-6 位数字')
-    return
-  }
-  pwModal.visible = false
-  uni.showLoading({ title: '修改中...', mask: true })
-  try {
-    const result = await bleStore.changePin(pwModal.oldPin, newPin)
-    uni.hideLoading()
-    if (result.success) {
-      toast.success('PIN 修改成功！设备已断连，请重新扫描配对')
-    } else if (result.errorCode === 1) {
-      toast.error('旧 PIN 错误，请重试')
-    } else if (result.errorCode === 2) {
-      toast.error('新 PIN 格式错误，须为 4-6 位数字')
-    } else {
-      toast.error('修改失败，请重试')
-    }
-  } catch (err) {
-    uni.hideLoading()
-    toast.error(err.message || '修改失败')
-  }
-}
 </script>
 
 <style scoped>
@@ -462,28 +323,6 @@ async function onPinStep2() {
 .status-card.connected {
   background: var(--gradient-connected);
   border-color: var(--alpha-33);
-}
-
-.status-card.bonded {
-  border-color: var(--green-alpha-33);
-}
-
-.badge-bound {
-  background: var(--green-alpha-33);
-  color: var(--accent-green);
-  font-size: 20rpx;
-  padding: 2rpx 10rpx;
-  border-radius: 8rpx;
-  margin-left: 8rpx;
-}
-
-.badge-unbound {
-  background: var(--orange-alpha-33);
-  color: var(--accent-orange);
-  font-size: 20rpx;
-  padding: 2rpx 10rpx;
-  border-radius: 8rpx;
-  margin-left: 8rpx;
 }
 
 .custom-name-display {
@@ -666,126 +505,6 @@ async function onPinStep2() {
 .empty-text { font-size: 26rpx; color: var(--text-tertiary); }
 .empty-sub { font-size: 22rpx; color: var(--text-muted); margin-top: 8rpx; }
 
-/* ===== 配对提示 ===== */
-.bind-hint {
-  background: var(--bg-warning);
-  border: 1rpx solid var(--border-warning);
-  border-radius: 16rpx;
-  padding: 24rpx;
-  margin-bottom: 30rpx;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 16rpx;
-}
-
-.bind-hint.takeover-active {
-  background: var(--bg-success);
-  border-color: var(--green-alpha-40);
-}
-
-.bind-hint.takeover-active .bind-hint-text {
-  color: var(--accent-green);
-}
-
-.bind-hint-text {
-  color: var(--accent-orange);
-  font-size: 24rpx;
-  text-align: center;
-}
-
-.takeover-sub {
-  color: var(--text-tertiary);
-  font-size: 22rpx;
-  text-align: center;
-  line-height: 1.6;
-}
-
-.highlight { color: var(--accent); font-weight: 700; }
-
-/* ===== v3.5.10: PIN 验证输入行 ===== */
-.verify-pin-row {
-  display: flex;
-  gap: 16rpx;
-  width: 100%;
-  align-items: center;
-}
-
-.verify-pin-input {
-  flex: 1;
-  height: 72rpx;
-  background: var(--bg-card);
-  border: 1rpx solid var(--border);
-  border-radius: 12rpx;
-  font-size: 26rpx;
-  color: var(--text-primary);
-  text-align: center;
-  letter-spacing: 6rpx;
-  padding: 0 20rpx;
-  box-sizing: border-box;
-}
-
-.verify-pin-btn {
-  width: 140rpx;
-  height: 72rpx;
-  background: var(--gradient-accent);
-  color: #fff;
-  font-size: 26rpx;
-  font-weight: 600;
-  border-radius: 12rpx;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-}
-
-.verify-error {
-  color: var(--accent-red);
-  font-size: 22rpx;
-  text-align: center;
-  margin-top: 4rpx;
-}
-
-/* ===== 默认 PIN 警告卡片 ===== */
-.default-pin-warn {
-  background: var(--gradient-warn-card);
-  border: 1rpx solid var(--orange-alpha-27);
-  border-radius: 16rpx;
-  padding: 24rpx;
-  margin-bottom: 30rpx;
-  display: flex;
-  align-items: center;
-  gap: 16rpx;
-}
-
-.warn-icon { font-size: 36rpx; }
-
-.warn-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 6rpx;
-}
-
-.warn-title {
-  font-size: 26rpx;
-  color: var(--accent-orange);
-  font-weight: 600;
-}
-
-.warn-desc {
-  font-size: 22rpx;
-  color: var(--text-tertiary);
-  line-height: 1.5;
-}
-
-.warn-arrow {
-  font-size: 28rpx;
-  color: var(--accent-orange);
-  font-weight: 600;
-  padding: 8rpx;
-}
-
 /* ===== 设备管理 ===== */
 .password-mgmt {
   background: var(--bg-card);
@@ -811,12 +530,6 @@ async function onPinStep2() {
 .mgmt-val { font-size: 24rpx; color: var(--mgmt-val); margin-right: 12rpx; }
 .mgmt-val.name-hint { color: var(--text-muted); font-size: 24rpx; }
 .mgmt-arrow { font-size: 28rpx; color: var(--text-muted); }
-
-.mgmt-hint {
-  font-size: 20rpx;
-  color: var(--mgmt-hint);
-  line-height: 1.4;
-}
 
 /* ===== 快捷操作 ===== */
 .quick-actions {
