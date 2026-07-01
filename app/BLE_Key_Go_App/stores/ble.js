@@ -1039,7 +1039,10 @@ export const useBleStore = defineStore('ble', {
       if (!this.connected || !this.deviceId) return
       this.rssi = rssiValue
       this.filteredRssi = rssiValue
-      // ★ 手动命令冷却期间暂停 RSSI 上报到设备（避免设备端状态机立即覆盖手动操作）
+      // ★ v3.6-fixH: manualCooldown 阻止手机转发 RSSI 到设备（备用通道）
+      //   设备主 RSSI 通道是原生 BLE GAP 读取 (GAPRole_ReadRssiCmd)，不依赖手机转发。
+      //   真正阻止设备自动锁/解锁的是固件端 g_manualCooldown (8s) + 计数器清零。
+      //   此处仅为减少不必要的 BLE 写操作。
       if (this.manualCooldown) return
       try {
         await sendConfig(this.deviceId, { rssi: rssiValue })
@@ -1118,10 +1121,10 @@ export const useBleStore = defineStore('ble', {
      */
     async unlock() {
       if (!this.connected) throw new Error('未连接设备')
-      // ★ 必须在 sendCommand 之前设置冷却标记！
-      //   因为设备收到 UNLOCK 后会立即回报 {"st":"UNLOCKED"} Notify，
-      //   该 Notify 在 await 期间即可通过事件回调触发 _parseSingleStatus()，
-      //   若此时 manualCooldown 仍为 false，RSSI 防御会立即将状态强制回退 LOCKED。
+      // ★ v3.6-fixH: manualCooldown 阻断手机→设备 RSSI 转发（备用通道，非主力）
+      //   真正的保护链在固件端：sendCommand("UNLOCK") → KeyGo_HandleCommand():
+      //     ① g_manualCooldown=1 (8s 内跳过状态机)
+      //     ② g_unlockCounter/g_lockCounter=0 (清零防止累积计数触发自动操作)
       this.manualCooldown = true
       if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
       this._cooldownTimer = setTimeout(() => {
@@ -1134,7 +1137,7 @@ export const useBleStore = defineStore('ble', {
 
     async lock() {
       if (!this.connected) throw new Error('未连接设备')
-      // ★ 同上，必须在发送命令前设置冷却标记
+      // ★ v3.6-fixH: 同上，固件端主导保护
       this.manualCooldown = true
       if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
       this._cooldownTimer = setTimeout(() => {

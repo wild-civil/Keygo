@@ -319,7 +319,9 @@ async function handleScanToggle() {
   }
   try {
     await bleStore.startScanDevices(12)
-    if (bleStore.devices.length === 0) {
+    // ★ v3.6-fixH: 扫描期间可能已自动重连成功，connected=true 时不弹出 toast
+    //   bug: startScanDevices 是 12s 异步操作，后台重连成功后 devices 为空但已连接
+    if (!bleStore.connected && bleStore.devices.length === 0) {
       toast.info('未发现设备，请确认 KeyGo 设备已上电')
     }
   } catch (err) {
@@ -336,7 +338,8 @@ async function handleScan() {
   if (bleStore.scanning) return
   try {
     await bleStore.startScanDevices(12)
-    if (bleStore.devices.length === 0) {
+    // ★ v3.6-fixH: 同上，扫描期间可能已连接
+    if (!bleStore.connected && bleStore.devices.length === 0) {
       toast.info('未发现设备，请确认 KeyGo 设备已上电')
     }
   } catch (err) {

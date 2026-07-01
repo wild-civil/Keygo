@@ -15,7 +15,10 @@
  * ───────────────────────────────────────────────────────────────── */
 
 #define SPIKE_DISCARD_COUNT     2
-#define MANUAL_COOLDOWN_MS      3000
+// ★ v3.6-fixH: 从 3000ms → 8000ms，匹配 App 端 8s 冷却
+//   bug: 固件冷却 3s 到期后状态机恢复运行，仅 ~5.5s 后即可自动覆盖手动操作，
+//        用户看到 App 显示"冷却 8s"但实际只有 3s 有效
+#define MANUAL_COOLDOWN_MS      8000
 #define STATUS_JSON_MAX_LEN     180
 
 /* ─────────────────────────────────────────────────────────────────
@@ -349,7 +352,11 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
 
     // UNLOCK
     if (len >= 6 && upper[0] == 'U' && upper[1] == 'N' && upper[2] == 'L' && upper[3] == 'O' && upper[4] == 'C' && upper[5] == 'K') {
-        g_keyState = KSTATE_UNLOCKED;
+        g_keyState       = KSTATE_UNLOCKED;
+        // ★ v3.6-fixH: 重置状态机计数器，防止冷却结束后累积的旧计数触发自动操作
+        //   bug: 手动解锁后冷却期内计数未清零，冷却结束后状态机立即用累积计数覆盖手动状态
+        g_unlockCounter  = 0;
+        g_lockCounter    = 0;
         KeyGo_Unlock();
         KeyGo_NotifyStatus();
         return;
@@ -357,7 +364,10 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
 
     // LOCK
     if (len >= 4 && upper[0] == 'L' && upper[1] == 'O' && upper[2] == 'C' && upper[3] == 'K') {
-        g_keyState = KSTATE_LOCKED;
+        g_keyState       = KSTATE_LOCKED;
+        // ★ v3.6-fixH: 同上，重置计数器
+        g_unlockCounter  = 0;
+        g_lockCounter    = 0;
         KeyGo_Lock();
         KeyGo_NotifyStatus();
         return;
