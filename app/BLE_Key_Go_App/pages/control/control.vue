@@ -75,6 +75,23 @@
           <button class="rssi-preset far" @tap="setRSSI(-75)">-75 远</button>
         </view>
       </view>
+
+      <!-- ★ v3.7: RSSI 冷却时间配置 -->
+      <view class="rssi-sim-section">
+        <view class="rssi-sim-title">⏱ RSSI 状态机冷却时长</view>
+        <view class="rssi-sim-hint">手动解锁/锁车后，RSSI 自动状态机暂停的时间（当前：{{ bleStore.manualCooldownMs / 1000 }}s）</view>
+        <view class="rssi-presets">
+          <button
+            v-for="slot in cooldownSlots"
+            :key="slot.ms"
+            class="rssi-preset"
+            :class="{ active: bleStore.manualCooldownMs === slot.ms }"
+            :style="{ background: bleStore.manualCooldownMs === slot.ms ? 'var(--accent)' : 'var(--bg-card)', color: bleStore.manualCooldownMs === slot.ms ? '#fff' : 'var(--text-tertiary)', borderColor: bleStore.manualCooldownMs === slot.ms ? 'var(--accent)' : 'var(--border)' }"
+            @tap="handleCooldownChange(slot.ms)">
+            {{ slot.label }}
+          </button>
+        </view>
+      </view>
     </template>
   </view>
 </template>
@@ -137,6 +154,23 @@ async function setRSSI(value) {
     toast.info(`RSSI 已设为 ${value}`)
   } catch {
     toast.error('RSSI 设置失败')
+  }
+}
+
+// ★ v3.7: 冷却时间预设
+const cooldownSlots = [
+  { ms: 3000, label: '3s 快速' },
+  { ms: 5000, label: '5s 标准' },
+  { ms: 8000, label: '8s 默认' },
+  { ms: 15000, label: '15s 长冷却' },
+]
+
+async function handleCooldownChange(value) {
+  try {
+    await bleStore.updateConfig({ cooldown_ms: value })
+    toast.info(`冷却时间已设为 ${value / 1000}s`)
+  } catch {
+    toast.error('设置失败')
   }
 }
 </script>

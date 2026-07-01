@@ -52,6 +52,7 @@ export const useBleStore = defineStore('ble', {
     lockCountRequired: 5,
     disconnectLockDelayMs: 5000,
     manualCooldown: false,        // 手动命令冷却中
+    manualCooldownMs: 8000,      // ★ v3.7: 冷却时长 ms（可从设备同步，App本地持久化）
 
 
     // 连接历史（自动重连用）
@@ -122,6 +123,10 @@ export const useBleStore = defineStore('ble', {
           if (saved.lockCountRequired !== undefined) this.lockCountRequired = saved.lockCountRequired
           if (saved._rssiPollInterval !== undefined) this._rssiPollInterval = saved._rssiPollInterval
           if (saved.disconnectLockDelayMs !== undefined) this.disconnectLockDelayMs = saved.disconnectLockDelayMs
+          // ★ v3.7: 恢复冷却时间
+          if (saved.manualCooldownMs !== undefined && saved.manualCooldownMs >= 2000 && saved.manualCooldownMs <= 30000) {
+            this.manualCooldownMs = saved.manualCooldownMs
+          }
           console.log('[Store] 已从本地存储恢复配置:', JSON.stringify(saved))
         }
       } catch (e) {
@@ -738,6 +743,8 @@ export const useBleStore = defineStore('ble', {
           lockCountRequired: this.lockCountRequired,
           _rssiPollInterval: this._rssiPollInterval || 800,
           disconnectLockDelayMs: this.disconnectLockDelayMs,
+          // ★ v3.7: 冷却时间
+          manualCooldownMs: this.manualCooldownMs,
         })
       } catch (e) {
         console.warn('[Store] 配置持久化失败:', e)
@@ -1087,6 +1094,11 @@ export const useBleStore = defineStore('ble', {
 
       // 自定义名称
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
+
+      // ★ v3.7: 冷却时间 ms (cd = cooldown duration)
+      if (data.cd !== undefined && data.cd >= 2000 && data.cd <= 30000) {
+        this.manualCooldownMs = data.cd
+      }
     },
 
     // ==================== 命令 (v3.2) ====================
@@ -1107,6 +1119,8 @@ export const useBleStore = defineStore('ble', {
         }
       }
       if (config.dlock !== undefined) this.disconnectLockDelayMs = config.dlock
+      // ★ v3.7: 冷却时间
+      if (config.cooldown_ms !== undefined) this.manualCooldownMs = config.cooldown_ms
       // ★ 持久化到本地存储（退出应用后重新进入不丢失）
       this._persistConfig()
     },
@@ -1123,28 +1137,30 @@ export const useBleStore = defineStore('ble', {
       if (!this.connected) throw new Error('未连接设备')
       // ★ v3.6-fixH: manualCooldown 阻断手机→设备 RSSI 转发（备用通道，非主力）
       //   真正的保护链在固件端：sendCommand("UNLOCK") → KeyGo_HandleCommand():
-      //     ① g_manualCooldown=1 (8s 内跳过状态机)
+      //     ① g_manualCooldown=1 (cooldownMs 内跳过状态机)
       //     ② g_unlockCounter/g_lockCounter=0 (清零防止累积计数触发自动操作)
+      // ★ v3.7: 冷却时长使用设备同步值 manualCooldownMs，非硬编码 8s
       this.manualCooldown = true
       if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
       this._cooldownTimer = setTimeout(() => {
         this.manualCooldown = false
         this._cooldownTimer = null
-        console.log('[Store] RSSI 状态机冷却结束')
-      }, 8000)
+        console.log(`[Store] RSSI 状态机冷却结束 (${this.manualCooldownMs}ms)`)
+      }, this.manualCooldownMs)
       await this.sendCommand('UNLOCK')
     },
 
     async lock() {
       if (!this.connected) throw new Error('未连接设备')
       // ★ v3.6-fixH: 同上，固件端主导保护
+      // ★ v3.7: 使用设备同步的 manualCooldownMs
       this.manualCooldown = true
       if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
       this._cooldownTimer = setTimeout(() => {
         this.manualCooldown = false
         this._cooldownTimer = null
-        console.log('[Store] RSSI 状态机冷却结束')
-      }, 8000)
+        console.log(`[Store] RSSI 状态机冷却结束 (${this.manualCooldownMs}ms)`)
+      }, this.manualCooldownMs)
       await this.sendCommand('LOCK')
     },
 

@@ -52,8 +52,9 @@ extern int16_t g_cfgLockThreshold;       // RSSI 锁车阈值 (默认 -75)
 extern uint8_t g_cfgUnlockCount;         // 解锁需连续满足次数 (默认 3)
 extern uint8_t g_cfgLockCount;           // 锁车需连续满足次数 (默认 5)
 extern uint16_t g_cfgDisconnectLockMs;   // 断连自动锁车延时 ms (默认 5000)
+extern uint16_t g_cfgManualCooldownMs;   // ★ v3.7: 手动命令冷却时间 ms (默认 8000, 范围 2000~30000)
 
-// ★ FF01 配置解析: "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000"
+// ★ FF01 配置解析: "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000 cooldown_ms=8000"
 //    返回: 0=无配置变更, 1=有配置变更需通知 App
 uint8_t KeyGo_ParseConfig(const char *line);
 

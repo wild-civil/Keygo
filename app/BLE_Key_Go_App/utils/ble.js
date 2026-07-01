@@ -759,6 +759,8 @@ export async function sendConfig(deviceId, config) {
   if (config.lc !== undefined) parts.push(`lc=${config.lc}`)
   if (config.interval !== undefined) parts.push(`interval=${config.interval}`)
   if (config.dlock !== undefined) parts.push(`dlock=${config.dlock}`)
+  // ★ v3.7: 冷却时间 cooldown_ms
+  if (config.cooldown_ms !== undefined) parts.push(`cooldown_ms=${config.cooldown_ms}`)
 
   const value = parts.join(' ')
   if (!value) return

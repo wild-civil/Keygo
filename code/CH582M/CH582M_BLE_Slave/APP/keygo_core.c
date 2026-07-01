@@ -16,10 +16,11 @@
 
 #define SPIKE_DISCARD_COUNT     2
 // ★ v3.6-fixH: 从 3000ms → 8000ms，匹配 App 端 8s 冷却
-//   bug: 固件冷却 3s 到期后状态机恢复运行，仅 ~5.5s 后即可自动覆盖手动操作，
-//        用户看到 App 显示"冷却 8s"但实际只有 3s 有效
-#define MANUAL_COOLDOWN_MS      8000
-#define STATUS_JSON_MAX_LEN     180
+// ★ v3.7: MANUAL_COOLDOWN_MS 从宏改为 uint16_t 变量 g_manualCooldownMs，
+//         可在运行时通过 App 下发 "cooldown_ms=N" 修改，并持久化到 DataFlash
+//         bug: 固件冷却 3s 到期后状态机恢复运行，仅 ~5.5s 后即可自动覆盖手动操作，
+//               用户看到 App 显示"冷却 8s"但实际只有 3s 有效
+#define STATUS_JSON_MAX_LEN     200  // ★ 加了 cd 字段，json 更长，从 180 扩到 200
 
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.5: 可运行时配置的 RSSI 阈值 (替代原来的 #define 硬编码)
@@ -31,6 +32,8 @@ int16_t  g_cfgLockThreshold     = -65;   // RSSI 锁车阈值
 uint8_t  g_cfgUnlockCount       = 3;     // 解锁需连续满足次数
 uint8_t  g_cfgLockCount         = 5;     // 锁车需连续满足次数
 uint16_t g_cfgDisconnectLockMs  = 5000;  // 断连自动锁车延时 ms
+// ★ v3.7: 可运行时配置的 RSSI 冷却时间 (替代 #define MANUAL_COOLDOWN_MS)
+uint16_t g_cfgManualCooldownMs  = 8000;  // 手动命令冷却时间 ms (范围 2000~30000)
 
 /* ─────────────────────────────────────────────────────────────────
  * 模块内部状态 (仅 keygo_core 可见)
@@ -228,7 +231,8 @@ void KeyGo_ProcessStateMachine(void)
 {
     if (g_manualCooldown) {
         uint32_t now = Peripheral_GetSystemMs();
-        if (now - g_lastCommandMs >= MANUAL_COOLDOWN_MS) {
+        // ★ v3.7: 使用可配置变量 g_cfgManualCooldownMs 替代硬编码宏
+        if (now - g_lastCommandMs >= g_cfgManualCooldownMs) {
             g_manualCooldown = 0;
             PRINT("[STATE] manual command cooldown ended\n");
         } else {
@@ -294,12 +298,13 @@ void KeyGo_NotifyStatus(void)
     }
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\"}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
         (int)(g_filteredRSSI != -999.0f ? (int)g_filteredRSSI : -999),
-        d2);
+        d2,
+        (int)g_cfgManualCooldownMs);  // ★ v3.7: 上报当前冷却时间，App 端同步
 
     if (n > 0 && n < (int)sizeof(json)) {
         attHandleValueNoti_t noti;
@@ -441,14 +446,21 @@ uint8_t KeyGo_ParseConfig(const char *line)
         else if (keyLen == 2 && tmos_memcmp(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
         else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) { /* App 轮询间隔，固件不直接使用 */ changed = 1; }
         else if (keyLen == 5 && tmos_memcmp(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
+        // ★ v3.7: 冷却时间 cooldown_ms (长度 11)
+        else if (keyLen == 11 && tmos_memcmp(p, "cooldown_ms", 11)) {
+            if (val >= 2000 && val <= 30000) {
+                g_cfgManualCooldownMs = (uint16_t)val;
+                changed = 1;
+            }
+        }
 
         p = valEnd;
     }
 
     if (changed) {
-        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d\n",
+        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d\n",
               g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
-              g_cfgLockCount, g_cfgDisconnectLockMs);
+              g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgManualCooldownMs);
         // ★ 配置变更后重置计数器，避免旧阈值下的累积计数影响新阈值判断
         g_unlockCounter = 0;
         g_lockCounter   = 0;
@@ -497,6 +509,15 @@ void KeyGo_LoadConfig(void)
     g_cfgUnlockCount      = buf[8];
     g_cfgLockCount        = buf[9];
     g_cfgDisconnectLockMs = *((uint16_t*)(buf + 10));
+    // ★ v3.7: 读取 cooldownMs（buf[13-14]），旧格式此处为 0，需兜底
+    {
+        uint16_t cd = *((uint16_t*)(buf + 13));
+        if (cd >= 2000 && cd <= 30000) {
+            g_cfgManualCooldownMs = cd;
+        } else {
+            g_cfgManualCooldownMs = 8000;  // 旧格式或越界 → 默认 8s
+        }
+    }
 
     // 合理性校验
     if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < -100) g_cfgUnlockThreshold = -45;
@@ -505,9 +526,9 @@ void KeyGo_LoadConfig(void)
     if (g_cfgLockCount < 1 || g_cfgLockCount > 30)               g_cfgLockCount       = 5;
     if (g_cfgDisconnectLockMs > 60000)                           g_cfgDisconnectLockMs = 5000;
 
-    PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d\n",
+    PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d\n",
           g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
-          g_cfgLockCount, g_cfgDisconnectLockMs);
+          g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgManualCooldownMs);
 }
 
 void KeyGo_SaveConfig(void)
@@ -527,7 +548,10 @@ void KeyGo_SaveConfig(void)
     buf[9]  = g_cfgLockCount;
     *((uint16_t*)(buf + 10)) = g_cfgDisconnectLockMs;
 
-    // Checksum: XOR over first 12 bytes
+    // ★ v3.7: cooldownMs 存于 buf[13-14]（旧格式为 padding=0，兼容）
+    *((uint16_t*)(buf + 13)) = g_cfgManualCooldownMs;
+
+    // Checksum: XOR over first 12 bytes（不含 cooldownMs，保持向后兼容）
     buf[12] = 0;
     for (uint8_t i = 0; i < 12; i++) buf[12] ^= buf[i];
 
