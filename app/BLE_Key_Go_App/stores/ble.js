@@ -77,6 +77,9 @@ export const useBleStore = defineStore('ble', {
     _notifyTimer: null,
     _reconnectGuard: 0,            // ★ v3.6-fixD: 重连会话锁，蓝牙关闭时递增，拦截异步穿透
     _adapterResetting: false,      // ★ v3.6-fixG: 适配器重置中标记，压制状态变化事件
+    _btOffTimestamp: 0,            // ★ v3.6-fixC: 蓝牙关闭时间戳，用于冷却锁（防振荡）
+    _cooldownTimer: null,
+    _cooldownDeferTimer: null,     // ★ v3.9.1: 冷却锁延迟复核定时器
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
   }),
 
@@ -271,7 +274,22 @@ export const useBleStore = defineStore('ble', {
 
       if (!available) {
         // 蓝牙关闭 → 立即执行，不等防抖（避免 _handleDisconnect 误判蓝牙开着而启动无效重连）
+        // ★ v3.6-fixC: 记录关闭时间戳（开启冷却锁）
+        this._btOffTimestamp = Date.now()
         this._applyBtAdapterState(false)
+        return
+      }
+
+      // ==================== 蓝牙开启事件 → 三层防护 ====================
+
+      // ★ v3.9.1 冷却锁（延迟复核）：关闭后 3 秒内收到的开启事件，
+      //   不直接忽略（会误杀用户手动开蓝牙），改为延迟到冷却期满后
+      //   复核真实适配器状态。若是 Android 振荡则自动静默，若是用户
+      //   手动开启则延迟最多 3s 后自动恢复连接。
+      const offAge = Date.now() - this._btOffTimestamp
+      if (this._btOffTimestamp > 0 && offAge < 3000) {
+        console.log(`[Store] ⛧ 冷却锁: 蓝牙仅关闭 ${offAge}ms，延迟 ${3000 - offAge}ms 后复核`)
+        this._scheduleCooldownDefer(offAge)
         return
       }
 
@@ -315,6 +333,32 @@ export const useBleStore = defineStore('ble', {
 
         this._applyBtAdapterState(true)
       }, 1500)
+    },
+
+    /**
+     * ★ v3.9.1: 冷却锁复核定时器 — 关闭蓝牙后 3s 内收到的 available=true 事件
+     *   不立即处理，而是等到冷却期满后检查真实适配器状态再做决定。
+     */
+    _scheduleCooldownDefer(offAge) {
+      if (this._cooldownDeferTimer) {
+        clearTimeout(this._cooldownDeferTimer)
+        this._cooldownDeferTimer = null
+      }
+      const remaining = 3000 - offAge + 200  // 冷却期满 + 200ms 余量
+      this._cooldownDeferTimer = setTimeout(async () => {
+        this._cooldownDeferTimer = null
+        try {
+          const realState = await this._recoverAdapter()
+          if (realState && realState.available && this.btState === 'off') {
+            console.log('[Store] ⛧ 冷却锁复核: 蓝牙持续开启且适配器已恢复，恢复连接')
+            this._applyBtAdapterState(true)
+          } else {
+            console.log('[Store] ⛧ 冷却锁复核: 蓝牙未持续开启，忽略')
+          }
+        } catch (e) {
+          console.warn('[Store] ⛧ 冷却锁复核恢复失败，跳过')
+        }
+      }, remaining)
     },
 
     /**
@@ -391,6 +435,10 @@ export const useBleStore = defineStore('ble', {
           clearTimeout(this._btDebounceTimer)
           this._btDebounceTimer = null
         }
+        if (this._cooldownDeferTimer) {
+          clearTimeout(this._cooldownDeferTimer)
+          this._cooldownDeferTimer = null
+        }
         // 停止所有重连
         if (this._reconnectTimer) {
           clearTimeout(this._reconnectTimer)
@@ -435,6 +483,16 @@ export const useBleStore = defineStore('ble', {
         this._enablingInProgress = false
         this.btState = 'off'
         this.reconnectMode = 'idle'  // ★ v3.6: 开启失败时重置重连状态
+        // ★ v3.9.1: 清除定时器 — initBluetooth 期间可能有适配器事件触发
+        //   防抖/冷却锁到期后可能恢复适配器把 btState 设回 'on'，导致红 banner 消失
+        if (this._btDebounceTimer) {
+          clearTimeout(this._btDebounceTimer)
+          this._btDebounceTimer = null
+        }
+        if (this._cooldownDeferTimer) {
+          clearTimeout(this._cooldownDeferTimer)
+          this._cooldownDeferTimer = null
+        }
         // ★ 把错误抛出让 UI 层决定如何提示
         throw err
       }
@@ -452,6 +510,10 @@ export const useBleStore = defineStore('ble', {
       if (this._btDebounceTimer) {
         clearTimeout(this._btDebounceTimer)
         this._btDebounceTimer = null
+      }
+      if (this._cooldownDeferTimer) {
+        clearTimeout(this._cooldownDeferTimer)
+        this._cooldownDeferTimer = null
       }
       this._stopRssiPolling()
       this.connected = false
