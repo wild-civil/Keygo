@@ -78,6 +78,7 @@ export const useBleStore = defineStore('ble', {
     _btOffTimestamp: 0,            // ★ v3.6-fixC: 蓝牙关闭时间戳，用于冷却锁（防振荡）
     _reconnectGuard: 0,            // ★ v3.6-fixD: 重连会话锁，蓝牙关闭时递增，拦截异步穿透
     _adapterResetting: false,      // ★ v3.6-fixG: 适配器重置中标记，压制状态变化事件
+    _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
   }),
 
   getters: {
@@ -653,6 +654,11 @@ export const useBleStore = defineStore('ble', {
         this.deviceName = 'KeyGo-' + macSuffix
       }
 
+      // ★ v3.8: 重连成功后恢复本地设备名称（SN 可能从上次连接已缓存）
+      if (this.serialNumber) {
+        this._resolveDeviceName(this.serialNumber)
+      }
+
       // ★ v3.6: 重连成功 → 重置为 idle（覆盖 tryReconnect 和 _scheduleReconnect 两条路径）
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
@@ -761,6 +767,59 @@ export const useBleStore = defineStore('ble', {
         this._startReconnect()
         return false
       }
+    },
+
+    // ==================== ★ v3.8: 设备名称本地存储（按序列号索引） ====================
+
+    /**
+     * 从本地存储加载设备名称缓存
+     * 存储结构: { "SN_A1B2C3": { name: "粤B·12345", lastSeen: 1719840000 }, ... }
+     */
+    _loadDeviceNames() {
+      if (this._deviceNames) return  // 已加载
+      try {
+        const saved = uni.getStorageSync('ble_device_names')
+        this._deviceNames = saved ? { ...saved } : {}
+        console.log('[Store] 设备名称缓存已加载:', Object.keys(this._deviceNames).length, '个设备')
+      } catch (e) {
+        this._deviceNames = {}
+      }
+    },
+
+    /**
+     * 持久化设备名称缓存到本地存储
+     */
+    _saveDeviceNames() {
+      try {
+        uni.setStorageSync('ble_device_names', this._deviceNames || {})
+      } catch (e) {
+        console.warn('[Store] 设备名称持久化失败:', e)
+      }
+    },
+
+    /**
+     * ★ v3.8: 根据序列号恢复设备自定义名称
+     * 连接成功后调用（SN 读取完成时）
+     * @param {string} sn 设备序列号（FF04）
+     */
+    _resolveDeviceName(sn) {
+      if (!sn) return
+      this._loadDeviceNames()
+      const entry = this._deviceNames[sn]
+
+      if (entry && entry.name) {
+        // 本地有记录 → 使用本地名（覆盖 d2）
+        this.customDeviceName = entry.name
+        entry.lastSeen = Date.now()
+        this._saveDeviceNames()
+        console.log('[Store] 设备名称已从本地恢复:', entry.name, '(SN:', sn, ')')
+      } else if (this.customDeviceName) {
+        // 本地无记录，但 d2 已从 NotifyStatus 读回 → 用 d2 作为初始名并记录
+        this._deviceNames[sn] = { name: this.customDeviceName, lastSeen: Date.now() }
+        this._saveDeviceNames()
+        console.log('[Store] 首次记录设备名称（来自固件 d2）:', this.customDeviceName, '(SN:', sn, ')')
+      }
+      // else: 本地无记录 + 无 d2 → 保持默认名（KeyGo-XXXXXX）
     },
 
     /** 持久化当前配置到本地存储 */
@@ -909,6 +968,8 @@ export const useBleStore = defineStore('ble', {
           if (this.fingerprint && sn.slice(-6).toUpperCase() !== this.fingerprint.toUpperCase()) {
             console.warn('[Store] ⚠ 序列号指纹不匹配！广播:', this.fingerprint, '序列号:', sn.slice(-6))
           }
+          // ★ v3.8: SN 就绪 → 从本地恢复设备自定义名称
+          this._resolveDeviceName(sn)
         }).catch(err => {
           const msg = err?.message || String(err)
           // ★ 根据错误类型分类处理
@@ -1122,7 +1183,9 @@ export const useBleStore = defineStore('ble', {
         this.deviceState = data.st
       }
 
-      // 自定义名称
+      // ★ v3.8: 自定义名称 — d2 总是接收作为初始显示
+      //   SN 到达后由 _resolveDeviceName() 用本地名称覆盖（本地优先）
+      //   短暂闪烁可接受（仅 SN 已就绪 + 本地名与 d2 不同时才会发生）
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
 
       // ★ v3.7: 冷却时间 ms (cd = cooldown duration)
@@ -1200,16 +1263,44 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
-     * 设置设备自定义名称
+     * ★ v3.8: 设置设备自定义名称（本地存储为主）
+     *
+     * 名称按设备序列号（FF04）存储在手机本地，不同手机对同一台
+     * KeyGo 可以起不同的名字；同一台手机连不同 KeyGo 也能记住各自的名字。
+     *
      * @param {string} name 名称（最长20字符，支持中文）
+     * @param {boolean} [syncToDevice=false] 是否同步写入固件 DataFlash（d2 字段）
      * @returns {Promise<boolean>}
      */
-    async setDeviceName(name) {
+    async setDeviceName(name, syncToDevice = false) {
       if (!this.connected) throw new Error('未连接设备')
       if (name.length > 20) throw new Error('名称最长 20 字符')
-      await sendCommand(this.deviceId, `NAME:${name}`)
+
       this.customDeviceName = name
-      console.log('[Store] 设备名称已设置:', name)
+
+      // ★ 本地存储（按序列号索引）
+      if (this.serialNumber) {
+        this._loadDeviceNames()
+        this._deviceNames[this.serialNumber] = {
+          name: name,
+          lastSeen: Date.now()
+        }
+        this._saveDeviceNames()
+        console.log('[Store] 设备名称已保存到本地 (SN:', this.serialNumber, '):', name)
+      } else {
+        console.warn('[Store] 设备序列号尚未就绪，名称仅暂存内存，断开后将丢失')
+      }
+
+      // ★ 可选：同步写入固件（供无本地记录的手机作为初始默认名）
+      if (syncToDevice) {
+        try {
+          await sendCommand(this.deviceId, `NAME:${name}`)
+          console.log('[Store] 设备名称已同步到固件 DataFlash d2:', name)
+        } catch (e) {
+          console.warn('[Store] 同步名称到固件失败:', e?.message || e)
+        }
+      }
+
       return true
     },
   }
