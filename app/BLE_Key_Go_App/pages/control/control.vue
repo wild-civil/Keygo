@@ -2,7 +2,8 @@
   <view class="page-control" :class="themeClass">
     <!-- ★ 连接状态提示 -->
     <view class="conn-warning" v-if="!bleStore.connected">
-      <text>⚠️ 请先在「连接」页面连接设备</text>
+      <text v-if="bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused'">🔄 设备离线，正在自动重连中...</text>
+      <text v-else>⚠️ 请先在「连接」页面连接设备</text>
     </view>
 
     <template v-else>

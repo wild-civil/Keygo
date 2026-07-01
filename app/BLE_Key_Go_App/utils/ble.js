@@ -22,20 +22,320 @@ export const BLE_CONFIG = {
 // ==================== 蓝牙适配器 ====================
 
 /**
+ * 获取蓝牙适配器状态（不打开蓝牙，仅查询）
+ * @returns {Promise<{available: boolean, discovering: boolean}>}
+ */
+export function getBluetoothAdapterState() {
+  return new Promise((resolve) => {
+    uni.getBluetoothAdapterState({
+      success: (res) => {
+        console.log('[BLE] 适配器状态:', JSON.stringify(res))
+        resolve({ available: res.available, discovering: res.discovering })
+      },
+      fail: (err) => {
+        // 适配器未初始化时 available=false
+        console.warn('[BLE] 获取适配器状态失败:', err?.errMsg || err)
+        resolve({ available: false, discovering: false })
+      }
+    })
+  })
+}
+
+// ==================== Android 运行时权限 ====================
+
+/**
+ * ★ Android 运行时权限申请（BLE 必需）
+ *
+ * 背景：Android 6.0+ 要求 ACCESS_FINE_LOCATION 动态申请才能使用 BLE；
+ *       Android 12+ 额外要求 BLUETOOTH_SCAN / BLUETOOTH_CONNECT。
+ *       仅声明在 manifest 中不够，必须在运行时调用 plus.android.requestPermissions。
+ *
+ * @returns {Promise<{granted: boolean, denied: string[]}>}
+ */
+function requestAndroidPermissions() {
+  return new Promise((resolve) => {
+    // ★ 纯运行时检测，不依赖 #ifdef（跨 .js 文件编译时可能失效）
+    if (typeof plus === 'undefined') {
+      console.warn('[BLE] plus 未就绪（非 App 环境），跳过权限申请')
+      resolve({ granted: true, denied: [] })
+      return
+    }
+    if (plus.os.name !== 'Android') {
+      console.log('[BLE] 非 Android 平台，跳过权限申请')
+      resolve({ granted: true, denied: [] })
+      return
+    }
+
+    console.log('[BLE] ★★★ 进入 Android 权限申请 ★★★')
+    console.log('[BLE] plus.os.name=' + plus.os.name + ', plus.os.version=' + plus.os.version)
+
+    // 基础权限：定位（Android 6.0+ BLE 必需）
+    const perms = [
+      'android.permission.ACCESS_FINE_LOCATION',
+      'android.permission.ACCESS_COARSE_LOCATION'
+    ]
+
+    // Android 12+ (API 31+) 还需要蓝牙权限
+    let apiLevel = 0
+    try {
+      const VERSION = plus.android.importClass('android.os.Build$VERSION')
+      apiLevel = VERSION.SDK_INT
+      console.log('[BLE] API Level (from Build$VERSION):', apiLevel)
+    } catch (e) {
+      const v = parseFloat(plus.os.version || '0')
+      apiLevel = v >= 12 ? 31 : 0
+      console.log('[BLE] API Level (from version string):', apiLevel, 'versionStr=' + plus.os.version)
+    }
+    if (apiLevel >= 31) {
+      perms.push('android.permission.BLUETOOTH_SCAN')
+      perms.push('android.permission.BLUETOOTH_CONNECT')
+    }
+
+    console.log('[BLE] 准备申请 Android 权限:', JSON.stringify(perms), 'API=' + apiLevel)
+
+    try {
+      plus.android.requestPermissions(
+        perms,
+        (result) => {
+          console.log('[BLE] requestPermissions 回调 - granted:', JSON.stringify(result.granted), 'deniedAlways:', JSON.stringify(result.deniedAlways), 'deniedPresent:', JSON.stringify(result.deniedPresent))
+          const denied = (result.deniedAlways || []).concat(result.deniedPresent || [])
+          console.log('[BLE] 权限最终结果 - 被拒绝的权限:', JSON.stringify(denied))
+          resolve({ granted: denied.length === 0, denied })
+        },
+        (err) => {
+          console.error('[BLE] requestPermissions 异常回调:', JSON.stringify(err))
+          resolve({ granted: false, denied: perms })
+        }
+      )
+    } catch (e) {
+      console.error('[BLE] requestPermissions 同步抛出异常:', e)
+      resolve({ granted: false, denied: perms })
+    }
+  })
+}
+
+/**
  * 初始化蓝牙适配器（打开蓝牙）
+ *
+ * ★ App 平台流程：
+ *   1. 先申请 Android 运行时权限（定位 + 蓝牙）
+ *   2. 权限通过后调 openBluetoothAdapter
+ *   3. 如果蓝牙未开(code=10001) → Android 原生弹窗请求开启 → 轮询等待
+ *
+ * ★ v3.6: 已初始化时 "already open" 视为成功
  */
 export function initBluetooth() {
   return new Promise((resolve, reject) => {
-    uni.openBluetoothAdapter({
-      success: () => {
-        console.log('[BLE] 适配器初始化成功')
-        resolve()
-      },
-      fail: (err) => {
-        console.error('[BLE] 适配器初始化失败', err)
+    requestAndroidPermissions().then((permResult) => {
+      if (!permResult.granted) {
+        const err = new Error('PERMISSION_DENIED')
+        err.deniedPermissions = permResult.denied
+        err.code = 'PERMISSION_DENIED'
         reject(err)
+        return
       }
+
+      uni.openBluetoothAdapter({
+        success: () => {
+          console.log('[BLE] 适配器初始化成功')
+          resolve()
+        },
+        fail: (err) => {
+          const msg = String(err?.errMsg || err || '')
+          const code = err?.code ?? err?.errCode
+
+          // "already open" → 成功
+          if (msg.includes('already open')) {
+            console.log('[BLE] 适配器已初始化（already open），视为成功')
+            resolve()
+            return
+          }
+
+          // code=10001 系统蓝牙未开启
+          if (code === 10001) {
+            console.warn('[BLE] 系统蓝牙未开启 (code=10001)，尝试原生弹窗...')
+
+            // #ifdef APP-PLUS
+            // ★ Android：用原生 Intent 弹出系统「开启蓝牙」弹窗（和 nRF Connect 一样）
+            if (typeof plus !== 'undefined' && plus.os.name === 'Android') {
+              requestEnableBluetoothAndroid().then(() => {
+                console.log('[BLE] 原生弹窗确认，重新初始化适配器...')
+                // 用户点了「允许」→ 蓝牙已开，重新初始化适配器
+                uni.openBluetoothAdapter({
+                  success: () => {
+                    console.log('[BLE] 适配器初始化成功（二次尝试）')
+                    resolve()
+                  },
+                  fail: (err2) => {
+                    const msg2 = String(err2?.errMsg || err2?.message || '')
+                    if (msg2.includes('already open')) {
+                      console.log('[BLE] 适配器已初始化（already open）')
+                      resolve()
+                      return
+                    }
+                    console.error('[BLE] 二次初始化仍失败', err2)
+                    reject(err2)
+                  }
+                })
+              }).catch((reason) => {
+                // 用户拒绝或超时
+                console.warn('[BLE] 原生弹窗失败:', reason)
+                const denyErr = new Error(String(reason) || '用户拒绝开启蓝牙')
+                denyErr.code = 10001
+                reject(denyErr)
+              })
+              return
+            }
+            // #endif
+
+            // 非 Android 或非 App-Plus：直接 reject
+            reject(err)
+            return
+          }
+
+          console.error('[BLE] 适配器初始化失败', err)
+          reject(err)
+        }
+      })
     })
+  })
+}
+
+// ==================== Android 原生蓝牙开启弹窗 ====================
+
+/**
+ * ★ 使用 Android 原生 API 弹出系统「开启蓝牙」对话框
+ *
+ * 效果与 nRF Connect 完全一致：
+ *   底部弹出系统对话框 "BLE车钥匙 想要开启蓝牙"
+ *   用户点「允许」→ 系统开启蓝牙 → Promise resolve
+ *   用户点「拒绝」→ Promise reject
+ *
+ * 兜底策略：如果 Intent 方式不可用，则轮询等待用户手动开启蓝牙
+ *
+ * @returns {Promise<void>}
+ */
+function requestEnableBluetoothAndroid() {
+  return new Promise((resolve, reject) => {
+    try {
+      const main = plus.android.runtimeMainActivity()
+      const Intent = plus.android.importClass('android.content.Intent')
+      const BluetoothAdapter = plus.android.importClass('android.bluetooth.BluetoothAdapter')
+
+      // 检查 BluetoothAdapter 是否可用
+      const adapter = BluetoothAdapter.getDefaultAdapter()
+
+      if (adapter && adapter.isEnabled()) {
+        console.log('[BLE] 蓝牙已经开启了，无需弹窗')
+        resolve()
+        return
+      }
+
+      // ★ 方案1：ACTION_REQUEST_ENABLE — 系统标准弹窗
+      console.log('[BLE] 发送 ACTION_REQUEST_ENABLE Intent...')
+      const intent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+
+      // 用 startActivityForResult 等待用户响应
+      main.startActivityForResult(intent, 1001)
+
+      // ★ 监听 ActivityResult 来判断用户选择
+      // uni-app/5+ Runtime 的 onActivityResult 回调机制
+      let resolved = false
+
+      // 方法：注册一个短暂的定时器来检测蓝牙是否被开启
+      // 因为 startActivityForResult 是异步的，我们无法直接获取回调
+      // 所以用轮询 + 超时的组合方案
+
+      const checkInterval = setInterval(() => {
+        if (resolved) return
+        try {
+          const adapter2 = BluetoothAdapter.getDefaultAdapter()
+          if (adapter2 && adapter2.isEnabled()) {
+            resolved = true
+            clearInterval(checkInterval)
+            clearTimeout(timeoutTimer)
+            console.log('[BLE] 检测到蓝牙已被用户开启 ✅')
+            // 稍等让系统稳定一下
+            setTimeout(resolve, 500)
+          }
+        } catch (e) {
+          // 忽略检查异常
+        }
+      }, 500)
+
+      // 60 秒超时
+      const timeoutTimer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          clearInterval(checkInterval)
+          console.warn('[BLE] 开启蓝牙等待超时(60s)')
+          reject('等待超时，请手动开启蓝牙')
+        }
+      }, 60000)
+
+    } catch (e) {
+      console.error('[BLE] 原生弹窗异常:', e)
+      // ★ 降级：弹出提示 + 轮询等待用户手动开启
+      waitForBluetoothOn(45).then(resolve).catch(reject)
+    }
+  })
+}
+
+/**
+ * ★ 轮询等待蓝牙被开启（用于原生弹窗降级 或 手动引导场景）
+ *
+ * @param {number} timeoutSec 超时秒数
+ * @returns {Promise<void>}
+ */
+export function waitForBluetoothOn(timeoutSec = 45) {
+  return new Promise((resolve, reject) => {
+    let elapsed = 0
+    const interval = 800
+    const maxAttempts = (timeoutSec * 1000) / interval
+    let attempts = 0
+
+    console.log('[BLE] 开始轮询等待蓝牙开启（最长 ' + timeoutSec + 's）...')
+
+    const timer = setInterval(() => {
+      attempts++
+      elapsed = Math.round(attempts * interval / 1000)
+
+      try {
+        // 直接用 uni.getBluetoothAdapterState 检测
+        uni.getBluetoothAdapterState({
+          success: (res) => {
+            if (res.available) {
+              clearInterval(timer)
+              console.log('[BLE] 轮询检测到蓝牙已开启 ✅ (' + elapsed + 's)')
+              setTimeout(resolve, 300) // 让系统稳定一下
+              return
+            }
+          },
+          fail: () => {} // 适配器未初始化也继续等
+        })
+
+        // 也试试原生方式（更可靠）
+        if (typeof plus !== 'undefined' && plus.os.name === 'Android') {
+          try {
+            const BluetoothAdapter = plus.android.importClass('android.bluetooth.BluetoothAdapter')
+            const adapter = BluetoothAdapter.getDefaultAdapter()
+            if (adapter && adapter.isEnabled()) {
+              clearInterval(timer)
+              console.log('[BLE] 原生检测到蓝牙已开启 ✅ (' + elapsed + 's)')
+              setTimeout(resolve, 300)
+              return
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
+
+      // 超时
+      if (attempts >= maxAttempts) {
+        clearInterval(timer)
+        console.warn('[BLE] 等待蓝牙开启超时 (' + timeoutSec + 's)')
+        reject('等待超时')
+      }
+    }, interval)
   })
 }
 
@@ -50,6 +350,22 @@ export function closeBluetooth() {
       complete: () => resolve()
     })
   })
+}
+
+/**
+ * ★ v3.6: 监听系统蓝牙适配器状态变化（用户从控制中心开关蓝牙时触发）
+ * @param {Function} callback (available: boolean, discovering: boolean) => void
+ * @returns {Function} handler 引用，供精准 off
+ */
+export function onBluetoothAdapterStateChange(callback) {
+  const handler = (res) => {
+    console.log('[BLE] 适配器状态变化: available=' + res.available + ', discovering=' + res.discovering)
+    if (typeof callback === 'function') {
+      callback(res.available, res.discovering)
+    }
+  }
+  uni.onBluetoothAdapterStateChange(handler)
+  return handler
 }
 
 // ==================== 扫描相关 ====================
@@ -204,7 +520,9 @@ function clearTimeoutSafe() {
  */
 export function connectDevice(deviceId) {
   return new Promise((resolve, reject) => {
-    stopScan().then(() => {
+    stopScan()
+      .catch(() => {})  // ★ v3.6: 防止 stopScan reject 导致 Promise 链断裂
+      .then(() => {
       uni.createBLEConnection({
         deviceId,
         timeout: 10000,
@@ -225,6 +543,12 @@ export function connectDevice(deviceId) {
           }, 500)
         },
         fail: (err) => {
+          // ★ v3.6: "already connect" = 系统层连接仍存活，视为成功
+          if (String(err?.errMsg || '').includes('already connect')) {
+            console.log('[BLE] 连接已存在（already connect），视为重连成功')
+            resolve()
+            return
+          }
           console.error('[BLE] 连接失败', err)
           reject(err)
         }
@@ -251,18 +575,21 @@ export function disconnectDevice(deviceId) {
 }
 
 /**
- * 监听 BLE 连接状态变化
+ * 注册 BLE 连接状态变化的全局监听（单例模式）
  * @param {Function} callback (connected: boolean, deviceId: string) => void
+ * @returns {Function} 返回内部 handler 引用，供 uni.offBLEConnectionStateChange 精准移除
  */
 export function onBLEConnectionStateChange(callback) {
-  uni.onBLEConnectionStateChange((res) => {
+  const handler = (res) => {
     const connected = res.connected
     const deviceId = res.deviceId
     console.log(`[BLE] 连接状态变化: deviceId=${deviceId}, connected=${connected}`)
     if (typeof callback === 'function') {
       callback(connected, deviceId)
     }
-  })
+  }
+  uni.onBLEConnectionStateChange(handler)
+  return handler
 }
 
 // ==================== GATT 操作 ====================
@@ -380,15 +707,18 @@ export function notifyBLECharacteristicValueChange(deviceId, serviceId, characte
 }
 
 /**
- * 监听特征值数据变化
+ * 注册特征值数据变化的全局监听（单例模式）
  * @param {Function} callback (res) => void
+ * @returns {Function} 返回内部 handler 引用，供 uni.offBLECharacteristicValueChange 精准移除
  */
 export function onBLECharacteristicValueChange(callback) {
-  uni.onBLECharacteristicValueChange((res) => {
+  const handler = (res) => {
     if (typeof callback === 'function') {
       callback(res)
     }
-  })
+  }
+  uni.onBLECharacteristicValueChange(handler)
+  return handler
 }
 
 // ==================== 业务功能 ====================

@@ -1,19 +1,39 @@
 <template>
   <view class="page-index" :class="themeClass">
+    <!-- ★ 蓝牙关闭横幅（模仿 nRF Connect） -->
+    <view class="bt-off-banner" v-if="!bleStore.connected && bleStore.btState === 'off'">
+      <text class="bt-off-icon">🔴</text>
+      <text class="bt-off-text">蓝牙已关闭</text>
+      <button class="bt-enable-btn" @tap="handleEnableBluetooth"
+        :loading="bleStore.btState === 'enabling'"
+        :disabled="bleStore.btState === 'enabling'">开启</button>
+    </view>
+    <view class="bt-enabling-banner" v-if="bleStore.btState === 'enabling'">
+      <text class="bt-enabling-icon">🔵</text>
+      <text class="bt-enabling-text">正在开启蓝牙...</text>
+    </view>
+
     <!-- ★ 顶部状态卡片 -->
-    <view class="status-card" :class="{ connected: bleStore.connected }">
+    <view class="status-card" :class="{
+      connected: bleStore.connected,
+      reconnecting: !bleStore.connected && (bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused')
+    }">
       <view class="status-icon">
         <text v-if="bleStore.connected">🔗</text>
+        <text v-else-if="bleStore.reconnectMode === 'active'">🔄</text>
+        <text v-else-if="bleStore.reconnectMode === 'paused'">⏳</text>
         <text v-else>📡</text>
       </view>
       <view class="status-info">
         <text class="status-title">
-          {{ bleStore.connected ? '已连接' : '未连接' }}
+          {{ bleStore.connected ? '已连接' : (bleStore.reconnectMode === 'active' ? '重新连接中...' : (bleStore.reconnectMode === 'paused' ? '等待重连 ' + bleStore.reconnectNextDelay + 's' : '未连接')) }}
           <text v-if="bleStore.connected && bleStore.customDeviceName" class="custom-name-display">{{ bleStore.customDeviceName }}</text>
         </text>
         <text class="status-sub" v-if="bleStore.connected">
           {{ bleStore.deviceName }} | {{ bleStore.stateText }}
         </text>
+        <text class="status-sub" v-else-if="bleStore.reconnectMode === 'active'">设备已离线，正在自动重连...</text>
+        <text class="status-sub" v-else-if="bleStore.reconnectMode === 'paused'">第 {{ bleStore.reconnectAttempt }} 次重连失败，稍后自动重试</text>
         <text class="status-sub" v-else>扫描下方设备进行连接</text>
       </view>
       <view class="status-rssi" v-if="bleStore.connected">
@@ -142,7 +162,6 @@ import { toast } from '@/utils/toast.js'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
-let _autoScanDone = false
 
 // ★ 通用 pwModal
 const pwModal = reactive({
@@ -159,23 +178,139 @@ const pwModal = reactive({
   onConfirm: () => {}
 })
 
-onShow(() => {
+onShow(async () => {
   themeStore.applyNavBar()
   if (bleStore.connected) return
-  if (_autoScanDone) return
-  _autoScanDone = true
-
-  const savedId = uni.getStorageSync('ble_device_id')
-  if (savedId) {
-    bleStore.tryAutoConnect().then(connected => {
-      if (!connected) handleScan()
-    })
-  } else {
-    handleScan()
+  // ★ v3.6: 重新检查蓝牙状态（用户可能从控制中心开启了蓝牙）
+  await bleStore._checkBluetoothState()
+  if (bleStore.btState === 'off') return
+  // ★ v3.6: 已有连接历史的且不是用户主动断的 → 尝试重连
+  if (bleStore.reconnectMode !== 'dormant') {
+    bleStore.tryAutoConnect()
   }
 })
 
 // ==================== 扫描 & 连接 ====================
+
+// ★ 防止用户在模拟器里死递归弹 Modal
+let _enableBluetoothLocked = false
+
+async function handleEnableBluetooth() {
+  if (_enableBluetoothLocked) {
+    console.log('[UI] enableBluetooth 防抖，跳过重复调用')
+    return
+  }
+
+  // #ifdef APP-PLUS
+  // ★ App 平台：先申请运行时权限
+  if (typeof plus !== 'undefined' && plus.os.name === 'Android') {
+    console.log('[UI] ★★★ App-Plus Android，先申请权限 ★★★')
+    const perms = ['android.permission.ACCESS_FINE_LOCATION', 'android.permission.ACCESS_COARSE_LOCATION']
+    try {
+      const VERSION = plus.android.importClass('android.os.Build$VERSION')
+      if (VERSION.SDK_INT >= 31) {
+        perms.push('android.permission.BLUETOOTH_SCAN', 'android.permission.BLUETOOTH_CONNECT')
+      }
+    } catch(e) {}
+
+    const permResult = await new Promise((resolve) => {
+      plus.android.requestPermissions(perms, resolve, (err) => {
+        console.error('[UI] requestPermissions 异常:', JSON.stringify(err))
+        resolve({ granted: [], deniedAlways: perms, deniedPresent: [] })
+      })
+    })
+    const denied = (permResult.deniedAlways || []).concat(permResult.deniedPresent || [])
+    if (denied.length > 0) {
+      uni.hideLoading()
+      uni.showModal({
+        title: '需要授予权限',
+        content: 'BLE车钥匙需要「位置信息」权限才能扫描蓝牙设备。\n\n请前往系统设置中开启定位权限。',
+        confirmText: '去设置',
+        cancelText: '取消',
+        success: (res) => {
+          if (res.confirm) {
+            const Intent = plus.android.importClass('android.content.Intent')
+            const Settings = plus.android.importClass('android.provider.Settings')
+            const Uri = plus.android.importClass('android.net.Uri')
+            const main = plus.android.runtimeMainActivity()
+            const intent = new Intent()
+            intent.setAction(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            intent.setData(Uri.parse('package:' + main.getPackageName()))
+            main.startActivity(intent)
+          }
+        }
+      })
+      return
+    }
+    console.log('[UI] 权限已通过 ✓')
+  }
+  // #endif
+
+  // ★ mask=false 不遮挡系统蓝牙弹窗（原生 ACTION_REQUEST_ENABLE 会弹底部弹窗）
+  uni.showLoading({ title: '正在请求...', mask: false })
+  try {
+    const ok = await bleStore.enableBluetooth()
+    uni.hideLoading()
+    if (ok) {
+      toast.success('蓝牙已开启')
+      if (!bleStore.connected) {
+        bleStore.tryAutoConnect()
+      }
+    } else {
+      toast.info('请手动开启手机蓝牙后重试')
+    }
+  } catch (err) {
+    uni.hideLoading()
+    const msg = String(err?.errMsg || err?.message || err || '')
+    const code = err?.code ?? err?.errCode
+
+    // #ifdef APP-PLUS
+    // ★ code=10001: 原生弹窗被拒绝/超时（initBluetooth 已内部尝试过原生弹窗了）
+    if (code === 10001 || msg.includes('not available')) {
+      uni.showModal({
+        title: '蓝牙未开启',
+        content: '请在控制中心或设置中开启蓝牙，然后点击「重试」',
+        confirmText: '重试',
+        cancelText: '取消',
+        success: (res) => {
+          if (res.confirm) { _enableBluetoothLocked = false; handleEnableBluetooth() }
+        }
+      })
+    } else if (msg.includes('timeout') || msg.includes('超时')) {
+      toast.info('操作超时，请检查蓝牙后重试')
+    } else if (code === 'PERMISSION_DENIED') {
+      uni.showModal({
+        title: '权限不足',
+        content: 'BLE车钥匙需要「位置信息」权限。\n\n请到系统设置中授权后重新打开 App。',
+        confirmText: '知道了'
+      })
+    } else {
+      toast.error('蓝牙开启失败: ' + (msg || code))
+    }
+    // #endif
+    // #ifndef APP-PLUS
+    if (code === 10001 || msg.includes('not available')) {
+      if (bleStore.btState === 'off') {
+        toast.info('请在系统设置中打开蓝牙后重试')
+        return
+      }
+      _enableBluetoothLocked = true
+      uni.showModal({
+        title: '需要开启蓝牙',
+        content: '请先在系统设置中打开手机蓝牙，然后点击「重试」',
+        confirmText: '重试',
+        cancelText: '取消',
+        success: (res) => {
+          _enableBluetoothLocked = false
+          if (res.confirm) { handleEnableBluetooth() }
+        }
+      })
+    } else {
+      toast.error('蓝牙开启失败')
+    }
+    // #endif
+  }
+}
 
 async function handleScanToggle() {
   if (bleStore.scanning) {
@@ -187,8 +322,13 @@ async function handleScanToggle() {
     if (bleStore.devices.length === 0) {
       toast.info('未发现设备，请确认 KeyGo 设备已上电')
     }
-  } catch {
-    toast.error('请先打开手机蓝牙')
+  } catch (err) {
+    if (String(err?.message || err).includes('蓝牙未开启')) {
+      // btState 已在 store 中设为 'off'，UI 横幅会显示引导
+      toast.info('请开启手机蓝牙')
+    } else {
+      toast.error('扫描失败')
+    }
   }
 }
 
@@ -199,8 +339,12 @@ async function handleScan() {
     if (bleStore.devices.length === 0) {
       toast.info('未发现设备，请确认 KeyGo 设备已上电')
     }
-  } catch {
-    toast.error('请先打开手机蓝牙')
+  } catch (err) {
+    if (String(err?.message || err).includes('蓝牙未开启')) {
+      toast.info('请开启手机蓝牙')
+    } else {
+      toast.error('扫描失败')
+    }
   }
 }
 
@@ -224,7 +368,6 @@ async function handleDisconnect() {
   if (ok) {
     uni.removeStorageSync('ble_device_id')
     bleStore.devices = []
-    _autoScanDone = false
     toast.info('已断开连接')
   } else {
     toast.error('断开失败，请重试')
@@ -309,6 +452,60 @@ async function handleSetName() {
   transition: background-color 0.3s, color 0.3s;
 }
 
+/* ===== 蓝牙关闭横幅（模仿 nRF Connect） ===== */
+.bt-off-banner {
+  background: #FFF3F3;
+  border: 1rpx solid #FFCDD2;
+  border-radius: 12rpx;
+  padding: 20rpx 24rpx;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 20rpx;
+  min-height: 72rpx;
+  box-sizing: border-box;
+}
+
+.bt-off-icon { font-size: 28rpx; }
+
+.bt-off-text {
+  flex: 1;
+  font-size: 26rpx;
+  color: #D32F2F;
+  font-weight: 500;
+}
+
+.bt-enable-btn {
+  background: #D32F2F;
+  color: #fff;
+  font-size: 24rpx;
+  padding: 8rpx 28rpx;
+  border-radius: 20rpx;
+  border: none;
+}
+
+.bt-enabling-banner {
+  background: #E8F5E9;
+  border: 1rpx solid #C8E6C9;
+  border-radius: 12rpx;
+  padding: 20rpx 24rpx;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 20rpx;
+  min-height: 72rpx;
+  box-sizing: border-box;
+}
+
+.bt-enabling-icon { font-size: 28rpx; }
+
+.bt-enabling-text {
+  flex: 1;
+  font-size: 26rpx;
+  color: #388E3C;
+  font-weight: 500;
+}
+
 /* ===== 状态卡片 ===== */
 .status-card {
   background: var(--gradient-card);
@@ -324,6 +521,11 @@ async function handleSetName() {
 .status-card.connected {
   background: var(--gradient-connected);
   border-color: var(--alpha-33);
+}
+
+.status-card.reconnecting {
+  background: linear-gradient(135deg, #FFF8E1, #FFF3E0);
+  border-color: #FFE082;
 }
 
 .custom-name-display {

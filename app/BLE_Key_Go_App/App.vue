@@ -9,6 +9,7 @@
 import { onLaunch, onShow, onHide } from '@dcloudio/uni-app'
 import CustomTabBar from '@/components/CustomTabBar.vue'
 import { useThemeStore } from '@/stores/theme.js'
+import { initBluetooth } from '@/utils/ble.js'
 
 const themeStore = useThemeStore()
 
@@ -18,14 +19,9 @@ onLaunch(() => {
   // ★ 初始化主题（读取持久化 → 检测系统主题 → 监听变化 → 启动 auto 轮询）
   themeStore.init()
 
-  // 初始化蓝牙适配器
-  uni.openBluetoothAdapter({
-    success: () => {
-      console.log('[BLE] 蓝牙适配器初始化成功')
-    },
-    fail: (err) => {
-      console.error('[BLE] 蓝牙适配器初始化失败', err)
-    }
+  // ★ v3.6: 初始化蓝牙适配器（复用 utils 封装，already open / not available 有容错）
+  initBluetooth().catch(() => {
+    // code=10001（系统蓝牙未开启）时静默，让 index 页横幅引导用户
   })
 })
 
