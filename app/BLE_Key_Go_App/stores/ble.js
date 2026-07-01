@@ -208,6 +208,15 @@ export const useBleStore = defineStore('ble', {
      * @returns {Promise<boolean>} true=已开启，false=未开启
      */
     async _checkBluetoothState(expectedGuard) {
+      // ★ v3.6-fixJ: 无 guard 调用（如 onShow）也需保护最近被适配器事件设为 'off' 的情况
+      //   Android getBluetoothAdapterState 有延迟，即使系统蓝牙已关仍可能返回 true
+      if (expectedGuard === undefined && this.btState === 'off') {
+        const offAge = Date.now() - this._btOffTimestamp
+        if (this._btOffTimestamp > 0 && offAge < 2000) {
+          console.log(`[Store] ⛧ _checkBluetoothState(无guard): btState 刚被适配器事件设为 off (${offAge}ms)，拒绝用延迟数据反转`)
+          return false
+        }
+      }
       // ★ v3.6-fixD: 如果调用方提供了 guard，先检查蓝牙是否在此期间被关闭
       if (expectedGuard !== undefined && expectedGuard !== this._reconnectGuard) {
         console.log(`[Store] ⛧ _checkBluetoothState: 锁不匹配 (期望${expectedGuard}, 当前${this._reconnectGuard})，跳过`)
@@ -452,9 +461,30 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
-      // 异常断连 → 启动重连循环（以新 guard 值启动）
-      console.log('[Store] 异常断连，启动重连...')
-      this._startReconnect()
+      // ★ v3.6-fixJ: 延迟 300ms 再决定是否重连，给适配器事件 (onBluetoothAdapterStateChange)
+      //   留出到达时间。关蓝牙时适配器事件比连接断开事件到达慢是 Android 的常态，
+      //   立即 _startReconnect 会导致适配器状态尚为 'on' 时启动无效重连循环。
+      //   300ms 后再次检查 btState，如果是 'off' 就 paused，否则正式启动重连。
+      const guardAtDispatch = this._reconnectGuard
+      console.log('[Store] 断连延迟检查（300ms），等待适配器事件...')
+      setTimeout(() => {
+        // 300ms 期间可能发生了很多事（用户手动重连、适配器关闭等）
+        if (this.connected) return
+        if (this.reconnectMode === 'dormant') return
+        if (this._reconnectGuard !== guardAtDispatch) {
+          console.log(`[Store] ⛧ 断连延迟检查: guard 已变 (${guardAtDispatch}→${this._reconnectGuard})，跳过`)
+          return
+        }
+        // 300ms 后适配器事件可能已到达 → btState='off'
+        if (this.btState === 'off') {
+          console.log('[Store] 断连延迟检查: 适配器已关闭，暂停重连')
+          this.reconnectMode = 'paused'
+          return
+        }
+        // 确认是异常断连（非蓝牙关闭） → 启动重连
+        console.log('[Store] 断连延迟检查: 确认异常断连，启动重连...')
+        this._startReconnect()
+      }, 300)
     },
 
     /** 启动重连循环（v3.6 指数退避） */
