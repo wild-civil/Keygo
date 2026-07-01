@@ -1,0 +1,19 @@
+# IDE / 构建产物
+**/.mrs/
+**/.settings/
+**/obj/
+**/Listings/
+*.o
+*.d
+*.lst
+*.hex
+*.bin
+*.elf
+
+# Node
+**/node_modules/
+**/dist/
+
+# 系统文件
+Thumbs.db
+.DS_Store

@@ -39,16 +39,16 @@ extern "C" {
 
 // ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
 #define GPIO_PULSE_LOCK_TICKS          320    // ~200ms  解锁/锁车
-#define GPIO_PULSE_TRUNK_TICKS         800    // ~500ms  后备箱长按
+#define GPIO_PULSE_TRUNK_TICKS         3200    // ~2000ms  后备箱长按
 
-// 广播间隔
+// 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
 
 // 连接参数
-#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    6     // 7.5ms
+#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    6     // 7.5ms   连接间隔   = N × 1.25ms     （范围 6~3,200 → 7.5ms~4s）
 #define DEFAULT_DESIRED_MAX_CONN_INTERVAL    100   // 125ms
 #define DEFAULT_DESIRED_SLAVE_LATENCY        0
-#define DEFAULT_DESIRED_CONN_TIMEOUT         100   // 1s
+#define DEFAULT_DESIRED_CONN_TIMEOUT         100   // 1s      连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH
 #define WCH_COMPANY_ID                       0x07D7
