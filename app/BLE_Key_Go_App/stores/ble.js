@@ -68,11 +68,15 @@ export const useBleStore = defineStore('ble', {
 
     // ★ v3.6: 全局单例监听器（只在 store 初始化时注册一次）
     _listenersInited: false,
+    _enablingInProgress: false,      // ★ v3.6-fix: 防止 enableBluetooth 与适配器事件竞态
     _connHandler: null,
     _charHandler: null,
     _btAdapterHandler: null,       // ★ v3.6: 适配器状态监听引用
     _notifyBuffer: '',
     _notifyTimer: null,
+    _btOffTimestamp: 0,            // ★ v3.6-fixC: 蓝牙关闭时间戳，用于冷却锁（防振荡）
+    _reconnectGuard: 0,            // ★ v3.6-fixD: 重连会话锁，蓝牙关闭时递增，拦截异步穿透
+    _adapterResetting: false,      // ★ v3.6-fixG: 适配器重置中标记，压制状态变化事件
   }),
 
   getters: {
@@ -195,10 +199,29 @@ export const useBleStore = defineStore('ble', {
 
     /**
      * 检查蓝牙适配器是否已开启
+     * @param {number} [expectedGuard] 可选：调用方的会话锁，用于检测并发关闭事件
      * @returns {Promise<boolean>} true=已开启，false=未开启
      */
-    async _checkBluetoothState() {
+    async _checkBluetoothState(expectedGuard) {
+      // ★ v3.6-fixD: 如果调用方提供了 guard，先检查蓝牙是否在此期间被关闭
+      if (expectedGuard !== undefined && expectedGuard !== this._reconnectGuard) {
+        console.log(`[Store] ⛧ _checkBluetoothState: 锁不匹配 (期望${expectedGuard}, 当前${this._reconnectGuard})，跳过`)
+        // 不修改 btState，保持当前状态
+        return false
+      }
+      // ★ v3.6-fixD2: 查询前 btState 已被设为 'off' → 拒绝反转
+      if (expectedGuard !== undefined && this.btState === 'off') {
+        console.log('[Store] ⛧ _checkBluetoothState: btState 已为 off，拒绝反转')
+        return false
+      }
       const state = await getBluetoothAdapterState()
+      // ★ v3.6-fixG v3: 查询期间 btState 可能已被 _applyBtAdapterState(false) 改为 'off'
+      //   Android getBluetoothAdapterState 有延迟，即使系统蓝牙已关仍可能返回 true
+      //   此时绝不允许用延迟数据覆盖正确状态
+      if (expectedGuard !== undefined && this.btState === 'off') {
+        console.log('[Store] ⛧ _checkBluetoothState: 查询期间 btState 变为 off，拒绝用延迟数据反转')
+        return false
+      }
       if (state.available) {
         this.btState = 'on'
         return true
@@ -225,10 +248,15 @@ export const useBleStore = defineStore('ble', {
      *   ★ 关键：discovering 变化（由 RSSI 轮询触发）不应驱动业务逻辑，
      *      仅 available 的实质性变化才处理。
      *
-     *   ★ 不对称防抖：关闭立即执行（防止 _handleDisconnect 误判蓝牙开着而启动无效重连），
-     *      开启则防抖 300ms（防止短暂振荡触发过早重连）。
+     *   ★ v3.6-fixC: 不对称防抖 + 冷却锁，防止 Android 蓝牙关闭时的振荡事件
      */
     _onBtAdapterStateChange(available, _discovering) {
+      // ★ v3.6-fixG: 适配器重置期间跳过所有状态变化（避免冷确锁误拦截 + btState 错乱）
+      if (this._adapterResetting) {
+        console.log(`[Store] ⛧ 适配器重置中，忽略适配器事件 (available=${available})`)
+        return
+      }
+
       // ★ 防抖1：仅 available 真正变化时才处理，忽略 discovering-only 事件
       const expectedState = available ? 'on' : 'off'
       if (this.btState === expectedState) {
@@ -237,23 +265,50 @@ export const useBleStore = defineStore('ble', {
       }
 
       if (!available) {
-        // 蓝牙关闭 → 立即执行，不等防抖（避免 _handleDisconnect 误判）
+        // 蓝牙关闭 → 立即执行，不等防抖（避免 _handleDisconnect 误判蓝牙开着而启动无效重连）
+        // ★ v3.6-fixC: 记录关闭时间戳（开启冷却锁）
+        this._btOffTimestamp = Date.now()
         this._applyBtAdapterState(false)
         return
       }
 
-      // 蓝牙开启 → 防抖 300ms（防止短暂振荡触发过早重连）
+      // ==================== 蓝牙开启事件 → 三层防护 ====================
+
+      // ★ v3.6-fixC 冷却锁：关闭后 3 秒内收到的开启事件直接忽略
+      //   Android 在蓝牙关闭时常发出 available=false→true 的振荡序列
+      const offAge = Date.now() - this._btOffTimestamp
+      if (this._btOffTimestamp > 0 && offAge < 3000) {
+        console.log(`[Store] ⛧ 冷却锁: 蓝牙仅关闭 ${offAge}ms，忽略开启事件`)
+        return
+      }
+
+      // 蓝牙开启 → 加长防抖 1500ms（原 300ms 太短，Android 振荡可达 ~1000ms）
       const now = Date.now()
       if (this._lastBtAdapterEvent && (now - this._lastBtAdapterEvent) < 600) {
-        console.log('[Store] 适配器开启事件抖动，防抖中...')
+        console.log('[Store] 适配器开启事件抖动，加长防抖中...')
       }
       this._lastBtAdapterEvent = now
 
       if (this._btDebounceTimer) clearTimeout(this._btDebounceTimer)
-      this._btDebounceTimer = setTimeout(() => {
+      this._btDebounceTimer = setTimeout(async () => {
         this._btDebounceTimer = null
+
+        // ★ v3.6-fixC 二次确认：防抖到期后再次检查适配器真实状态
+        //   避免基于过期事件修改状态
+        try {
+          const realState = await getBluetoothAdapterState()
+          if (!realState.available) {
+            console.log('[Store] ⛧ 二次确认: 蓝牙实际仍关闭，忽略开启事件')
+            return
+          }
+        } catch (e) {
+          // 查询失败则保守处理：不执行开启
+          console.warn('[Store] 二次确认查询失败，跳过开启事件')
+          return
+        }
+
         this._applyBtAdapterState(true)
-      }, 300)
+      }, 1500)
     },
 
     /**
@@ -266,19 +321,38 @@ export const useBleStore = defineStore('ble', {
       if (available) {
         // 蓝牙已开启
         console.log('[Store] 系统蓝牙已开启')
+
+        // ★ v3.6-fix3:如果 enableBluetooth() 正在进行中，不触碰 btState
+        //   enableBluetooth 内部会自己调 tryReconnect() + 设置最终 btState，避免双路竞态
+        if (this._enablingInProgress) {
+          console.log('[Store] enableBluetooth 进行中，跳过适配器事件重连')
+          return
+        }
+
         this.btState = 'on'
 
         // 如果之前因为蓝牙关闭被暂停的重连，立即恢复
         if (!this.connected && this.deviceId && this.reconnectMode === 'paused') {
-          console.log('[Store] 蓝牙恢复，重启重连流程')
+          console.log('[Store] 蓝牙恢复（控制中心），重启重连流程')
+          // ★ v3.6-fixE: 清除旧的重连定时器（防止手动关/开蓝牙后两条重连路径冲突）
+          if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer)
+            this._reconnectTimer = null
+          }
+          this.reconnectMode = 'idle'  // 先复位，让 _startReconnect 可以重新启动
           this.reconnectAttempt = 0
           this.reconnectNextDelay = 0
+          this._reconnectGuard++       // ★ 让任何残留的旧 _doReconnect 立即过期
           this._startReconnect()
         }
       } else {
         // 蓝牙已关闭
         console.log('[Store] 系统蓝牙已关闭')
         this.btState = 'off'
+
+        // ★ v3.6-fixD: 递增重连会话锁，让所有正在执行的 _doReconnect 中止
+        this._reconnectGuard++
+        console.log(`[Store] ⛧ 重连锁递增 → ${this._reconnectGuard}`)
 
         // ★ 清除所有定时器（包括防抖定时器，防止蓝牙关闭后触发虚假开启回调）
         if (this._btDebounceTimer) {
@@ -310,11 +384,16 @@ export const useBleStore = defineStore('ble', {
      */
     async enableBluetooth() {
       this.btState = 'enabling'
+      // ★ v3.6-fix2: 标记正在执行 enableBluetooth，防止 _applyBtAdapterState 竞态重连
+      this._enablingInProgress = true
       try {
         await initBluetooth()
         // ★ v3.6: 确认蓝牙实际状态（适配器可能已开但我们的状态不同步）
         await this._checkBluetoothState()
         console.log('[Store] 蓝牙已开启，btState=' + this.btState)
+
+        // ★ v3.6-fix2: 标记清除（放 tryReconnect 之前，因为 tryReconnect 内部会设 btState）
+        this._enablingInProgress = false
 
         // 蓝牙已开：有设备ID且不是主动断开 → 自动重连
         if (!this.connected && this.deviceId && this.reconnectMode !== 'dormant') {
@@ -322,6 +401,7 @@ export const useBleStore = defineStore('ble', {
         }
         return this.btState === 'on'
       } catch (err) {
+        this._enablingInProgress = false
         this.btState = 'off'
         this.reconnectMode = 'idle'  // ★ v3.6: 开启失败时重置重连状态
         // ★ 把错误抛出让 UI 层决定如何提示
@@ -348,6 +428,12 @@ export const useBleStore = defineStore('ble', {
       this.rssi = -999
       this.filteredRssi = -999
 
+      // ★ v3.6-fixD2: 递增重连锁，过期任何已在执行的 _doReconnect
+      //   当 _handleDisconnect 领先于适配器事件到达时，旧 session 立刻失效，
+      //   防止 _checkBluetoothState 用 Android 延迟的 available=true 写回 btState='on'
+      this._reconnectGuard++
+      console.log(`[Store] ⛧ 断连触发锁递增 → ${this._reconnectGuard}`)
+
       // 用户主动断开 → 不重连
       if (this.reconnectMode === 'dormant') {
         console.log('[Store] 用户主动断开，不启动重连')
@@ -361,7 +447,7 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
-      // 异常断连 → 启动重连循环
+      // 异常断连 → 启动重连循环（以新 guard 值启动）
       console.log('[Store] 异常断连，启动重连...')
       this._startReconnect()
     },
@@ -407,7 +493,13 @@ export const useBleStore = defineStore('ble', {
           this.reconnectAttempt = 0
           this.reconnectNextDelay = 0
           console.log('[Store] 重连成功！')
-        } catch {
+        } catch (e) {
+          // ★ v3.6-fixD2: SESSION_EXPIRED → 蓝牙关断穿透，立即中止，不重试
+          if (e && e.message === 'SESSION_EXPIRED') {
+            console.log('[Store] ⛧ 重连会话过期，放弃本轮')
+            return
+          }
+
           this.reconnectAttempt++
 
           // ★ v3.6: 如果是蓝牙关闭导致的失败，_doReconnect 已将 mode 设为 paused
@@ -436,11 +528,46 @@ export const useBleStore = defineStore('ble', {
 
     /**
      * 执行一次重连尝试
-     * 重连前先短暂扫描确认设备在附近，避免盲连失败
+     * ★ 统一入口：确保全局监听器 + 蓝牙适配器均已初始化
+     * ★ v3.6-fixD: 会话锁机制，防止蓝牙关闭后仍在执行的 _doReconnect 覆盖状态
      */
     async _doReconnect() {
-      // ★ 重连前确认蓝牙已开
-      const btOn = await this._checkBluetoothState()
+      // ★ v3.6-fixD: 记录此轮重连的会话锁版本号
+      const guard = this._reconnectGuard
+      /** 检查会话锁是否失效（蓝牙是否在此期间被关闭） */
+      const guardValid = () => this._reconnectGuard === guard
+      const guardAbort = (reason) => {
+        console.log(`[Store] ⛧ _doReconnect 中止: ${reason}`)
+        throw new Error('SESSION_EXPIRED')
+      }
+
+      // ★ v3.6-fix1: 确保全局监听器已注册（所有重连路径均经过此处）
+      this._ensureGlobalListeners()
+
+      // ★ v3.6-fix1C: 确保蓝牙适配器已初始化（轻量版，不弹窗）
+      if (this.btState !== 'enabling') {
+        try {
+          await new Promise((resolve) => {
+            uni.openBluetoothAdapter({
+              success: () => resolve(),
+              fail: (err) => {
+                const msg = String(err?.errMsg || '')
+                if (msg.includes('already open')) { resolve(); return }
+                console.warn('[Store] _doReconnect: 适配器初始化跳过', msg)
+                resolve()
+              }
+            })
+          })
+        } catch (e) {
+          // ignore
+        }
+
+        // ★ v3.6-fixD: 检查锁 — openBluetoothAdapter 期间蓝牙可能已被关闭
+        if (!guardValid()) guardAbort('openBluetoothAdapter 期间锁失效')
+      }
+
+      // ★ 重连前确认蓝牙已开（传递 guard 让 _checkBluetoothState 也检查锁）
+      const btOn = await this._checkBluetoothState(guard)
       if (!btOn) {
         // 蓝牙未开 → 暂停重连，等待适配器状态变化事件恢复
         this.reconnectMode = 'paused'
@@ -456,8 +583,30 @@ export const useBleStore = defineStore('ble', {
       // 暂停当前 RSSI 轮询的残留
       this._stopRssiPolling()
 
-      // 直接尝试连接（already connect 已在 utils/ble.js 中视为成功）
-      await connectDevice(this.deviceId)
+      // ★ v3.6-fixB: 重连前先断开可能残留的旧连接句柄
+      try {
+        uni.closeBLEConnection({ deviceId: this.deviceId })
+        console.log('[Store] _doReconnect: 已清理旧连接句柄')
+      } catch (e) {
+        // 断开失败无所谓
+      }
+
+      // 等待系统处理断开
+      await new Promise(r => setTimeout(r, 300))
+      if (!guardValid()) guardAbort('closeBLEConnection 等待期间锁失效')
+
+      // ★ v3.6-fixD: 连接前最后确认锁 — 若已失效立即中止
+      if (!guardValid()) guardAbort('connectDevice 前锁失效')
+
+      // 连接（★ v3.6-fixG: 捕获僵死句柄 → 重置适配器后重试一次）
+      await this._connectWithResetFallback()
+
+      // ★ v3.6-fixD: 连接成功后的最终锁检查
+      //   防止蓝牙关闭瞬间 connectDevice 意外 resolve（例如 already connect）
+      if (!guardValid()) {
+        console.warn('[Store] ⛧ _doReconnect: connectDevice 成功但锁已失效，不回写状态')
+        throw new Error('SESSION_EXPIRED')
+      }
 
       this.connected = true
       this.lastDeviceId = this.deviceId
@@ -483,6 +632,67 @@ export const useBleStore = defineStore('ble', {
         true
       )
       this._startRssiPolling()
+    },
+
+    /**
+     * ★ v3.6-fixG: 连接设备 + 僵死句柄自动恢复
+     *   当 connectDevice 抛出 ALREADY_CONNECT_STALE 时，重置适配器并重试一次
+     *   @param {string} [deviceId] 设备 ID，不传则用 this.deviceId
+     */
+    async _connectWithResetFallback(deviceId) {
+      const targetId = deviceId || this.deviceId
+      try {
+        await connectDevice(targetId)
+      } catch (e) {
+        if (e && e.message === 'ALREADY_CONNECT_STALE') {
+          // ★ v3.6-fixG v3: 若 btState 已为 off，说明适配器事件已到达，系统蓝牙确实关了
+          //   此时重置适配器只会强行 btState='on' 造成错误 → 直接抛出让上层暂停重连
+          if (this.btState === 'off') {
+            console.log('[Store] ⛧ btState 已为 off，跳过适配器重置（系统蓝牙已关）')
+            throw e
+          }
+          console.log('[Store] ⛧ GATT 僵死，重置适配器...')
+          await this._resetBluetoothAdapter()
+          console.log('[Store] 适配器重置完成，重试连接...')
+          await connectDevice(targetId)
+        } else {
+          throw e
+        }
+      }
+    },
+
+    /**
+     * ★ v3.6-fixG: 重置蓝牙适配器（close → wait → open）
+     *   全程 _adapterResetting=true 压制 Store 适配器事件处理
+     */
+    async _resetBluetoothAdapter() {
+      this._adapterResetting = true
+      try {
+        await new Promise((resolve) => {
+          uni.closeBluetoothAdapter({ complete: () => resolve() })
+        })
+        console.log('[Store] 适配器已关闭，等待系统释放资源...')
+        await new Promise(r => setTimeout(r, 800))
+
+        await new Promise((resolve, reject) => {
+          uni.openBluetoothAdapter({
+            success: () => {
+              console.log('[Store] 适配器重新打开成功')
+              resolve()
+            },
+            fail: (err) => {
+              console.error('[Store] 适配器重新打开失败', err?.errMsg)
+              reject(err)
+            }
+          })
+        })
+        // 适配器状态手动同步（_adapterResetting=true 期间事件被压制）
+        this.btState = 'on'
+        // 等适配器完全就绪
+        await new Promise(r => setTimeout(r, 500))
+      } finally {
+        this._adapterResetting = false
+      }
     },
 
     /**
@@ -605,7 +815,24 @@ export const useBleStore = defineStore('ble', {
         this._restoreConfig()  // ★ 确保连接前配置已恢复
         this._ensureGlobalListeners()  // ★ v3.6: 确保全局监听器已注册
 
-        await connectDevice(deviceId)
+        // ★ v3.6-fixE: 用户手动连接时，清除所有自动重连状态（防止冲突）
+        if (this._reconnectTimer) {
+          clearTimeout(this._reconnectTimer)
+          this._reconnectTimer = null
+        }
+        this.reconnectMode = 'idle'
+        this.reconnectAttempt = 0
+        this.reconnectNextDelay = 0
+        this._reconnectGuard++
+
+        // ★ 预清理旧连接句柄（和 _doReconnect 同样的保护）
+        try {
+          uni.closeBLEConnection({ deviceId })
+          console.log('[Store] connect: 已预清理旧连接句柄')
+        } catch (e) { /* ignore */ }
+        await new Promise(r => setTimeout(r, 300))
+
+        await this._connectWithResetFallback(deviceId)
         this.deviceId = deviceId
         this.deviceName = deviceName || 'KeyGo'
         this.connected = true

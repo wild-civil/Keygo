@@ -254,6 +254,7 @@ function requestEnableBluetoothAndroid() {
             resolved = true
             clearInterval(checkInterval)
             clearTimeout(timeoutTimer)
+            clearTimeout(fastRejectTimer)
             console.log('[BLE] 检测到蓝牙已被用户开启 ✅')
             // 稍等让系统稳定一下
             setTimeout(resolve, 500)
@@ -263,20 +264,39 @@ function requestEnableBluetoothAndroid() {
         }
       }, 500)
 
-      // 60 秒超时
+      // ★ v3.6-fixE: 快速拒绝检测 — 3 秒内蓝牙未开启则视为用户拒绝
+      //   用户点「拒绝」后弹窗立即消失，无需等 12s 超时
+      const fastRejectTimer = setTimeout(() => {
+        if (resolved) return
+        // 再做一次最终确认，避免误判
+        try {
+          const adapter3 = BluetoothAdapter.getDefaultAdapter()
+          if (adapter3 && adapter3.isEnabled()) {
+            console.log('[BLE] 快速拒绝检测时发现蓝牙已开启，继续等待')
+            return // 不 reject，让正常轮询处理
+          }
+        } catch (e) { /* ignore */ }
+        resolved = true
+        clearInterval(checkInterval)
+        clearTimeout(timeoutTimer)
+        console.warn('[BLE] 快速拒绝：用户未在 3s 内开启蓝牙')
+        reject('USER_DENIED_FAST')
+      }, 3000)
+
+      // ★ 绝对安全网超时 12 秒（兜底）
       const timeoutTimer = setTimeout(() => {
         if (!resolved) {
           resolved = true
           clearInterval(checkInterval)
           console.warn('[BLE] 开启蓝牙等待超时(60s)')
-          reject('等待超时，请手动开启蓝牙')
+          reject('USER_DENIED')
         }
-      }, 60000)
+      }, 12000)
 
     } catch (e) {
       console.error('[BLE] 原生弹窗异常:', e)
       // ★ 降级：弹出提示 + 轮询等待用户手动开启
-      waitForBluetoothOn(45).then(resolve).catch(reject)
+      waitForBluetoothOn(12).then(resolve).catch(() => reject('TIMEOUT'))
     }
   })
 }
@@ -543,10 +563,12 @@ export function connectDevice(deviceId) {
           }, 500)
         },
         fail: (err) => {
-          // ★ v3.6: "already connect" = 系统层连接仍存活，视为成功
-          if (String(err?.errMsg || '').includes('already connect')) {
-            console.log('[BLE] 连接已存在（already connect），视为重连成功')
-            resolve()
+          const msg = String(err?.errMsg || '')
+          // ★ v3.6-fixG: "already connect" → Android GATT 句柄僵死
+          //   抛出让 Store 层接管适配器重置（Store 需要用 _adapterResetting 标记压制状态事件）
+          if (msg.includes('already connect')) {
+            console.warn('[BLE] already connect → 交 Store 层处理适配器重置')
+            reject(new Error('ALREADY_CONNECT_STALE'))
             return
           }
           console.error('[BLE] 连接失败', err)
