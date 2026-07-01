@@ -209,19 +209,19 @@ export const useBleStore = defineStore('ble', {
      * @returns {Promise<boolean>} true=已开启，false=未开启
      */
     async _checkBluetoothState(expectedGuard) {
-      // ★ v3.6-fixJ: 无 guard 调用（如 onShow）也需保护最近被适配器事件设为 'off' 的情况
-      //   Android getBluetoothAdapterState 有延迟，即使系统蓝牙已关仍可能返回 true
+      // ★ v3.9: 无 guard 调用（如 onShow/ensureBluetooth）保护适配器事件已置 'off' 的情况
+      //   Android getBluetoothAdapterState 有延迟（可达数秒），即使系统蓝牙已关仍可能返回 true
+      //   将窗口从 2000ms 扩大到 5000ms，覆盖 Android 典型 BLE 状态恢复时间
       if (expectedGuard === undefined && this.btState === 'off') {
         const offAge = Date.now() - this._btOffTimestamp
-        if (this._btOffTimestamp > 0 && offAge < 2000) {
-          console.log(`[Store] ⛧ _checkBluetoothState(无guard): btState 刚被适配器事件设为 off (${offAge}ms)，拒绝用延迟数据反转`)
+        if (this._btOffTimestamp > 0 && offAge < 5000) {
+          console.log(`[Store] ⛧ _checkBluetoothState(无guard): btState 已被适配器事件设为 off (${offAge}ms)，拒绝用延迟数据反转`)
           return false
         }
       }
       // ★ v3.6-fixD: 如果调用方提供了 guard，先检查蓝牙是否在此期间被关闭
       if (expectedGuard !== undefined && expectedGuard !== this._reconnectGuard) {
         console.log(`[Store] ⛧ _checkBluetoothState: 锁不匹配 (期望${expectedGuard}, 当前${this._reconnectGuard})，跳过`)
-        // 不修改 btState，保持当前状态
         return false
       }
       // ★ v3.6-fixD2: 查询前 btState 已被设为 'off' → 拒绝反转
@@ -230,10 +230,9 @@ export const useBleStore = defineStore('ble', {
         return false
       }
       const state = await getBluetoothAdapterState()
-      // ★ v3.6-fixG v3: 查询期间 btState 可能已被 _applyBtAdapterState(false) 改为 'off'
-      //   Android getBluetoothAdapterState 有延迟，即使系统蓝牙已关仍可能返回 true
-      //   此时绝不允许用延迟数据覆盖正确状态
-      if (expectedGuard !== undefined && this.btState === 'off') {
+      // ★ v3.9: 查询后再次检查 btState（含无 guard 路径）
+      //   getBluetoothAdapterState 是 async，查询期间适配器事件可能已到达
+      if (this.btState === 'off') {
         console.log('[Store] ⛧ _checkBluetoothState: 查询期间 btState 变为 off，拒绝用延迟数据反转')
         return false
       }
@@ -258,38 +257,45 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
-     * ★ v3.6: 系统蓝牙适配器状态变化回调（用户从控制中心开关蓝牙时触发）
+     * ★ v3.9: 系统蓝牙适配器状态变化回调（用户从控制中心开关蓝牙时触发）
      *
-     *   ★ 关键：discovering 变化（由 RSSI 轮询触发）不应驱动业务逻辑，
-     *      仅 available 的实质性变化才处理。
-     *
-     *   ★ v3.6-fixC: 不对称防抖 + 冷却锁，防止 Android 蓝牙关闭时的振荡事件
+     *   关键设计：
+     *   - available=false 必须无条件立即执行（不等防抖、不跳过），否则：
+     *     a) _btOffTimestamp 不更新 → 后续 available=true 可能误过冷却锁
+     *     b) 防抖定时器不清除 → stale timer 事后用 getBluetoothAdapterState()
+     *        拿到 Android 延迟的 available=true，把 btState 错误翻回 'on'
+     *   - available=true 仍走冷却锁 + 防抖二次确认
+     *   - discovering-only 事件由 _applyBtAdapterState 内部状态比较过滤
      */
     _onBtAdapterStateChange(available, _discovering) {
-      // ★ v3.6-fixG: 适配器重置期间跳过所有状态变化（避免冷确锁误拦截 + btState 错乱）
+      // ★ v3.6-fixG: 适配器重置期间跳过所有状态变化（避免冷却锁误拦截 + btState 错乱）
       if (this._adapterResetting) {
         console.log(`[Store] ⛧ 适配器重置中，忽略适配器事件 (available=${available})`)
         return
       }
 
-      // ★ 防抖1：仅 available 真正变化时才处理，忽略 discovering-only 事件
-      const expectedState = available ? 'on' : 'off'
-      if (this.btState === expectedState) {
-        // RSSI 扫描触发的 discovering 变化 → 忽略
-        return
-      }
-
+      // ==================== 蓝牙关闭 → 无条件立即执行 ====================
       if (!available) {
-        // 蓝牙关闭 → 立即执行，不等防抖（避免 _handleDisconnect 误判蓝牙开着而启动无效重连）
-        // ★ v3.6-fixC: 记录关闭时间戳（开启冷却锁）
+        // ★ v3.9: 清除任何待执行的防抖定时器（这是最关键的修复：
+        //   如果 btState 已经是 'off'，_applyBtAdapterState(false) 内部会
+        //   提前 return 不清除定时器，导致 stale timer 在后续误触 _applyBtAdapterState(true)）
+        if (this._btDebounceTimer) {
+          clearTimeout(this._btDebounceTimer)
+          this._btDebounceTimer = null
+        }
+        // ★ 始终刷新关闭时间戳（冷却锁依赖它）
         this._btOffTimestamp = Date.now()
+        // _applyBtAdapterState(false) 内部有二次检查，btState 已 off 时是 no-op
         this._applyBtAdapterState(false)
         return
       }
 
-      // ==================== 蓝牙开启事件 → 三层防护 ====================
+      // ==================== 蓝牙开启 → 三层防护 ====================
 
-      // ★ v3.6-fixC 冷却锁：关闭后 3 秒内收到的开启事件直接忽略
+      // ★ 仅 available 真正变化时才处理，忽略 discovering-only 事件
+      if (this.btState === 'on') return
+
+      // ★ 冷却锁：关闭后 3 秒内收到的开启事件直接忽略
       //   Android 在蓝牙关闭时常发出 available=false→true 的振荡序列
       const offAge = Date.now() - this._btOffTimestamp
       if (this._btOffTimestamp > 0 && offAge < 3000) {
@@ -297,7 +303,7 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
-      // 蓝牙开启 → 加长防抖 1500ms（原 300ms 太短，Android 振荡可达 ~1000ms）
+      // ★ 防抖：1500ms 内收到的开启事件合并且延迟执行
       const now = Date.now()
       if (this._lastBtAdapterEvent && (now - this._lastBtAdapterEvent) < 600) {
         console.log('[Store] 适配器开启事件抖动，加长防抖中...')
@@ -308,8 +314,8 @@ export const useBleStore = defineStore('ble', {
       this._btDebounceTimer = setTimeout(async () => {
         this._btDebounceTimer = null
 
-        // ★ v3.6-fixC 二次确认：防抖到期后再次检查适配器真实状态
-        //   避免基于过期事件修改状态
+        // ★ 二次确认：防抖到期后再次检查适配器真实状态
+        //   Android getBluetoothAdapterState() 在蓝牙刚开/关时有延迟
         try {
           const realState = await getBluetoothAdapterState()
           if (!realState.available) {
@@ -317,8 +323,14 @@ export const useBleStore = defineStore('ble', {
             return
           }
         } catch (e) {
-          // 查询失败则保守处理：不执行开启
           console.warn('[Store] 二次确认查询失败，跳过开启事件')
+          return
+        }
+
+        // ★ v3.9: 二次确认通过后还要再检查 btState 是否已被关闭事件改为 'off'
+        //   （防止二次确认异步查询期间 adapter 事件先一步把 btState 置为 off）
+        if (this.btState === 'off') {
+          console.log('[Store] ⛧ 二次确认: btState 已在查询期间被设为 off，取消开启')
           return
         }
 
