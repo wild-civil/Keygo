@@ -80,6 +80,7 @@ export const useBleStore = defineStore('ble', {
     _btOffTimestamp: 0,            // ★ v3.6-fixC: 蓝牙关闭时间戳，用于冷却锁（防振荡）
     _cooldownTimer: null,
     _cooldownDeferTimer: null,     // ★ v3.9.1: 冷却锁延迟复核定时器
+    _lastEnableRejected: 0,        // ★ v3.9.1: enableBluetooth 被拒时间戳，压制后续虚假开启事件
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
   }),
 
@@ -282,6 +283,14 @@ export const useBleStore = defineStore('ble', {
 
       // ==================== 蓝牙开启事件 → 三层防护 ====================
 
+      // ★ v3.9.1: 拒绝压制 — enableBluetooth 被用户拒绝后，平台仍可能异步
+      //   发送 available=true 事件（在 catch 之后到达），此时 btState 已是 'off'，
+      //   会绕过状态守卫进入恢复流程，导致拒绝后红 banner 消失。
+      if (this._lastEnableRejected > 0 && Date.now() - this._lastEnableRejected < 3000) {
+        console.log('[Store] ⛧ enableBluetooth 刚被拒绝，忽略虚假开启事件')
+        return
+      }
+
       // ★ v3.9.1 冷却锁（延迟复核）：关闭后 3 秒内收到的开启事件，
       //   不直接忽略（会误杀用户手动开蓝牙），改为延迟到冷却期满后
       //   复核真实适配器状态。若是 Android 振荡则自动静默，若是用户
@@ -483,8 +492,10 @@ export const useBleStore = defineStore('ble', {
         this._enablingInProgress = false
         this.btState = 'off'
         this.reconnectMode = 'idle'  // ★ v3.6: 开启失败时重置重连状态
-        // ★ v3.9.1: 清除定时器 — initBluetooth 期间可能有适配器事件触发
-        //   防抖/冷却锁到期后可能恢复适配器把 btState 设回 'on'，导致红 banner 消失
+        // ★ v3.9.1: 清除定时器 + 记录拒绝时间戳 — 压制后续异步虚假开启事件
+        //   initBluetooth 期间可能有适配器事件触发防抖/冷却锁定时器，
+        //   更关键的是：用户拒绝后平台仍可能异步发送 available=true 事件，
+        //   进入 _onBtAdapterStateChange → 绕过后面的冷却锁 → 进入恢复流程 → 红 banner 消失
         if (this._btDebounceTimer) {
           clearTimeout(this._btDebounceTimer)
           this._btDebounceTimer = null
@@ -493,6 +504,7 @@ export const useBleStore = defineStore('ble', {
           clearTimeout(this._cooldownDeferTimer)
           this._cooldownDeferTimer = null
         }
+        this._lastEnableRejected = Date.now()
         // ★ 把错误抛出让 UI 层决定如何提示
         throw err
       }
