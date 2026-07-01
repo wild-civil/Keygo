@@ -76,8 +76,8 @@ static uint8_t g_deviceMac[6]        = {0};
 // 连接列表
 peripheralConnItem_t peripheralConnList = {GAP_CONNHANDLE_INIT, 0, 0, 0};
 
-// 任务 ID & MTU (仅本模块)
-static uint8_t  Peripheral_TaskID    = INVALID_TASK_ID;
+// 任务 ID（keygo_core 需通过 extern 访问以调度事件）& MTU
+uint8_t  Peripheral_TaskID    = INVALID_TASK_ID;
 static uint16_t peripheralMTU        = ATT_MTU_SIZE;
 
 /* ─────────────────────────────────────────────────────────────────
@@ -175,6 +175,7 @@ void Peripheral_Init(void)
     // ── 硬件 & 外设 ──
     KeyGo_GPIO_Init();
     KeyGo_ResetState();
+    KeyGo_LoadConfig();   // ★ v3.5.1: 从 DataFlash 恢复上次保存的阈值
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
     GAPRole_BroadcasterSetCB(&Broadcaster_BroadcasterCBs);
 
@@ -237,6 +238,11 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         }
         return (events ^ SBP_STATE_MACHINE_EVT);
+    }
+
+    if (events & SBP_GPIO_PULSE_END_EVT) {
+        KeyGo_GPIO_PulseEnd();
+        return (events ^ SBP_GPIO_PULSE_END_EVT);
     }
 
     return 0;
@@ -337,6 +343,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
+        tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
 
         KeyGo_ResetState();
 

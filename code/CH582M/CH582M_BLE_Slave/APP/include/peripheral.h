@@ -28,6 +28,7 @@ extern "C" {
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
 #define SBP_PHY_UPDATE_EVT          0x0010  // PHY 更新
 #define SBP_STATE_MACHINE_EVT       0x0080  // 状态机轮询
+#define SBP_GPIO_PULSE_END_EVT      0x0100  // GPIO 脉冲结束（非阻塞延迟）
 #define SBP_COMMAND_PARSE_EVT       0x0200  // 命令解析
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
@@ -35,6 +36,10 @@ extern "C" {
 #define SBP_READ_RSSI_EVT_PERIOD       800    // ~500ms RSSI 读取
 #define SBP_STATE_MACHINE_PERIOD       200    // ~125ms 状态机轮询
 #define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   连接参数更新
+
+// ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
+#define GPIO_PULSE_LOCK_TICKS          320    // ~200ms  解锁/锁车
+#define GPIO_PULSE_TRUNK_TICKS         800    // ~500ms  后备箱长按
 
 // 广播间隔
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
@@ -85,6 +90,9 @@ typedef struct {
 // 核心状态 
 extern KeyState_t g_keyState;
 extern uint8_t    g_deviceConnected;
+
+// 任务 ID（keygo_core 需要 tmos_start_task）
+extern uint8_t    Peripheral_TaskID;
 
 // 连接列表
 extern peripheralConnItem_t peripheralConnList;

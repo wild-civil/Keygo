@@ -7,20 +7,16 @@
 
     <template v-else>
       <!-- ★ 车辆状态大卡 -->
-      <view class="car-card" :class="{ unlocked: bleStore.isUnlocked && !bleStore.rssiStateMismatch }">
+      <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
         <view class="car-icon">🚗</view>
         <view class="car-status">
-          <text class="car-state-text">{{ bleStore.rssiStateMismatch ? '⛔ 强制锁定（RSSI 异常）' : bleStore.stateText }}</text>
+          <text class="car-state-text">{{ bleStore.stateText }}</text>
           <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
           <text class="car-cooldown" v-if="bleStore.manualCooldown">⏳ RSSI 状态机冷却中...</text>
         </view>
       </view>
 
-      <!-- ★ RSSI 与状态冲突警告（设备端阈值异常 → App 强制锁定） -->
-      <view class="rssi-mismatch-warn" v-if="bleStore.rssiStateMismatch && !bleStore.manualCooldown">
-        <text class="mismatch-icon">🛡️</text>
-        <text class="mismatch-text">App 已强制锁定！设备报告解锁但 RSSI={{ bleStore.filteredRssi }} 不达标（需 ≥ {{ bleStore.unlockThreshold }}）。请检查设备固件是否已更新并烧录。</text>
-      </view>
+
 
       <!-- ★ RSSI 实时信息 -->
       <view class="info-grid">
@@ -208,28 +204,6 @@ async function setRSSI(value) {
   display: block;
 }
 
-/* ===== RSSI 状态冲突警告 ===== */
-.rssi-mismatch-warn {
-  background: var(--bg-warning);
-  border: 1rpx solid var(--border-warning);
-  border-radius: 16rpx;
-  padding: 20rpx 24rpx;
-  margin-bottom: 24rpx;
-  display: flex;
-  align-items: flex-start;
-  gap: 12rpx;
-}
-
-.mismatch-icon {
-  font-size: 32rpx;
-  flex-shrink: 0;
-}
-
-.mismatch-text {
-  font-size: 22rpx;
-  color: var(--accent-orange);
-  line-height: 1.5;
-}
 
 /* ===== 信息网格 ===== */
 .info-grid {

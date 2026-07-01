@@ -8,6 +8,7 @@
 #include "keygo_core.h"
 #include "gattprofile.h"
 #include <stdlib.h>   /* atoi */
+#include "CH58x_common.h"  /* EEPROM_READ / EEPROM_WRITE / EEPROM_ERASE */
 
 /* ─────────────────────────────────────────────────────────────────
  * 宏定义 (模块内部)
@@ -42,11 +43,13 @@ static int16_t  g_rssiBuffer[8]     = {0};
 static uint8_t  g_rssiBufIdx        = 0;
 static uint8_t  g_spikeConsecutive  = 0;
 static int16_t  g_lastRawRSSI       = -999;
+static uint8_t  g_rssiUpdated       = 0;    // ★ 新 Kalman 样本标记
 
 // 状态机
 static uint8_t  g_unlockCounter     = 0;
 static uint8_t  g_lockCounter       = 0;
 static uint8_t  g_actionActive      = 0;
+static uint16_t g_pulsePinMask      = 0;     // 当前脉冲的引脚掩码
 static uint8_t  g_manualCooldown    = 0;
 static uint32_t g_lastCommandMs     = 0;
 
@@ -90,26 +93,43 @@ void KeyGo_GPIO_Init(void)
 
 void KeyGo_Unlock(void)
 {
+    if (g_actionActive) return;    // 已有脉冲进行中，跳过
+    g_actionActive  = 1;
+    g_pulsePinMask  = PIN_UNLOCK_GPIO;
     PRINT("[KEY] unlock\n");
     GPIOA_SetBits(PIN_UNLOCK_GPIO);
-    mDelaymS(500);
-    GPIOA_ResetBits(PIN_UNLOCK_GPIO);
+    tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
 }
 
 void KeyGo_Lock(void)
 {
+    if (g_actionActive) return;
+    g_actionActive  = 1;
+    g_pulsePinMask  = PIN_LOCK_GPIO;
     PRINT("[KEY] lock\n");
     GPIOA_SetBits(PIN_LOCK_GPIO);
-    mDelaymS(500);
-    GPIOA_ResetBits(PIN_LOCK_GPIO);
+    tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
 }
 
 void KeyGo_Trunk(void)
 {
+    if (g_actionActive) return;
+    g_actionActive  = 1;
+    g_pulsePinMask  = PIN_TRUNK_GPIO;
     PRINT("[KEY] trunk\n");
     GPIOA_SetBits(PIN_TRUNK_GPIO);
-    mDelaymS(500);
-    GPIOA_ResetBits(PIN_TRUNK_GPIO);
+    tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_TRUNK_TICKS);
+}
+
+/*
+ * TMOS 事件回调：脉冲时间到达，复位 GPIO 引脚
+ */
+void KeyGo_GPIO_PulseEnd(void)
+{
+    GPIOA_ResetBits(g_pulsePinMask);
+    g_pulsePinMask  = 0;
+    g_actionActive  = 0;
+    PRINT("[KEY] pulse end\n");
 }
 
 void KeyGo_KeyPower(uint8_t on)
@@ -149,10 +169,12 @@ void KeyGo_ResetKalman(void)
 void KeyGo_ResetState(void)
 {
     KeyGo_ResetKalman();
-    g_unlockCounter  = 0;
-    g_lockCounter    = 0;
-    g_actionActive   = 0;
-    g_manualCooldown = 0;
+    g_rssiUpdated     = 0;
+    g_unlockCounter   = 0;
+    g_lockCounter     = 0;
+    g_actionActive    = 0;
+    g_pulsePinMask    = 0;
+    g_manualCooldown  = 0;
 }
 
 static float UpdateKalman(float measurement)
@@ -181,7 +203,7 @@ void KeyGo_RssiProcess(int8_t rssi)
     float r = (float)rssi;
 
     if (g_lastRawRSSI != -999) {
-        if (r - g_lastRawRSSI > 20.0f || g_lastRawRSSI - r > 20.0f) {
+        if (r - g_lastRawRSSI > 25.0f || g_lastRawRSSI - r > 25.0f) { // 设定毛刺阈值 20→25dBm——减少对真实信号移动的误判
             g_spikeConsecutive++;
         } else {
             g_spikeConsecutive = 0;
@@ -191,6 +213,7 @@ void KeyGo_RssiProcess(int8_t rssi)
 
     if (g_spikeConsecutive < SPIKE_DISCARD_COUNT) {
         g_filteredRSSI = UpdateKalman(r);
+        g_rssiUpdated = 1;   // ★ 标记：新 Kalman 样本已产出
     }
 }
 
@@ -211,6 +234,10 @@ void KeyGo_ProcessStateMachine(void)
     }
 
     if (g_filteredRSSI == -999.0f || g_actionActive) return;
+
+    // ★ 只在有新 Kalman 样本时才计数（每 ~500ms 一次，而非每 125ms）
+    if (!g_rssiUpdated) return;
+    g_rssiUpdated = 0;
 
     // ★ v3.5: 使用可运行时配置的阈值变量 (非 #define 硬编码)
     if (g_filteredRSSI > g_cfgUnlockThreshold) {
@@ -415,9 +442,90 @@ uint8_t KeyGo_ParseConfig(const char *line)
         // ★ 配置变更后重置计数器，避免旧阈值下的累积计数影响新阈值判断
         g_unlockCounter = 0;
         g_lockCounter   = 0;
+        // ★ 持久化到 DataFlash，重启不丢失
+        KeyGo_SaveConfig();
     }
 
     return changed;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ v3.5.1: 配置持久化到 DataFlash
+ *
+ *   使用 DataFlash 0x77000~0x770FF 区域存储配置 (BLE SNV 在 0x77E00)
+ *   写入前先擦除页 (256 字节对齐)，然后写入 15 字节配置块
+ *   格式: [magic:4][unlock:2][lock:2][uc:1][lc:1][dlock:2][checksum:1][padding:2]
+ *   checksum = XOR over magic+values (前 12 字节)
+ * ───────────────────────────────────────────────────────────────── */
+
+void KeyGo_LoadConfig(void)
+{
+    uint8_t buf[16] = {0};
+    if (EEPROM_READ(KEYGO_CFG_ADDR, buf, 16) != 0) {
+        PRINT("[CONFIG] EEPROM_READ failed, using defaults\n");
+        return;
+    }
+
+    // 校验 magic
+    uint32_t magic = *((uint32_t*)buf);
+    if (magic != KEYGO_CFG_MAGIC) {
+        PRINT("[CONFIG] No saved config (magic mismatch), using defaults\n");
+        return;
+    }
+
+    // 校验 checksum (XOR over first 12 bytes)
+    uint8_t csum = 0;
+    for (uint8_t i = 0; i < 12; i++) csum ^= buf[i];
+    if (csum != buf[12]) {
+        PRINT("[CONFIG] Checksum mismatch, using defaults\n");
+        return;
+    }
+
+    // 恢复配置
+    g_cfgUnlockThreshold  = *((int16_t*)(buf + 4));
+    g_cfgLockThreshold    = *((int16_t*)(buf + 6));
+    g_cfgUnlockCount      = buf[8];
+    g_cfgLockCount        = buf[9];
+    g_cfgDisconnectLockMs = *((uint16_t*)(buf + 10));
+
+    // 合理性校验
+    if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < -100) g_cfgUnlockThreshold = -45;
+    if (g_cfgLockThreshold >= 0 || g_cfgLockThreshold < -100)     g_cfgLockThreshold   = -65;
+    if (g_cfgUnlockCount < 1 || g_cfgUnlockCount > 30)           g_cfgUnlockCount     = 3;
+    if (g_cfgLockCount < 1 || g_cfgLockCount > 30)               g_cfgLockCount       = 5;
+    if (g_cfgDisconnectLockMs > 60000)                           g_cfgDisconnectLockMs = 5000;
+
+    PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d\n",
+          g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
+          g_cfgLockCount, g_cfgDisconnectLockMs);
+}
+
+void KeyGo_SaveConfig(void)
+{
+    // 擦除配置页 (256 字节，页对齐)
+    EEPROM_ERASE(KEYGO_CFG_ADDR, 256);
+
+    uint8_t buf[16] = {0};
+
+    // Magic (4 bytes)
+    *((uint32_t*)buf) = KEYGO_CFG_MAGIC;
+
+    // 配置值
+    *((int16_t*)(buf + 4))  = g_cfgUnlockThreshold;
+    *((int16_t*)(buf + 6))  = g_cfgLockThreshold;
+    buf[8]  = g_cfgUnlockCount;
+    buf[9]  = g_cfgLockCount;
+    *((uint16_t*)(buf + 10)) = g_cfgDisconnectLockMs;
+
+    // Checksum: XOR over first 12 bytes
+    buf[12] = 0;
+    for (uint8_t i = 0; i < 12; i++) buf[12] ^= buf[i];
+
+    if (EEPROM_WRITE(KEYGO_CFG_ADDR, buf, 16) == 0) {
+        PRINT("[CONFIG] Saved to flash OK\n");
+    } else {
+        PRINT("[CONFIG] Save to flash FAILED\n");
+    }
 }
 
 /*********************************************************************

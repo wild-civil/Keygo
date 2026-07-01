@@ -128,17 +128,8 @@ const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 
-onShow(() => {
-  themeStore.applyNavBar()
-  syncFromStore()  // ★ 每次显示配置页时从 store 同步（包括退出重进后恢复的持久化值）
-})
-
-// ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
-const sliderTrackColor = computed(() => themeStore.isDark ? '#2a2a5e' : '#e0e4e8')
-const sliderActiveGreen = computed(() => themeStore.isDark ? '#00ff88' : '#00aa55')
-const sliderActiveOrange = computed(() => themeStore.isDark ? '#ff8800' : '#cc6600')
-const sliderActivePink = computed(() => themeStore.isDark ? '#ff4488' : '#cc3366')
-
+// ★ localConfig 和 syncFromStore 必须在 onShow 之前声明
+//    const 有暂时死区(TDZ)，在声明行之前访问会抛 ReferenceError
 const localConfig = reactive({
   unlock: -45,
   lock: -65,
@@ -156,6 +147,19 @@ function syncFromStore() {
   localConfig.interval = bleStore._rssiPollInterval || 800  // ★ 从 store 读取，不再硬编码 500
   localConfig.dlock = bleStore.disconnectLockDelayMs
 }
+
+onShow(() => {
+  themeStore.applyNavBar()
+  // ★ 确保配置已从本地存储恢复（解决 App 重启后直接进入配置页时值被重置的问题）
+  bleStore._restoreConfig()
+  syncFromStore()
+})
+
+// ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
+const sliderTrackColor = computed(() => themeStore.isDark ? '#2a2a5e' : '#e0e4e8')
+const sliderActiveGreen = computed(() => themeStore.isDark ? '#00ff88' : '#00aa55')
+const sliderActiveOrange = computed(() => themeStore.isDark ? '#ff8800' : '#cc6600')
+const sliderActivePink = computed(() => themeStore.isDark ? '#ff4488' : '#cc3366')
 
 watch(() => bleStore.unlockThreshold, () => { localConfig.unlock = bleStore.unlockThreshold })
 watch(() => bleStore.lockThreshold, () => { localConfig.lock = bleStore.lockThreshold })

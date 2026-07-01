@@ -50,7 +50,7 @@ export const useBleStore = defineStore('ble', {
     lockCountRequired: 5,
     disconnectLockDelayMs: 5000,
     manualCooldown: false,        // 手动命令冷却中
-    rssiStateMismatch: false,     // ★ RSSI 与实际状态不一致警告（设备端阈值异常）
+
 
     // 连接历史（自动重连用）
     lastDeviceId: '',
@@ -311,8 +311,6 @@ export const useBleStore = defineStore('ble', {
       this.deviceState = 'LOCKED'
       this.rssi = -999
       this.filteredRssi = -999
-      this.rssiStateMismatch = false
-
       this._coolingDown = true
       this.manualCooldown = false
       if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null }
@@ -403,10 +401,6 @@ export const useBleStore = defineStore('ble', {
       if (!this.connected || !this.deviceId) return
       this.rssi = rssiValue
       this.filteredRssi = rssiValue
-      // ★ RSSI 恢复到合理范围后自动清除冲突警告
-      if (this.rssiStateMismatch && rssiValue >= this.unlockThreshold) {
-        this.rssiStateMismatch = false
-      }
       // ★ 手动命令冷却期间暂停 RSSI 上报到设备（避免设备端状态机立即覆盖手动操作）
       if (this.manualCooldown) return
       try {
@@ -446,38 +440,8 @@ export const useBleStore = defineStore('ble', {
       if (data.r !== undefined && data.r > -999) this.rssi = data.r
       if (data.f !== undefined && data.f > -999) this.filteredRssi = data.f
 
-      // ★ 客户端 RSSI 合理性校验：如果设备报告的锁状态与当前 RSSI 严重不符，
-      //    说明设备端阈值没生效或比较方向错误，强制覆盖为 LOCKED
       if (data.st !== undefined) {
-        const currentRssi = this.filteredRssi > -999 ? this.filteredRssi : this.rssi
-        if (currentRssi > -999) {
-          // UNLOCKED 但 RSSI 比锁车阈值还弱 → 设备端阈值逻辑异常，强制回退
-          if (data.st === 'UNLOCKED' && currentRssi < this.lockThreshold) {
-            console.warn(
-              '[Store] ⚠ RSSI 冲突：设备上报 UNLOCKED 但 RSSI=' + currentRssi +
-              ' < 锁车阈值=' + this.lockThreshold + '（解锁阈值=' + this.unlockThreshold + '），已强制回退为 LOCKED'
-            )
-            this.deviceState = 'LOCKED'   // ★ 覆盖：不显示错误状态
-            this.rssiStateMismatch = true
-            return
-          }
-          // UNLOCKED 但 RSSI 没达到解锁阈值 → 标记警告但不强制修正（可能是连续采样中）
-          if (data.st === 'UNLOCKED' && currentRssi < this.unlockThreshold) {
-            console.warn(
-              '[Store] ⚠ RSSI 可疑：设备上报 UNLOCKED 但 RSSI=' + currentRssi +
-              ' < 解锁阈值=' + this.unlockThreshold
-            )
-            // ★ 不再信任设备的 UNLOCKED 状态，也强制回退
-            this.deviceState = 'LOCKED'
-            this.rssiStateMismatch = true
-          } else if (data.st === 'LOCKED') {
-            this.rssiStateMismatch = false
-          }
-        }
-        // 只有通过校验的合法状态才更新 deviceState
-        if (!this.rssiStateMismatch || data.st === 'LOCKED') {
-          this.deviceState = data.st
-        }
+        this.deviceState = data.st
       }
 
       // 自定义名称
@@ -516,8 +480,10 @@ export const useBleStore = defineStore('ble', {
      */
     async unlock() {
       if (!this.connected) throw new Error('未连接设备')
-      await this.sendCommand('UNLOCK')
-      // ★ 手动解锁后 RSSI 状态机冷却 8 秒（防止设备端立即根据 RSSI 自动锁车）
+      // ★ 必须在 sendCommand 之前设置冷却标记！
+      //   因为设备收到 UNLOCK 后会立即回报 {"st":"UNLOCKED"} Notify，
+      //   该 Notify 在 await 期间即可通过事件回调触发 _parseSingleStatus()，
+      //   若此时 manualCooldown 仍为 false，RSSI 防御会立即将状态强制回退 LOCKED。
       this.manualCooldown = true
       if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
       this._cooldownTimer = setTimeout(() => {
@@ -525,12 +491,12 @@ export const useBleStore = defineStore('ble', {
         this._cooldownTimer = null
         console.log('[Store] RSSI 状态机冷却结束')
       }, 8000)
+      await this.sendCommand('UNLOCK')
     },
 
     async lock() {
       if (!this.connected) throw new Error('未连接设备')
-      await this.sendCommand('LOCK')
-      // ★ 手动锁车后 RSSI 状态机冷却 8 秒（防止设备端立即根据 RSSI 自动解锁）
+      // ★ 同上，必须在发送命令前设置冷却标记
       this.manualCooldown = true
       if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
       this._cooldownTimer = setTimeout(() => {
@@ -538,6 +504,7 @@ export const useBleStore = defineStore('ble', {
         this._cooldownTimer = null
         console.log('[Store] RSSI 状态机冷却结束')
       }, 8000)
+      await this.sendCommand('LOCK')
     },
 
     async trunk() {

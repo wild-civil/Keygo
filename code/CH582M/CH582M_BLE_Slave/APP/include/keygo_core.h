@@ -23,6 +23,7 @@ void KeyGo_Unlock(void);
 void KeyGo_Lock(void);
 void KeyGo_Trunk(void);
 void KeyGo_KeyPower(uint8_t on);
+void KeyGo_GPIO_PulseEnd(void);    // TMOS 事件回调：结束当前 GPIO 脉冲
 
 // Kalman 滤波
 void KeyGo_ResetKalman(void);
@@ -55,5 +56,13 @@ extern uint16_t g_cfgDisconnectLockMs;   // 断连自动锁车延时 ms (默认 
 // ★ FF01 配置解析: "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000"
 //    返回: 0=无配置变更, 1=有配置变更需通知 App
 uint8_t KeyGo_ParseConfig(const char *line);
+
+// ── ★ v3.5.1: 配置持久化到 DataFlash (解决设备重启后阈值丢失) ──
+//    保存到 DataFlash 0x77000 (在 BLE SNV 区域 0x77E00 之前，安全不冲突)
+#define KEYGO_CFG_ADDR          0x00077000
+#define KEYGO_CFG_MAGIC         0x4B474346  // "KGCF"
+
+void KeyGo_LoadConfig(void);    // 上电时从 DataFlash 恢复配置
+void KeyGo_SaveConfig(void);    // 配置变更后持久化到 DataFlash
 
 #endif
