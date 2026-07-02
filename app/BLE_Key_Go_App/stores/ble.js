@@ -59,7 +59,7 @@ export const useBleStore = defineStore('ble', {
     lockCountRequired: 5,
     rssiReadPeriodMs: 500,         // ★ v3.13: 固件 RSSI 读取间隔 ms（设备侧 GAP 读取周期）
     disconnectLockDelayMs: 5000,
-    kalmanR: 25,                    // ★ v3.13: 卡尔曼滤波器 R 值（1~50，越小响应越快但易抖动）
+    kalmanR: 15,                    // ★ 与 CH582M / ESP32C3 默认 kf_r=15.0 一致
     manualCooldown: false,        // 手动命令冷却中
     manualCooldownMs: 8000,      // ★ v3.7 / v3.12: 初始默认值（设备连接后由 FF02 同步覆盖，设备级参数）
 

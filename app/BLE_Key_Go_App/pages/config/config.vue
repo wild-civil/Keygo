@@ -153,11 +153,11 @@ const themeClass = computed(() => themeStore.themeClass)
 const localConfig = reactive({
   unlock: -45,
   lock: -65,
-  uc: 5,
-  lc: 10,
+  uc: 2,
+  lc: 3,
   interval: 500,
   dlock: 5000,
-  kr: 25,
+  kr: 15,   // ★ 与 CH582M / ESP32C3 默认 kf_r=15.0 一致
 })
 
 function syncFromStore() {
@@ -167,7 +167,7 @@ function syncFromStore() {
   localConfig.lc = bleStore.lockCountRequired
   localConfig.interval = bleStore.rssiReadPeriodMs || 500
   localConfig.dlock = bleStore.disconnectLockDelayMs
-  localConfig.kr = bleStore.kalmanR || 25
+  localConfig.kr = bleStore.kalmanR || 15
 }
 
 onShow(() => {
@@ -189,7 +189,7 @@ watch(() => bleStore.unlockCountRequired, () => { localConfig.uc = bleStore.unlo
 watch(() => bleStore.lockCountRequired, () => { localConfig.lc = bleStore.lockCountRequired })
 watch(() => bleStore.rssiReadPeriodMs, () => { localConfig.interval = bleStore.rssiReadPeriodMs || 500 })
 watch(() => bleStore.disconnectLockDelayMs, () => { localConfig.dlock = bleStore.disconnectLockDelayMs })
-watch(() => bleStore.kalmanR, () => { localConfig.kr = bleStore.kalmanR || 25 })
+watch(() => bleStore.kalmanR, () => { localConfig.kr = bleStore.kalmanR || 15 })
 
 function onUnlockChange(e) { localConfig.unlock = e.detail.value }
 function onLockChange(e) { localConfig.lock = e.detail.value }

@@ -29,21 +29,21 @@
  * ───────────────────────────────────────────────────────────────── */
 int16_t  g_cfgUnlockThreshold   = -45;   // RSSI 解锁阈值
 int16_t  g_cfgLockThreshold     = -65;   // RSSI 锁车阈值
-uint8_t  g_cfgUnlockCount       = 3;     // 解锁需连续满足次数
-uint8_t  g_cfgLockCount         = 5;     // 锁车需连续满足次数
+uint8_t  g_cfgUnlockCount       = 2;     // 解锁需连续满足次数
+uint8_t  g_cfgLockCount         = 3;     // 锁车需连续满足次数
 uint16_t g_cfgDisconnectLockMs  = 5000;  // 断连自动锁车延时 ms
 // ★ v3.7: 可运行时配置的 RSSI 冷却时间 (替代 #define MANUAL_COOLDOWN_MS)
 uint16_t g_cfgManualCooldownMs  = 8000;  // 手动命令冷却时间 ms (范围 2000~30000)
 // ★ v3.13: 固件 RSSI 读取周期 + 卡尔曼响应速度
 uint16_t g_cfgRssiPeriodMs      = 500;   // GAP RSSI 读取间隔 ms (范围 100~2000, 默认 500)
-uint8_t  g_cfgKalmanR           = 25;    // 卡尔曼滤波器 R 值 (范围 1~50, 默认 25)
+uint8_t  g_cfgKalmanR           = 15;    // 卡尔曼滤波器 R 值 (范围 1~50, 默认 15)
 
 /* ─────────────────────────────────────────────────────────────────
  * 模块内部状态 (仅 keygo_core 可见)
  * ───────────────────────────────────────────────────────────────── */
 
 // Kalman
-static KalmanFilter1D_t g_kalman;                   // 由 InitKalmanFilter() 初始化
+static KalmanFilter1D_t g_kalman;                   // 由 InitKalmanFilter() 初始化 
 
 // RSSI
 static int16_t  g_latestRSSI        = -999;
@@ -301,13 +301,14 @@ void KeyGo_NotifyStatus(void)
     }
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
         (int)(g_filteredRSSI != -999.0f ? (int)g_filteredRSSI : -999),
         d2,
-        (int)g_cfgManualCooldownMs);  // ★ v3.7: 上报当前冷却时间，App 端同步
+        (int)g_cfgManualCooldownMs,  // ★ v3.7: 上报当前冷却时间，App 端同步
+        (int)g_cfgKalmanR);           // ★ v3.13: 上报 kalmanR，App 同步 kalmanR
 
     if (n > 0 && n < (int)sizeof(json)) {
         attHandleValueNoti_t noti;
@@ -569,8 +570,8 @@ void KeyGo_LoadConfig(void)
     // 合理性校验
     if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < -100) g_cfgUnlockThreshold = -45;
     if (g_cfgLockThreshold >= 0 || g_cfgLockThreshold < -100)     g_cfgLockThreshold   = -65;
-    if (g_cfgUnlockCount < 1 || g_cfgUnlockCount > 30)           g_cfgUnlockCount     = 3;
-    if (g_cfgLockCount < 1 || g_cfgLockCount > 30)               g_cfgLockCount       = 5;
+    if (g_cfgUnlockCount < 1 || g_cfgUnlockCount > 30)           g_cfgUnlockCount     = 2;
+    if (g_cfgLockCount < 1 || g_cfgLockCount > 30)               g_cfgLockCount       = 3;
     if (g_cfgDisconnectLockMs > 60000)                           g_cfgDisconnectLockMs = 5000;
 
     PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d\n",
