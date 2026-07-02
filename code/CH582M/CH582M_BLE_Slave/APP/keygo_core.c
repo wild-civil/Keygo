@@ -43,7 +43,7 @@ uint8_t  g_cfgKalmanR           = 25;    // 卡尔曼滤波器 R 值 (范围 1~5
  * ───────────────────────────────────────────────────────────────── */
 
 // Kalman
-static KalmanFilter1D_t g_kalman    = {1.0f, 25.0f, 1.0f, 0.0f, -80.0f, 0};
+static KalmanFilter1D_t g_kalman;                   // 由 InitKalmanFilter() 初始化
 
 // RSSI
 static int16_t  g_latestRSSI        = -999;
@@ -156,7 +156,7 @@ void KeyGo_KeyPower(uint8_t on)
 static void InitKalmanFilter(void)
 {
     g_kalman.Q    = 1.0f;
-    g_kalman.R    = 25.0f;
+    g_kalman.R    = (float)g_cfgKalmanR;  // ★ v3.13: 使用运行时配置，不再硬编码
     g_kalman.P    = 1.0f;
     g_kalman.K    = 0.0f;
     g_kalman.X    = -80.0f;

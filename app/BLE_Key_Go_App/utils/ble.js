@@ -814,6 +814,8 @@ export async function sendConfig(deviceId, config) {
   if (config.dlock !== undefined) parts.push(`dlock=${config.dlock}`)
   // ★ v3.7: 冷却时间 cooldown_ms
   if (config.cooldown_ms !== undefined) parts.push(`cooldown_ms=${config.cooldown_ms}`)
+  // ★ v3.13: 卡尔曼 R 值
+  if (config.kr !== undefined) parts.push(`kr=${config.kr}`)
 
   const value = parts.join(' ')
   if (!value) return

@@ -198,11 +198,11 @@ function onLcChange(delta) { localConfig.lc = Math.max(1, Math.min(30, localConf
 function onIntervalChange(e) { localConfig.interval = e.detail.value }
 function onDlockChange(e) { localConfig.dlock = e.detail.value }
 
-// ★ v3.13: 卡尔曼 R 值档位预设
+// ★ v3.13: 卡尔曼 R 值档位预设（等比分布，每档体感步进一致）
 const krPresets = [
-  { value: 5,  label: '🟢 极速' },
-  { value: 10, label: '🟡 快速' },
-  { value: 25, label: '🔵 标准' },
+  { value: 2,  label: '🟢 极速' },
+  { value: 5,  label: '🟡 快速' },
+  { value: 15, label: '🔵 标准' },
   { value: 50, label: '⚪ 稳定' },
 ]
 
@@ -212,9 +212,9 @@ function krLabel(val) {
 }
 
 function krDesc(val) {
-  if (val <= 5) return 'R=5，测量值权重重，响应极快，适合信号稳定的环境'
-  if (val <= 10) return 'R=10，响应较快，日常使用推荐'
-  if (val <= 25) return 'R=25，平衡速度与稳定，出厂默认'
+  if (val <= 2) return 'R=2，测量值权重极重，响应极快，适合信号稳定的环境'
+  if (val <= 5) return 'R=5，响应较快，日常使用推荐'
+  if (val <= 15) return 'R=15，平衡速度与稳定，出厂默认'
   return 'R=50，极度平滑，几乎不会误触发，适合信号波动大的环境'
 }
 
