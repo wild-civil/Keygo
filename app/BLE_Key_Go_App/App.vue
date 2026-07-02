@@ -9,9 +9,11 @@
 import { onLaunch, onShow, onHide } from '@dcloudio/uni-app'
 import CustomTabBar from '@/components/CustomTabBar.vue'
 import { useThemeStore } from '@/stores/theme.js'
+import { useBleStore } from '@/stores/ble.js'
 import { initBluetooth } from '@/utils/ble.js'
 
 const themeStore = useThemeStore()
+const bleStore = useBleStore()
 
 onLaunch(() => {
   console.log('[BLE-KeyGo] App launched')
@@ -19,8 +21,14 @@ onLaunch(() => {
   // ★ 初始化主题（读取持久化 → 检测系统主题 → 监听变化 → 启动 auto 轮询）
   themeStore.init()
 
-  // ★ v3.6: 初始化蓝牙适配器（复用 utils 封装，already open / not available 有容错）
-  initBluetooth().catch(() => {
+  // ★ v3.11-fix3: 初始化蓝牙适配器，传入 onAllowing 回调
+  //   当蓝牙关闭时自动弹出系统弹窗，用户点「允许」→ 立即亮绿 banner（与 nRF Connect 一致）
+  initBluetooth({
+    onAllowing: () => {
+      bleStore.btState = 'just_enabled'
+      console.log('[App] ⚡ onAllowing → 绿 banner（与系统弹窗同步）')
+    }
+  }).catch(() => {
     // code=10001（系统蓝牙未开启）时静默，让 index 页横幅引导用户
   })
 })

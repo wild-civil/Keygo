@@ -259,6 +259,9 @@ export const useBleStore = defineStore('ble', {
       const next = this._mapNativeState(state)
       if (this.btState === next) return  // 去重
 
+      // ★ 标记：原生广播已收到，btState 从此由原生广播驱动。用于 _checkBluetoothState 保护判断
+      this._nativeBtFired = true
+
       console.log(`[Store] ⚡ 原生广播: ${this.btState} → ${next} (state=${state})`)
 
       if (state === 11) {
@@ -292,6 +295,13 @@ export const useBleStore = defineStore('ble', {
     _onUniBtAdapterStateChange(available, _discovering) {
       const next = available ? 'on' : 'off'
       if (this.btState === next) return
+
+      // ★ 修复：just_enabled 表示"正在开启中"，此时 available=false 是正常的过渡状态
+      //   原生广播已设 just_enabled，不能因 Uni-APP 的延迟事件覆盖回 off
+      if (!available && this.btState === 'just_enabled') {
+        console.log('[Store] Uni-APP available=false 但 btState=just_enabled → 忽略（正在开启中）')
+        return
+      }
 
       console.log(`[Store] Uni-APP 适配器变化: available=${available} → btState=${next}`)
       this.btState = next
@@ -345,13 +355,21 @@ export const useBleStore = defineStore('ble', {
       const state = await getBluetoothAdapterState()
       if (state.available) {
         // ★ 若原生广播已确认蓝牙关闭，拒绝用延迟数据反转
-        if (this.btState === 'off') {
-          console.log('[Store] ⛧ _checkBluetoothState: 拒绝用延迟 available=true 覆盖 off')
+        //   关键：只有 _nativeBtFired 时 btState='off' 才是原生广播确认的，
+        //   否则可能是早期 "not init" 调用误设的，应当允许覆盖
+        if (this.btState === 'off' && this._nativeBtFired) {
+          console.log('[Store] ⛧ _checkBluetoothState: 拒绝用延迟 available=true 覆盖 off（原生已确认）')
           return false
         }
         if (this.btState !== 'on' && this.btState !== 'just_enabled') {
           this.btState = 'on'
         }
+        return true
+      }
+      // ★ 原生广播优先：getBluetoothAdapterState 可能因 "not init" / 延迟等原因返回 false，
+      //   但原生广播已确认蓝牙为 on/just_enabled → 信任原生广播，不覆盖
+      if (this.btState === 'on' || this.btState === 'just_enabled') {
+        console.log('[Store] ⛧ _checkBluetoothState: available=false 但 btState=' + this.btState + ' → 信任原生广播')
         return true
       }
       if (this.btState !== 'off') {
