@@ -76,10 +76,10 @@
 
       <view class="config-item">
         <view class="config-header">
-          <text class="config-label">RSSI 采样间隔</text>
+          <text class="config-label">📡 固件 RSSI 读取间隔</text>
           <text class="config-value">{{ localConfig.interval }} ms</text>
         </view>
-        <view class="config-desc">手机端 RSSI 轮询间隔（300ms 起，过频可能影响连接稳定性）</view>
+        <view class="config-desc">KeyGo 设备通过 BLE GAP 读取 RSSI 的周期（越短反应越快，略增功耗）</view>
         <slider class="config-slider" :min="100" :max="2000" :step="100"
           :value="localConfig.interval" @change="onIntervalChange"
           :activeColor="sliderActiveGreen" :backgroundColor="sliderTrackColor"
@@ -88,6 +88,26 @@
           <text>100ms</text>
           <text>2000ms</text>
         </view>
+      </view>
+
+      <view class="config-item">
+        <view class="config-header">
+          <text class="config-label">⚡ 响应速度</text>
+          <text class="config-value">{{ krLabel(localConfig.kr) }}</text>
+        </view>
+        <view class="config-desc">卡尔曼滤波器响应灵敏度（越快速响应越快，但偶尔可能误触发）</view>
+        <view class="kr-presets">
+          <button
+            v-for="preset in krPresets"
+            :key="preset.value"
+            class="kr-preset"
+            :class="{ active: localConfig.kr === preset.value }"
+            :style="krPresetStyle(preset.value)"
+            @tap="localConfig.kr = preset.value">
+            {{ preset.label }}
+          </button>
+        </view>
+        <view class="kr-hint">{{ krDesc(localConfig.kr) }}</view>
       </view>
 
       <view class="config-item">
@@ -137,6 +157,7 @@ const localConfig = reactive({
   lc: 10,
   interval: 500,
   dlock: 5000,
+  kr: 25,
 })
 
 function syncFromStore() {
@@ -144,8 +165,9 @@ function syncFromStore() {
   localConfig.lock = bleStore.lockThreshold
   localConfig.uc = bleStore.unlockCountRequired
   localConfig.lc = bleStore.lockCountRequired
-  localConfig.interval = bleStore._rssiPollInterval || 800  // ★ 从 store 读取，不再硬编码 500
+  localConfig.interval = bleStore.rssiReadPeriodMs || 500
   localConfig.dlock = bleStore.disconnectLockDelayMs
+  localConfig.kr = bleStore.kalmanR || 25
 }
 
 onShow(() => {
@@ -165,8 +187,9 @@ watch(() => bleStore.unlockThreshold, () => { localConfig.unlock = bleStore.unlo
 watch(() => bleStore.lockThreshold, () => { localConfig.lock = bleStore.lockThreshold })
 watch(() => bleStore.unlockCountRequired, () => { localConfig.uc = bleStore.unlockCountRequired })
 watch(() => bleStore.lockCountRequired, () => { localConfig.lc = bleStore.lockCountRequired })
-watch(() => bleStore._rssiPollInterval, () => { localConfig.interval = bleStore._rssiPollInterval || 800 })
+watch(() => bleStore.rssiReadPeriodMs, () => { localConfig.interval = bleStore.rssiReadPeriodMs || 500 })
 watch(() => bleStore.disconnectLockDelayMs, () => { localConfig.dlock = bleStore.disconnectLockDelayMs })
+watch(() => bleStore.kalmanR, () => { localConfig.kr = bleStore.kalmanR || 25 })
 
 function onUnlockChange(e) { localConfig.unlock = e.detail.value }
 function onLockChange(e) { localConfig.lock = e.detail.value }
@@ -174,6 +197,32 @@ function onUcChange(delta) { localConfig.uc = Math.max(1, Math.min(20, localConf
 function onLcChange(delta) { localConfig.lc = Math.max(1, Math.min(30, localConfig.lc + delta)) }
 function onIntervalChange(e) { localConfig.interval = e.detail.value }
 function onDlockChange(e) { localConfig.dlock = e.detail.value }
+
+// ★ v3.13: 卡尔曼 R 值档位预设
+const krPresets = [
+  { value: 5,  label: '🟢 极速' },
+  { value: 10, label: '🟡 快速' },
+  { value: 25, label: '🔵 标准' },
+  { value: 50, label: '⚪ 稳定' },
+]
+
+function krLabel(val) {
+  const found = krPresets.find(p => p.value === val)
+  return found ? found.label : `R=${val}`
+}
+
+function krDesc(val) {
+  if (val <= 5) return 'R=5，测量值权重重，响应极快，适合信号稳定的环境'
+  if (val <= 10) return 'R=10，响应较快，日常使用推荐'
+  if (val <= 25) return 'R=25，平衡速度与稳定，出厂默认'
+  return 'R=50，极度平滑，几乎不会误触发，适合信号波动大的环境'
+}
+
+function krPresetStyle(val) {
+  const isActive = localConfig.kr === val
+  if (isActive) return { background: 'var(--accent)', color: '#fff', borderColor: 'var(--accent)' }
+  return { background: 'var(--bg-card)', color: 'var(--text-tertiary)', borderColor: 'var(--border)' }
+}
 
 async function handleSubmit() {
   if (localConfig.unlock <= localConfig.lock) {
@@ -189,6 +238,7 @@ async function handleSubmit() {
       lc: localConfig.lc,
       interval: localConfig.interval,
       dlock: localConfig.dlock,
+      kr: localConfig.kr,
     })
     uni.hideLoading()
     toast.success('配置已下发并保存')
@@ -324,6 +374,35 @@ async function handleSubmit() {
 
 .btn-submit:active { opacity: 0.8; }
 .btn-submit[disabled] { opacity: 0.3; }
+
+/* ===== 卡尔曼 R 档位 ===== */
+.kr-presets {
+  display: flex;
+  gap: 16rpx;
+  margin-bottom: 8rpx;
+}
+
+.kr-preset {
+  flex: 1;
+  height: 64rpx;
+  border-radius: 14rpx;
+  font-size: 24rpx;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2rpx solid;
+  padding: 0;
+  transition: all 0.2s;
+}
+
+.kr-preset:active { opacity: 0.75; }
+
+.kr-hint {
+  font-size: 20rpx;
+  color: var(--text-muted);
+  margin-top: 8rpx;
+}
 
 .submit-hint {
   font-size: 22rpx;

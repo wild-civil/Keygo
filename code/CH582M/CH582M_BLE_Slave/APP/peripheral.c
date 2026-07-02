@@ -226,7 +226,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if (events & SBP_READ_RSSI_EVT) {
         GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, SBP_READ_RSSI_EVT_PERIOD);
+        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
         return (events ^ SBP_READ_RSSI_EVT);
     }
 
@@ -317,7 +317,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,      SBP_PERIODIC_EVT_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     SBP_READ_RSSI_EVT_PERIOD);
+        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     KeyGo_GetRssiPeriodTicks());
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
@@ -478,6 +478,11 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
                 uint8_t configChanged = KeyGo_ParseConfig(buf);
                 if (configChanged) {
                     KeyGo_NotifyStatus();  // ★ 配置变更后通知 App 最新状态
+                    // ★ v3.13: 重启 RSSI 读取任务以应用新周期
+                    if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
+                        tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
+                        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
+                    }
                 }
                 // ★ 同时检查是否包含 rssi key (混合下发)
                 {

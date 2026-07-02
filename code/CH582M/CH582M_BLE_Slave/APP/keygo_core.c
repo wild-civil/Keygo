@@ -34,6 +34,9 @@ uint8_t  g_cfgLockCount         = 5;     // 锁车需连续满足次数
 uint16_t g_cfgDisconnectLockMs  = 5000;  // 断连自动锁车延时 ms
 // ★ v3.7: 可运行时配置的 RSSI 冷却时间 (替代 #define MANUAL_COOLDOWN_MS)
 uint16_t g_cfgManualCooldownMs  = 8000;  // 手动命令冷却时间 ms (范围 2000~30000)
+// ★ v3.13: 固件 RSSI 读取周期 + 卡尔曼响应速度
+uint16_t g_cfgRssiPeriodMs      = 500;   // GAP RSSI 读取间隔 ms (范围 100~2000, 默认 500)
+uint8_t  g_cfgKalmanR           = 25;    // 卡尔曼滤波器 R 值 (范围 1~50, 默认 25)
 
 /* ─────────────────────────────────────────────────────────────────
  * 模块内部状态 (仅 keygo_core 可见)
@@ -382,10 +385,22 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
 }
 
 /* ─────────────────────────────────────────────────────────────────
+ * ★ v3.13: RSSI 周期 ms → TMOS ticks 转换
+ *   1 TMOS tick ≈ 0.625ms, 所以 ticks = ms * 8 / 5
+ * ───────────────────────────────────────────────────────────────── */
+uint16_t KeyGo_GetRssiPeriodTicks(void)
+{
+    uint32_t ticks = (uint32_t)g_cfgRssiPeriodMs * 8 / 5;
+    if (ticks < 100) return 100;    // 下限 ~62.5ms
+    if (ticks > 4000) return 4000;  // 上限 ~2500ms
+    return (uint16_t)ticks;
+}
+
+/* ─────────────────────────────────────────────────────────────────
  * ★ v3.5: FF01 配置解析 (KeyGo_ParseConfig)
  *
  *   解析 App 通过 FF01 下发的配置文本:
- *     "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000 cooldown_ms=8000"
+ *     "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000 cooldown_ms=8000 kr=25"
  *
  * ★ v3.12: 分类持久化策略
  *   Per-phone (仅存 RAM): unlock lock uc lc interval dlock
@@ -451,8 +466,23 @@ uint8_t KeyGo_ParseConfig(const char *line)
         else if (keyLen == 4 && tmos_memcmp(p, "lock", 4))     { g_cfgLockThreshold = (int16_t)val;   changed = 1; }
         else if (keyLen == 2 && tmos_memcmp(p, "uc", 2))       { g_cfgUnlockCount = (uint8_t)val;     changed = 1; }
         else if (keyLen == 2 && tmos_memcmp(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
-        else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) { /* App 轮询间隔，固件不直接使用 */ changed = 1; }
+        // ★ v3.13: interval 改为控制固件 RSSI 读取周期 (原为 App 轮询间隔，已废弃)
+        else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) {
+            if (val >= 100 && val <= 2000 && g_cfgRssiPeriodMs != (uint16_t)val) {
+                g_cfgRssiPeriodMs = (uint16_t)val;
+                changed = 1;
+            }
+        }
         else if (keyLen == 5 && tmos_memcmp(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
+        // ★ v3.13: Kalman R 值 (kr)
+        else if (keyLen == 2 && tmos_memcmp(p, "kr", 2)) {
+            if (val >= 1 && val <= 50 && g_cfgKalmanR != (uint8_t)val) {
+                g_cfgKalmanR = (uint8_t)val;
+                g_kalman.R = (float)g_cfgKalmanR;
+                changed = 1;
+                PRINT("[KALMAN] R updated to %d\n", val);
+            }
+        }
         // ★ v3.7 / v3.12: 冷却时间 cooldown_ms (长度 11)
         //   ★ 设备级参数（写入 DataFlash，所有连接此设备的手机共用）
         //   ★ 仅在值实际变化且合法时标记 cooldown_changed（触发 Flash 保存）
@@ -468,9 +498,9 @@ uint8_t KeyGo_ParseConfig(const char *line)
     }
 
     if (changed) {
-        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d\n",
+        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d interval=%d kr=%d\n",
               g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
-              g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgManualCooldownMs);
+              g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgRssiPeriodMs, g_cfgKalmanR);
         // ★ 配置变更后重置计数器，避免旧阈值下的累积计数影响新阈值判断
         g_unlockCounter = 0;
         g_lockCounter   = 0;

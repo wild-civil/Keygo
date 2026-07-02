@@ -53,10 +53,15 @@ extern uint8_t g_cfgUnlockCount;         // 解锁需连续满足次数 (默认 
 extern uint8_t g_cfgLockCount;           // 锁车需连续满足次数 (默认 5)
 extern uint16_t g_cfgDisconnectLockMs;   // 断连自动锁车延时 ms (默认 5000)
 extern uint16_t g_cfgManualCooldownMs;   // ★ v3.7: 手动命令冷却时间 ms (默认 8000, 范围 2000~30000)
+extern uint16_t g_cfgRssiPeriodMs;       // ★ v3.13: 固件 RSSI 读取间隔 ms (默认 500, 范围 100~2000)
+extern uint8_t  g_cfgKalmanR;            // ★ v3.13: 卡尔曼滤波器 R 值 (默认 25, 范围 1~50)
 
 // ★ FF01 配置解析: "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000 cooldown_ms=8000"
 //    返回: 0=无配置变更, 1=有配置变更需通知 App
 uint8_t KeyGo_ParseConfig(const char *line);
+
+// ★ v3.13: RSSI 读取周期 ms → TMOS ticks 转换（供 peripheral.c 使用）
+uint16_t KeyGo_GetRssiPeriodTicks(void);
 
 // ── ★ v3.5.1: 配置持久化到 DataFlash (解决设备重启后阈值丢失) ──
 //    保存到 DataFlash 0x77000 (在 BLE SNV 区域 0x77E00 之前，安全不冲突)

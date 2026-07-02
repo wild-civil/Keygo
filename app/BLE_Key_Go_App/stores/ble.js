@@ -57,8 +57,9 @@ export const useBleStore = defineStore('ble', {
     hystDb: 5,
     unlockCountRequired: 3,
     lockCountRequired: 5,
-    _rssiPollInterval: 800,        // ★ v3.12: 手机端 RSSI 轮询间隔 ms（需声明为 state 才能持久化和响应式）
+    rssiReadPeriodMs: 500,         // ★ v3.13: 固件 RSSI 读取间隔 ms（设备侧 GAP 读取周期）
     disconnectLockDelayMs: 5000,
+    kalmanR: 25,                    // ★ v3.13: 卡尔曼滤波器 R 值（1~50，越小响应越快但易抖动）
     manualCooldown: false,        // 手动命令冷却中
     manualCooldownMs: 8000,      // ★ v3.7 / v3.12: 初始默认值（设备连接后由 FF02 同步覆盖，设备级参数）
 
@@ -163,8 +164,9 @@ export const useBleStore = defineStore('ble', {
           if (saved.lockThreshold !== undefined) this.lockThreshold = saved.lockThreshold
           if (saved.unlockCountRequired !== undefined) this.unlockCountRequired = saved.unlockCountRequired
           if (saved.lockCountRequired !== undefined) this.lockCountRequired = saved.lockCountRequired
-          if (saved._rssiPollInterval !== undefined) this._rssiPollInterval = saved._rssiPollInterval
+          if (saved.rssiReadPeriodMs !== undefined) this.rssiReadPeriodMs = saved.rssiReadPeriodMs
           if (saved.disconnectLockDelayMs !== undefined) this.disconnectLockDelayMs = saved.disconnectLockDelayMs
+          if (saved.kalmanR !== undefined) this.kalmanR = saved.kalmanR
           // ★ v3.12: cooldown_ms 是设备级参数，不从本地存储恢复
           //   设备通过 FF02 Notify 上报当前冷却时间，App 被动同步
           //   old: manualCooldownMs 本地持久化 → 多个手机可能不一致
@@ -374,7 +376,6 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
-      this._stopRssiPolling()
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
@@ -485,7 +486,6 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
-      this._stopRssiPolling()
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
@@ -648,9 +648,6 @@ export const useBleStore = defineStore('ble', {
         throw new Error('用户主动断开')
       }
 
-      // 暂停当前 RSSI 轮询的残留
-      this._stopRssiPolling()
-
       // ★ v3.6-fixB: 重连前先断开可能残留的旧连接句柄
       try {
         uni.closeBLEConnection({ deviceId: this.deviceId })
@@ -723,7 +720,7 @@ export const useBleStore = defineStore('ble', {
         console.log('[Store] 重连后读取序列号失败（名称/配置恢复跳过）:', err?.message || err)
       })
 
-      // 恢复 Notify 和 RSSI 轮询
+      // 恢复 Notify
       await new Promise(r => setTimeout(r, 800))
       await notifyBLECharacteristicValueChange(
         this.deviceId,
@@ -731,7 +728,6 @@ export const useBleStore = defineStore('ble', {
         BLE_CONFIG.statusCharUUID,
         true
       )
-      this._startRssiPolling()
     },
 
     /**
@@ -865,8 +861,9 @@ export const useBleStore = defineStore('ble', {
           lockThreshold: this.lockThreshold,
           unlockCountRequired: this.unlockCountRequired,
           lockCountRequired: this.lockCountRequired,
-          _rssiPollInterval: this._rssiPollInterval || 800,
+          rssiReadPeriodMs: this.rssiReadPeriodMs,
           disconnectLockDelayMs: this.disconnectLockDelayMs,
+          kalmanR: this.kalmanR,
           // ★ v3.12: cooldown_ms 不在这里持久化（设备级参数，由固件 DataFlash 管理）
         })
         console.log('[Store] 配置已持久化 (' + key.slice(-12) + '): unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold)
@@ -893,7 +890,7 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
-     * ★ v3.12: 将当前手机端的阈值配置下发到 BLE 设备固件
+     * ★ v3.13: 将当前手机端的阈值配置下发到 BLE 设备固件
      *
      *   设计原则：
      *     - 设备固件阈值存 RAM（不写 DataFlash），断电即丢失
@@ -909,9 +906,10 @@ export const useBleStore = defineStore('ble', {
      *     connect() 成功后（SN 就绪时）
      *     _doReconnect() 成功后（SN 就绪时）
      *
-     *   下发内容：unlock, lock, uc, lc, interval, dlock
-     *   （不含 rssi，rssi 由 _onPhoneRssiFound 实时转发）
-     *   （不含 cooldown_ms，cooldown 是设备级参数）
+     * ★ v3.13: 下发内容更新
+     *   interval 改为控制固件 RSSI 读取周期（原为手机端轮询间隔，已移除）
+     *   新增 kr 控制卡尔曼滤波器响应速度
+     *   移除手机端 RSSI 实时转发（冗余通道，固件 GAP 读取为主通道）
      */
     async _syncConfigToDevice() {
       if (!this.deviceId || !this.connected) return
@@ -921,11 +919,12 @@ export const useBleStore = defineStore('ble', {
           lock: this.lockThreshold,
           uc: this.unlockCountRequired,
           lc: this.lockCountRequired,
-          interval: this._rssiPollInterval || 800,
+          interval: this.rssiReadPeriodMs,
           dlock: this.disconnectLockDelayMs,
+          kr: this.kalmanR,
           // ★ v3.12: cooldown_ms 不下发 — 设备级参数，由固件 DataFlash 管理
         })
-        console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ')')
+        console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ' interval=' + this.rssiReadPeriodMs + ' kr=' + this.kalmanR + ')')
       } catch (e) {
         console.warn('[Store] 配置下发失败:', e?.message || e)
       }
@@ -1129,8 +1128,8 @@ export const useBleStore = defineStore('ble', {
           }
         })
 
-        // ★ 启动手机端 RSSI 轮询（手机测 RSSI → 通过 FF01 写入设备）
-        this._startRssiPolling()
+        // ★ v3.13: 手机端 RSSI 转发已移除，固件 GAP 读取为主通道
+        //   RSSI 显示数据来自固件 FF02 Notify (r/f 字段)
 
         return true
       } catch (err) {
@@ -1151,7 +1150,6 @@ export const useBleStore = defineStore('ble', {
       }
 
       this._scanAborted = true
-      this._stopRssiPolling()
       const targetId = this.deviceId
       if (targetId) {
         try {
@@ -1209,100 +1207,14 @@ export const useBleStore = defineStore('ble', {
       return this.tryReconnect()
     },
 
-    // ==================== RSSI 轮询 ====================
 
-    _rssiTimer: null,
-    _rssiDiscovering: false,     // ★ v3.11-fix5: 持续发现状态标记
-    _rssiScanTimeout: null,
-    _rssiScanListener: null,
+    // ★ v3.13: 手机端 RSSI 转发已移除（冗余通道，固件 GAP 读取为主通道）
+    //   RSSI 显示数据来自固件 FF02 Notify (r/f 字段)
+
     _scanAborted: false,
     _cooldownTimer: null,        // RSSI 手动命令冷却定时器
     _reconnectTimer: null,       // 重连定时器
     _adapterResetting: false,    // ★ v3.11: 适配器重置中标记（用于 _resetBluetoothAdapter）
-
-    _startRssiPolling() {
-      this._stopRssiPolling()
-      console.log('[Store] 手机端 RSSI 轮询已启动（持续发现模式）')
-
-      this._rssiScanListener = (res) => {
-        for (const device of res.devices) {
-          if (device.deviceId === this.deviceId) {
-            this._onPhoneRssiFound(device.RSSI)
-            return
-          }
-        }
-      }
-      uni.onBluetoothDeviceFound(this._rssiScanListener)
-
-      // ★ v3.11-fix5: 持续发现模式 — 只启动一次，不再每轮 start/stop
-      //   频繁切换 discovering 状态在 Honor Power 等机型上会导致 BLE 断连
-      uni.startBluetoothDevicesDiscovery({
-        allowDuplicatesKey: true,
-        interval: 0,
-        success: () => {
-          this._rssiDiscovering = true
-        },
-        fail: (err) => {
-          console.warn('[Store] RSSI 扫描启动失败:', err.errMsg)
-        }
-      })
-
-      // 健康检查：若发现意外停止则重启
-      this._rssiTimer = setInterval(() => {
-        if (!this.connected || !this.deviceId) {
-          this._stopRssiPolling()
-          return
-        }
-        if (!this._rssiDiscovering) {
-          uni.startBluetoothDevicesDiscovery({
-            allowDuplicatesKey: true,
-            interval: 0,
-            success: () => { this._rssiDiscovering = true },
-            fail: () => {}
-          })
-        }
-      }, 3000)
-    },
-
-    _stopRssiPolling() {
-      if (this._rssiTimer) {
-        clearInterval(this._rssiTimer)
-        this._rssiTimer = null
-      }
-      if (this._rssiScanTimeout) {
-        clearTimeout(this._rssiScanTimeout)
-        this._rssiScanTimeout = null
-      }
-      if (this._rssiDiscovering) {
-        this._rssiDiscovering = false
-        uni.stopBluetoothDevicesDiscovery({ success: () => {}, fail: () => {} })
-      }
-      if (this._rssiScanListener) {
-        try {
-          uni.offBluetoothDeviceFound(this._rssiScanListener)
-        } catch {}
-        this._rssiScanListener = null
-      }
-      console.log('[Store] 手机端 RSSI 轮询已停止')
-    },
-
-    _doRssiScan() {
-      // ★ v3.11-fix5: 已废弃 start/stop 循环，改为 _startRssiPolling 中的持续发现
-    },
-
-    async _onPhoneRssiFound(rssiValue) {
-      if (!this.connected || !this.deviceId) return
-      this.rssi = rssiValue
-      this.filteredRssi = rssiValue
-      // ★ v3.6-fixH: manualCooldown 阻止手机转发 RSSI 到设备（备用通道）
-      //   设备主 RSSI 通道是原生 BLE GAP 读取 (GAPRole_ReadRssiCmd)，不依赖手机转发。
-      //   真正阻止设备自动锁/解锁的是固件端 g_manualCooldown (8s) + 计数器清零。
-      //   此处仅为减少不必要的 BLE 写操作。
-      if (this.manualCooldown) return
-      try {
-        await sendConfig(this.deviceId, { rssi: rssiValue })
-      } catch {}
-    },
 
     // ==================== 状态处理 (v3.2 短键名) ====================
 
@@ -1362,14 +1274,9 @@ export const useBleStore = defineStore('ble', {
       if (config.lock !== undefined) this.lockThreshold = config.lock
       if (config.uc !== undefined) this.unlockCountRequired = config.uc
       if (config.lc !== undefined) this.lockCountRequired = config.lc
-      if (config.interval !== undefined) {
-        this._rssiPollInterval = Math.max(300, config.interval)  // 下限 300ms，避免扫描过热
-        // ★ 重新启动 RSSI 轮询以应用新间隔
-        if (this.connected && this.deviceId) {
-          this._startRssiPolling()
-        }
-      }
+      if (config.interval !== undefined) this.rssiReadPeriodMs = Math.max(100, Math.min(2000, config.interval))
       if (config.dlock !== undefined) this.disconnectLockDelayMs = config.dlock
+      if (config.kr !== undefined) this.kalmanR = Math.max(1, Math.min(50, config.kr))
       // ★ v3.7: 冷却时间
       if (config.cooldown_ms !== undefined) this.manualCooldownMs = config.cooldown_ms
       // ★ 持久化到本地存储（退出应用后重新进入不丢失）
