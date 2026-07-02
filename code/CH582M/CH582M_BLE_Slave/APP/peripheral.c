@@ -1,8 +1,10 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : peripheral.c
- * Author             : KeyGo v3.5 (CH582M)
- * Date               : 2026/06/30
+ * Author             : KeyGo v3.13 (CH582M)
+ * Date               : 2026/07/02
  * Description        : BLE Key-Go 主程序 — 全局状态 + 初始化 + 事件循环 + 连接回调
+ *
+ * v3.13: advertising 重启兜底机制（BLE Controller 偶发卡死时延迟重试）
  *
  * 模块分工:
  *   keygo_core  → GPIO、Kalman、RSSI、状态机、JSON 通知、命令解析
@@ -78,6 +80,7 @@ peripheralConnItem_t peripheralConnList = {GAP_CONNHANDLE_INIT, 0, 0, 0};
 
 // 任务 ID（keygo_core 需通过 extern 访问以调度事件）& MTU
 uint8_t  Peripheral_TaskID    = INVALID_TASK_ID;
+static uint8_t advRestartRetryCount = 0;  // ★ v3.13: advertising 重启重试计数器
 static uint16_t peripheralMTU        = ATT_MTU_SIZE;
 
 /* ─────────────────────────────────────────────────────────────────
@@ -182,7 +185,7 @@ void Peripheral_Init(void)
     // 启动
     tmos_set_event(Peripheral_TaskID, SBP_START_DEVICE_EVT);
 
-    PRINT("==== KEYGO v3.5 (CH582M) ====\n");
+    PRINT("==== KEYGO v3.13 (CH582M) ====\n");
 }
 
 /*********************************************************************
@@ -243,6 +246,30 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     if (events & SBP_GPIO_PULSE_END_EVT) {
         KeyGo_GPIO_PulseEnd();
         return (events ^ SBP_GPIO_PULSE_END_EVT);
+    }
+
+    // ★ v3.13: advertising 重启兜底 — 延迟重试，避免 BLE Controller 偶发卡死
+    if (events & SBP_ADV_RESTART_EVT) {
+        uint8_t adv_state;
+        GAPRole_GetParameter(GAPROLE_STATE, &adv_state);
+        if ((adv_state & GAPROLE_STATE_ADV_MASK) == GAPROLE_ADVERTISING) {
+            // advertising 已正常启动，清除重试计数
+            advRestartRetryCount = 0;
+            PRINT("[GAP] advertising restarted successfully (retry=%d)\n", advRestartRetryCount);
+        } else if (advRestartRetryCount < SBP_ADV_RESTART_MAX_RETRIES) {
+            // advertising 仍未恢复，再次触发
+            uint8_t enable = TRUE;
+            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &enable);
+            advRestartRetryCount++;
+            PRINT("[GAP] advertising retry %d/%d (state=0x%02x)\n",
+                  advRestartRetryCount, SBP_ADV_RESTART_MAX_RETRIES, adv_state);
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
+        } else {
+            // 重试耗尽，打印警告
+            advRestartRetryCount = 0;
+            PRINT("[GAP] advertising FAILED after %d retries, giving up\n", SBP_ADV_RESTART_MAX_RETRIES);
+        }
+        return (events ^ SBP_ADV_RESTART_EVT);
     }
 
     return 0;
@@ -344,6 +371,8 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
+        tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
+        advRestartRetryCount = 0;
 
         KeyGo_ResetState();
 
@@ -353,10 +382,14 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
             g_keyState = KSTATE_LOCKED;
         }
 
+        // ★ v3.13: 立即启动 advertising（BLE Controller 正常情况）
         {
             uint8_t advertising_enable = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &advertising_enable);
         }
+        // ★ v3.13: 200ms 后检查 advertising 状态，未恢复则触发重试机制
+        tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
+
         PRINT("Disconnected.. Reason:%x\n", pEvent->linkTerminate.reason);
     }
 }

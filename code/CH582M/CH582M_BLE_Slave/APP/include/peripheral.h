@@ -1,7 +1,7 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : peripheral.h
- * Author             : KeyGo v3.5 (CH582M 移植)
- * Date               : 2026/06/30
+ * Author             : KeyGo v3.13 (CH582M)
+ * Date               : 2026/07/02
  * Description        : BLE Key-Go 主应用 — 事件定义 & 全局结构体
  *********************************************************************************/
 
@@ -30,12 +30,15 @@ extern "C" {
 #define SBP_STATE_MACHINE_EVT       0x0080  // 状态机轮询
 #define SBP_GPIO_PULSE_END_EVT      0x0100  // GPIO 脉冲结束（非阻塞延迟）
 #define SBP_COMMAND_PARSE_EVT       0x0200  // 命令解析
+#define SBP_ADV_RESTART_EVT         0x0400  // ★ v3.13: advertising 重启兜底（BLE Controller 偶发卡死时重试）
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
 #define SBP_PERIODIC_EVT_PERIOD        1600   // ~1s  系统状态更新
 #define SBP_READ_RSSI_EVT_PERIOD       800    // ~500ms RSSI 读取
 #define SBP_STATE_MACHINE_PERIOD       200    // ~125ms 状态机轮询
 #define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   连接参数更新
+#define SBP_ADV_RESTART_DELAY          320    // ★ v3.13: ~200ms advertising 恢复延迟（给 BLE Controller 缓冲时间）
+#define SBP_ADV_RESTART_MAX_RETRIES    3      // ★ v3.13: 最多重试 3 次（总计 ~800ms 恢复窗口）
 
 // ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
 #define GPIO_PULSE_LOCK_TICKS          320    // ~200ms  解锁/锁车
