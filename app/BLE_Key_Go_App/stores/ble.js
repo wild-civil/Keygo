@@ -1095,6 +1095,7 @@ export const useBleStore = defineStore('ble', {
     // ==================== RSSI 轮询 ====================
 
     _rssiTimer: null,
+    _rssiDiscovering: false,     // ★ v3.11-fix5: 持续发现状态标记
     _rssiScanTimeout: null,
     _rssiScanListener: null,
     _scanAborted: false,
@@ -1104,8 +1105,7 @@ export const useBleStore = defineStore('ble', {
 
     _startRssiPolling() {
       this._stopRssiPolling()
-      const interval = this._rssiPollInterval || 800
-      console.log('[Store] 手机端 RSSI 轮询已启动（每' + interval + 'ms）')
+      console.log('[Store] 手机端 RSSI 轮询已启动（持续发现模式）')
 
       this._rssiScanListener = (res) => {
         for (const device of res.devices) {
@@ -1117,14 +1117,34 @@ export const useBleStore = defineStore('ble', {
       }
       uni.onBluetoothDeviceFound(this._rssiScanListener)
 
-      this._doRssiScan()
+      // ★ v3.11-fix5: 持续发现模式 — 只启动一次，不再每轮 start/stop
+      //   频繁切换 discovering 状态在 Honor Power 等机型上会导致 BLE 断连
+      uni.startBluetoothDevicesDiscovery({
+        allowDuplicatesKey: true,
+        interval: 0,
+        success: () => {
+          this._rssiDiscovering = true
+        },
+        fail: (err) => {
+          console.warn('[Store] RSSI 扫描启动失败:', err.errMsg)
+        }
+      })
+
+      // 健康检查：若发现意外停止则重启
       this._rssiTimer = setInterval(() => {
         if (!this.connected || !this.deviceId) {
           this._stopRssiPolling()
           return
         }
-        this._doRssiScan()
-      }, interval)
+        if (!this._rssiDiscovering) {
+          uni.startBluetoothDevicesDiscovery({
+            allowDuplicatesKey: true,
+            interval: 0,
+            success: () => { this._rssiDiscovering = true },
+            fail: () => {}
+          })
+        }
+      }, 3000)
     },
 
     _stopRssiPolling() {
@@ -1136,10 +1156,13 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._rssiScanTimeout)
         this._rssiScanTimeout = null
       }
+      if (this._rssiDiscovering) {
+        this._rssiDiscovering = false
+        uni.stopBluetoothDevicesDiscovery({ success: () => {}, fail: () => {} })
+      }
       if (this._rssiScanListener) {
         try {
           uni.offBluetoothDeviceFound(this._rssiScanListener)
-          uni.stopBluetoothDevicesDiscovery({ success: () => {}, fail: () => {} })
         } catch {}
         this._rssiScanListener = null
       }
@@ -1147,19 +1170,7 @@ export const useBleStore = defineStore('ble', {
     },
 
     _doRssiScan() {
-      uni.startBluetoothDevicesDiscovery({
-        allowDuplicatesKey: true,
-        interval: 0,
-        success: () => {
-          this._rssiScanTimeout = setTimeout(() => {
-            this._rssiScanTimeout = null
-            uni.stopBluetoothDevicesDiscovery({ success: () => {}, fail: () => {} })
-          }, 500)
-        },
-        fail: (err) => {
-          console.warn('[Store] RSSI 扫描启动失败:', err.errMsg)
-        }
-      })
+      // ★ v3.11-fix5: 已废弃 start/stop 循环，改为 _startRssiPolling 中的持续发现
     },
 
     async _onPhoneRssiFound(rssiValue) {
