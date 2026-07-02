@@ -667,10 +667,14 @@ export const useBleStore = defineStore('ble', {
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
 
-      // ★ v3.8: 重连成功后恢复本地设备名称（SN 可能从上次连接已缓存）
-      if (this.serialNumber) {
-        this._resolveDeviceName(this.serialNumber)
-      }
+      // ★ v3.11-fix4: 重连成功后恢复本地设备名称
+      //   不能依赖内存中的 serialNumber（disconnect 会清空），必须主动读取
+      readSerialNumber(this.deviceId, 5000).then(sn => {
+        this.serialNumber = sn
+        this._resolveDeviceName(sn)
+      }).catch(err => {
+        console.log('[Store] 重连后读取序列号失败（名称恢复跳过）:', err?.message || err)
+      })
 
       // 恢复 Notify 和 RSSI 轮询
       await new Promise(r => setTimeout(r, 800))
