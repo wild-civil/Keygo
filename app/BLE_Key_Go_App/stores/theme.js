@@ -37,10 +37,10 @@ function getSystemTheme() {
     //    - 宿主(微信等):    info.hostTheme
     // 优先级: theme > osTheme > hostTheme
     const t = info.theme || info.osTheme || info.hostTheme
-    console.log('[Theme] 系统检测 theme=', info.theme,
-      '| osTheme=', info.osTheme,
-      '| hostTheme=', info.hostTheme,
-      '→ 使用:', t)
+    // console.log('[Theme] 系统检测 theme=', info.theme, // 系统深色亮色模式log
+    //   '| osTheme=', info.osTheme,
+    //   '| hostTheme=', info.hostTheme,
+    //   '→ 使用:', t)
     if (t) return t
 
     // 全部不可用

@@ -123,8 +123,11 @@ function requestAndroidPermissions() {
  *   3. 如果蓝牙未开(code=10001) → Android 原生弹窗请求开启 → 轮询等待
  *
  * ★ v3.6: 已初始化时 "already open" 视为成功
+ *
+ * @param {Object} [options]
+ * @param {Function} [options.onAllowing] 用户点「允许」时立即回调（不等适配器就绪）
  */
-export function initBluetooth() {
+export function initBluetooth(options = {}) {
   return new Promise((resolve, reject) => {
     requestAndroidPermissions().then((permResult) => {
       if (!permResult.granted) {
@@ -158,25 +161,39 @@ export function initBluetooth() {
             // #ifdef APP-PLUS
             // ★ Android：用原生 Intent 弹出系统「开启蓝牙」弹窗（和 nRF Connect 一样）
             if (typeof plus !== 'undefined' && plus.os.name === 'Android') {
-              requestEnableBluetoothAndroid().then(() => {
-                console.log('[BLE] 原生弹窗确认，重新初始化适配器...')
-                // 用户点了「允许」→ 蓝牙已开，重新初始化适配器
-                uni.openBluetoothAdapter({
-                  success: () => {
-                    console.log('[BLE] 适配器初始化成功（二次尝试）')
-                    resolve()
-                  },
-                  fail: (err2) => {
-                    const msg2 = String(err2?.errMsg || err2?.message || '')
-                    if (msg2.includes('already open')) {
-                      console.log('[BLE] 适配器已初始化（already open）')
+              requestEnableBluetoothAndroid(options.onAllowing).then(() => {
+                console.log('[BLE] 原生弹窗已确认（用户点了允许）→ 等待蓝牙适配器就绪...')
+                // ★ v3.10: onActivityResult 在用户点「允许」时立即 resolve，
+                //   但此时蓝牙可能还在 TURNING_ON 状态，openBluetoothAdapter 可能失败。
+                //   轮询重试直到适配器可用（最多 5s，每 300ms 一次）
+                let retryCount = 0
+                const maxRetries = 17  // ~5s
+                const retry = () => {
+                  uni.openBluetoothAdapter({
+                    success: () => {
+                      console.log('[BLE] 适配器初始化成功')
                       resolve()
-                      return
+                    },
+                    fail: (err2) => {
+                      const msg2 = String(err2?.errMsg || err2?.message || '')
+                      if (msg2.includes('already open')) {
+                        console.log('[BLE] 适配器已初始化（already open）')
+                        resolve()
+                        return
+                      }
+                      // code=10001 或 "not available" → 蓝牙还在启动中，重试
+                      const code2 = err2?.code ?? err2?.errCode
+                      if ((code2 === 10001 || msg2.includes('not available')) && retryCount < maxRetries) {
+                        retryCount++
+                        setTimeout(retry, 300)
+                        return
+                      }
+                      console.error('[BLE] 二次初始化仍失败（已重试' + retryCount + '次）', err2)
+                      reject(err2)
                     }
-                    console.error('[BLE] 二次初始化仍失败', err2)
-                    reject(err2)
-                  }
-                })
+                  })
+                }
+                retry()
               }).catch((reason) => {
                 // 用户拒绝或超时
                 console.warn('[BLE] 原生弹窗失败:', reason)
@@ -208,14 +225,13 @@ export function initBluetooth() {
  *
  * 效果与 nRF Connect 完全一致：
  *   底部弹出系统对话框 "BLE车钥匙 想要开启蓝牙"
- *   用户点「允许」→ 系统开启蓝牙 → Promise resolve
+ *   用户点「允许」→ onAllowing() 立即回调 → 适配器轮询 → Promise resolve
  *   用户点「拒绝」→ Promise reject
  *
- * 兜底策略：如果 Intent 方式不可用，则轮询等待用户手动开启蓝牙
- *
+ * @param {Function} [onAllowing] 用户点「允许」时立即回调（不等适配器就绪）
  * @returns {Promise<void>}
  */
-function requestEnableBluetoothAndroid() {
+function requestEnableBluetoothAndroid(onAllowing) {
   return new Promise((resolve, reject) => {
     try {
       const main = plus.android.runtimeMainActivity()
@@ -231,21 +247,55 @@ function requestEnableBluetoothAndroid() {
         return
       }
 
-      // ★ 方案1：ACTION_REQUEST_ENABLE — 系统标准弹窗
+      // ★ v3.10: 用 onActivityResult 在用户点「允许」时立即 resolve
+      //   这样 enableBluetooth() 的绿 banner 才能与 Android 「正在开启蓝牙」弹窗同步出现
       console.log('[BLE] 发送 ACTION_REQUEST_ENABLE Intent...')
       const intent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
 
-      // 用 startActivityForResult 等待用户响应
-      main.startActivityForResult(intent, 1001)
-
-      // ★ 监听 ActivityResult 来判断用户选择
-      // uni-app/5+ Runtime 的 onActivityResult 回调机制
       let resolved = false
 
-      // 方法：注册一个短暂的定时器来检测蓝牙是否被开启
-      // 因为 startActivityForResult 是异步的，我们无法直接获取回调
-      // 所以用轮询 + 超时的组合方案
+      // ★ 保存并恢复原始 onActivityResult（避免破坏 uni-app 内部逻辑）
+      const _origOnActivityResult = main.onActivityResult
+      main.onActivityResult = function(requestCode, resultCode, data) {
+        if (requestCode === 1001 && !resolved) {
+          const RESULT_OK = -1  // android.app.Activity.RESULT_OK
+          const RESULT_CANCELED = 0
+          if (resultCode === RESULT_OK) {
+            resolved = true
+            console.log('[BLE] ★ onActivityResult: 用户点击了「允许」')
+            // ★ 到达用户点「允许」的瞬间 → 立即通知上层亮绿 banner
+            //   此时系统「正在开启蓝牙…」弹窗正在显示，绿 banner 与之同步出现
+            if (typeof onAllowing === 'function') {
+              onAllowing()
+            }
+            cleanup()
+            resolve()
+            return
+          }
+          if (resultCode === RESULT_CANCELED) {
+            resolved = true
+            console.warn('[BLE] ★ onActivityResult: 用户点击了「拒绝」→ reject')
+            cleanup()
+            reject('USER_DENIED')
+            return
+          }
+        }
+        // 非本请求的 ActivityResult → 透传给原始处理器
+        if (_origOnActivityResult) {
+          _origOnActivityResult.call(main, requestCode, resultCode, data)
+        }
+      }
 
+      const cleanup = () => {
+        main.onActivityResult = _origOnActivityResult
+        clearInterval(checkInterval)
+        clearTimeout(timeoutTimer)
+        clearTimeout(fastRejectTimer)
+      }
+
+      main.startActivityForResult(intent, 1001)
+
+      // ★ 轮询：兜底方案（onActivityResult 可能在某些 ROM 上不被调用）
       const checkInterval = setInterval(() => {
         if (resolved) return
         try {
@@ -255,7 +305,11 @@ function requestEnableBluetoothAndroid() {
             clearInterval(checkInterval)
             clearTimeout(timeoutTimer)
             clearTimeout(fastRejectTimer)
-            console.log('[BLE] 检测到蓝牙已被用户开启 ✅')
+            console.log('[BLE] 轮询兜底：检测到蓝牙已开启 ✅')
+            // 恢复原始 onActivityResult
+            if (main.onActivityResult !== _origOnActivityResult) {
+              main.onActivityResult = _origOnActivityResult
+            }
             // 稍等让系统稳定一下
             setTimeout(resolve, 500)
           }
@@ -264,22 +318,20 @@ function requestEnableBluetoothAndroid() {
         }
       }, 500)
 
-      // ★ v3.6-fixE: 快速拒绝检测 — 3 秒内蓝牙未开启则视为用户拒绝
-      //   用户点「拒绝」后弹窗立即消失，无需等 12s 超时
+      // ★ 快速拒绝检测 — 3 秒内蓝牙未开启则视为用户拒绝
       const fastRejectTimer = setTimeout(() => {
         if (resolved) return
-        // 再做一次最终确认，避免误判
         try {
           const adapter3 = BluetoothAdapter.getDefaultAdapter()
           if (adapter3 && adapter3.isEnabled()) {
             console.log('[BLE] 快速拒绝检测时发现蓝牙已开启，继续等待')
-            return // 不 reject，让正常轮询处理
+            return
           }
         } catch (e) { /* ignore */ }
         resolved = true
         clearInterval(checkInterval)
-        clearTimeout(timeoutTimer)
         console.warn('[BLE] 快速拒绝：用户未在 3s 内开启蓝牙')
+        cleanup()
         reject('USER_DENIED_FAST')
       }, 3000)
 
@@ -288,7 +340,8 @@ function requestEnableBluetoothAndroid() {
         if (!resolved) {
           resolved = true
           clearInterval(checkInterval)
-          console.warn('[BLE] 开启蓝牙等待超时(60s)')
+          console.warn('[BLE] 开启蓝牙等待超时(12s)')
+          cleanup()
           reject('USER_DENIED')
         }
       }, 12000)

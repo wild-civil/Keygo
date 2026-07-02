@@ -1,16 +1,15 @@
 <template>
   <view class="page-index" :class="themeClass">
-    <!-- ★ 蓝牙关闭横幅（模仿 nRF Connect） -->
+    <!-- ★ 蓝牙关闭横幅（模仿 nRF Connect）：系统弹窗期间保持红色 -->
     <view class="bt-off-banner" v-if="!bleStore.connected && bleStore.btState === 'off'">
       <text class="bt-off-icon">🔴</text>
       <text class="bt-off-text">蓝牙已关闭</text>
-      <button class="bt-enable-btn" @tap="handleEnableBluetooth"
-        :loading="bleStore.btState === 'enabling'"
-        :disabled="bleStore.btState === 'enabling'">开启</button>
+      <button class="bt-enable-btn" @tap="handleEnableBluetooth">开启</button>
     </view>
-    <view class="bt-enabling-banner" v-if="bleStore.btState === 'enabling'">
-      <text class="bt-enabling-icon">🔵</text>
-      <text class="bt-enabling-text">正在开启蓝牙...</text>
+    <!-- ★ 绿色"正在开启"横幅：与底部系统弹窗同步出现/消失，模仿 nRF Connect -->
+    <view class="bt-on-banner" v-if="!bleStore.connected && bleStore.btState === 'just_enabled'">
+      <text class="bt-on-icon">🟢</text>
+      <text class="bt-on-text">正在开启蓝牙...</text>
     </view>
 
     <!-- ★ 顶部状态卡片 -->
@@ -221,7 +220,6 @@ async function handleEnableBluetooth() {
     })
     const denied = (permResult.deniedAlways || []).concat(permResult.deniedPresent || [])
     if (denied.length > 0) {
-      uni.hideLoading()
       uni.showModal({
         title: '需要授予权限',
         content: 'BLE车钥匙需要「位置信息」权限才能扫描蓝牙设备。\n\n请前往系统设置中开启定位权限。',
@@ -246,36 +244,26 @@ async function handleEnableBluetooth() {
   }
   // #endif
 
-  // ★ mask=false 不遮挡系统蓝牙弹窗（原生 ACTION_REQUEST_ENABLE 会弹底部弹窗）
-  uni.showLoading({ title: '正在请求...', mask: false })
+  // ★ 模仿 nRF Connect: 不显示 loading toast，让系统蓝牙弹窗直接弹出
+  //   用户看到的是: 红色 banner → 点击"开启" → 蓝色"正在开启"banner → 系统底窗
+  //   不做任何中间提示，不遮挡系统弹窗
   try {
     const ok = await bleStore.enableBluetooth()
-    uni.hideLoading()
     if (ok) {
-      toast.success('蓝牙已开启')
       if (!bleStore.connected) {
         bleStore.tryAutoConnect()
       }
     } else {
-      toast.info('请手动开启手机蓝牙后重试')
+      // btState 已经反映真实状态，banner 会自然切换，不额外 toast
     }
   } catch (err) {
-    uni.hideLoading()
     const msg = String(err?.errMsg || err?.message || err || '')
     const code = err?.code ?? err?.errCode
 
     // #ifdef APP-PLUS
-    // ★ code=10001: 原生弹窗被拒绝/超时（initBluetooth 已内部尝试过原生弹窗了）
+    // ★ code=10001: 原生弹窗被拒绝/超时 → btState 已是 'off'，红 banner 自然保持，不弹额外 Modal
     if (code === 10001 || msg.includes('not available')) {
-      uni.showModal({
-        title: '蓝牙未开启',
-        content: '请在控制中心或设置中开启蓝牙，然后点击「重试」',
-        confirmText: '重试',
-        cancelText: '取消',
-        success: (res) => {
-          if (res.confirm) { _enableBluetoothLocked = false; handleEnableBluetooth() }
-        }
-      })
+      // 静默：btState 已经是 'off'，红色 banner 会保持显示，不打扰用户
     } else if (msg.includes('timeout') || msg.includes('超时')) {
       toast.info('操作超时，请检查蓝牙后重试')
     } else if (code === 'PERMISSION_DENIED') {
@@ -290,21 +278,7 @@ async function handleEnableBluetooth() {
     // #endif
     // #ifndef APP-PLUS
     if (code === 10001 || msg.includes('not available')) {
-      if (bleStore.btState === 'off') {
-        toast.info('请在系统设置中打开蓝牙后重试')
-        return
-      }
-      _enableBluetoothLocked = true
-      uni.showModal({
-        title: '需要开启蓝牙',
-        content: '请先在系统设置中打开手机蓝牙，然后点击「重试」',
-        confirmText: '重试',
-        cancelText: '取消',
-        success: (res) => {
-          _enableBluetoothLocked = false
-          if (res.confirm) { handleEnableBluetooth() }
-        }
-      })
+      // 静默：btState 已经是 'off'，红色 banner 保持显示
     } else {
       toast.error('蓝牙开启失败')
     }
@@ -487,9 +461,10 @@ async function handleSetName() {
   border: none;
 }
 
-.bt-enabling-banner {
+/* 绿色成功 banner — 用户允许开启蓝牙后短暂显示，1.5s 后自动消失 */
+.bt-on-banner {
   background: #E8F5E9;
-  border: 1rpx solid #C8E6C9;
+  border: 1rpx solid #A5D6A7;
   border-radius: 12rpx;
   padding: 20rpx 24rpx;
   display: flex;
@@ -498,15 +473,21 @@ async function handleSetName() {
   margin-bottom: 20rpx;
   min-height: 72rpx;
   box-sizing: border-box;
+  animation: bt-on-fadein 0.3s ease;
 }
 
-.bt-enabling-icon { font-size: 28rpx; }
+@keyframes bt-on-fadein {
+  from { opacity: 0; transform: translateY(-8rpx); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
-.bt-enabling-text {
+.bt-on-icon { font-size: 28rpx; }
+
+.bt-on-text {
   flex: 1;
   font-size: 26rpx;
-  color: #388E3C;
-  font-weight: 500;
+  color: #2E7D32;
+  font-weight: 600;
 }
 
 /* ===== 状态卡片 ===== */
