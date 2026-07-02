@@ -57,16 +57,18 @@ export const useBleStore = defineStore('ble', {
     hystDb: 5,
     unlockCountRequired: 3,
     lockCountRequired: 5,
+    _rssiPollInterval: 800,        // ★ v3.12: 手机端 RSSI 轮询间隔 ms（需声明为 state 才能持久化和响应式）
     disconnectLockDelayMs: 5000,
     manualCooldown: false,        // 手动命令冷却中
-    manualCooldownMs: 8000,      // ★ v3.7: 冷却时长 ms（可从设备同步，App本地持久化）
+    manualCooldownMs: 8000,      // ★ v3.7 / v3.12: 初始默认值（设备连接后由 FF02 同步覆盖，设备级参数）
 
 
     // 连接历史（自动重连用）
     lastDeviceId: '',
 
-    // ★ v3.5: 持久化恢复标记
-    _restored: false,
+    // ★ v3.5 / v3.12: 持久化恢复标记
+    _restored: false,              // 旧版全局恢复标记（兼容）
+    _restoredForSn: '',            // ★ v3.12: 已为哪个 SN 恢复了专属配置（空串=未恢复）
 
     // ★ v3.11: 蓝牙适配器 & 重连状态（原生广播驱动）
     btState: 'unknown',           // 'on' | 'off' | 'just_enabled' | 'unknown'
@@ -116,12 +118,46 @@ export const useBleStore = defineStore('ble', {
   actions: {
     // ==================== 持久化配置 ====================
 
-    /** 从本地存储恢复配置（每次 store 初始化时调用一次） */
-    _restoreConfig() {
-      if (this._restored) return
-      this._restored = true
+    /**
+     * 从本地存储恢复配置（每次 store 初始化 / 切换设备时调用）
+     *
+     * ★ v3.12: 配置按设备序列号独立存储（per-phone 个性化）
+     *
+     * 恢复优先级：
+     *   1. 无 SN 时：尝试读取旧版全局 key `ble_config_v1` 作为一次性迁移
+     *   2. 有 SN 时：读取 `ble_config_v1_{SN}`（设备专属配置）
+     *   3. 都没有 → 使用代码默认值（unlock=-45, lock=-65, uc=3, lc=5, interval=800…）
+     *
+     * @param {string} [sn] 设备序列号，不传则仅尝试旧版迁移
+     */
+    _restoreConfig(sn) {
+      // ★ 如果传了 SN 且已针对该 SN 恢复过，跳过
+      if (sn && this._restoredForSn === sn) return
+
+      let saved = null
+      let source = ''
+
       try {
-        const saved = uni.getStorageSync('ble_config_v1')
+        if (sn) {
+          // ★ v3.12: 优先读设备专属配置
+          saved = uni.getStorageSync('ble_config_v1_' + sn)
+          if (saved) {
+            source = '设备专属 (' + sn.slice(-6) + ')'
+          } else {
+            // 该设备无专属配置 → 尝试旧版全局配置作为初始值
+            saved = uni.getStorageSync('ble_config_v1')
+            if (saved) {
+              source = '旧版全局 → 迁移至设备 ' + sn.slice(-6)
+              // ★ 静默迁移：将旧版配置立即保存为设备专属
+              uni.setStorageSync('ble_config_v1_' + sn, saved)
+            }
+          }
+        } else {
+          // ★ 无 SN（初始启动）：仅尝试旧版全局配置
+          saved = uni.getStorageSync('ble_config_v1')
+          if (saved) source = '旧版全局'
+        }
+
         if (saved) {
           if (saved.unlockThreshold !== undefined) this.unlockThreshold = saved.unlockThreshold
           if (saved.lockThreshold !== undefined) this.lockThreshold = saved.lockThreshold
@@ -129,14 +165,19 @@ export const useBleStore = defineStore('ble', {
           if (saved.lockCountRequired !== undefined) this.lockCountRequired = saved.lockCountRequired
           if (saved._rssiPollInterval !== undefined) this._rssiPollInterval = saved._rssiPollInterval
           if (saved.disconnectLockDelayMs !== undefined) this.disconnectLockDelayMs = saved.disconnectLockDelayMs
-          // ★ v3.7: 恢复冷却时间
-          if (saved.manualCooldownMs !== undefined && saved.manualCooldownMs >= 2000 && saved.manualCooldownMs <= 30000) {
-            this.manualCooldownMs = saved.manualCooldownMs
-          }
-          console.log('[Store] 已从本地存储恢复配置:', JSON.stringify(saved))
+          // ★ v3.12: cooldown_ms 是设备级参数，不从本地存储恢复
+          //   设备通过 FF02 Notify 上报当前冷却时间，App 被动同步
+          //   old: manualCooldownMs 本地持久化 → 多个手机可能不一致
+          //   new: 仅从设备 FF02 同步 → 所有手机看到同一值
+          console.log('[Store] 配置已恢复 (' + source + '):', JSON.stringify(saved))
+        } else {
+          console.log('[Store] 使用默认配置 (unlock=-45 lock=-65 uc=3 lc=5 interval=800)')
         }
+
+        if (sn) this._restoredForSn = sn
       } catch (e) {
         console.warn('[Store] 配置恢复失败:', e)
+        if (sn) this._restoredForSn = sn
       }
     },
 
@@ -450,6 +491,9 @@ export const useBleStore = defineStore('ble', {
       this.rssi = -999
       this.filteredRssi = -999
 
+      // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
+      this._restoredForSn = ''
+
       // ★ v3.6-fixD2: 递增重连锁，过期任何已在执行的 _doReconnect
       //   当 _handleDisconnect 领先于适配器事件到达时，旧 session 立刻失效，
       //   防止 _checkBluetoothState 用 Android 延迟的 available=true 写回 btState='on'
@@ -672,8 +716,11 @@ export const useBleStore = defineStore('ble', {
       readSerialNumber(this.deviceId, 5000).then(sn => {
         this.serialNumber = sn
         this._resolveDeviceName(sn)
+        // ★ v3.12: 重连成功后加载设备专属配置 + 下发到固件（per-phone 个性化）
+        this._loadConfigForDevice(sn)
+        this._syncConfigToDevice()
       }).catch(err => {
-        console.log('[Store] 重连后读取序列号失败（名称恢复跳过）:', err?.message || err)
+        console.log('[Store] 重连后读取序列号失败（名称/配置恢复跳过）:', err?.message || err)
       })
 
       // 恢复 Notify 和 RSSI 轮询
@@ -799,21 +846,88 @@ export const useBleStore = defineStore('ble', {
       }
     },
 
-    /** 持久化当前配置到本地存储 */
+    /**
+     * ★ v3.12: 持久化当前配置到本地存储（按设备序列号分 key）
+     *
+     *   存储 key: ble_config_v1_{SN}
+     *   每个手机对每个 KeyGo 设备有独立的阈值配置
+     *   设备固件不持久化阈值（RAM-only），由手机连接后自动下发
+     */
     _persistConfig() {
+      if (!this.serialNumber) {
+        console.warn('[Store] _persistConfig: 序列号未就绪，跳过持久化')
+        return
+      }
       try {
-        uni.setStorageSync('ble_config_v1', {
+        const key = 'ble_config_v1_' + this.serialNumber
+        uni.setStorageSync(key, {
           unlockThreshold: this.unlockThreshold,
           lockThreshold: this.lockThreshold,
           unlockCountRequired: this.unlockCountRequired,
           lockCountRequired: this.lockCountRequired,
           _rssiPollInterval: this._rssiPollInterval || 800,
           disconnectLockDelayMs: this.disconnectLockDelayMs,
-          // ★ v3.7: 冷却时间
-          manualCooldownMs: this.manualCooldownMs,
+          // ★ v3.12: cooldown_ms 不在这里持久化（设备级参数，由固件 DataFlash 管理）
         })
+        console.log('[Store] 配置已持久化 (' + key.slice(-12) + '): unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold)
       } catch (e) {
         console.warn('[Store] 配置持久化失败:', e)
+      }
+    },
+
+    /**
+     * ★ v3.12: 加载指定设备的专属配置（per-phone 个性化）
+     *
+     *   连接成功后、SN 就绪时调用。
+     *   如果该设备有专属配置 → 覆盖当前阈值
+     *   如果没有 → 保持 _restoreConfig 加载的旧版全局值（或默认值）
+     *
+     *   与 _restoreConfig 的关系：
+     *     _restoreConfig() → 初始加载（旧版全局 / 默认值）→ 保证 UI 有值
+     *     _loadConfigForDevice(sn) → SN 就绪后覆盖为设备专属值 → 精确匹配
+     *
+     * @param {string} sn 设备序列号
+     */
+    _loadConfigForDevice(sn) {
+      this._restoreConfig(sn)  // ← 内部有 _restoredForSn 防重复，新 SN 会触发重新加载
+    },
+
+    /**
+     * ★ v3.12: 将当前手机端的阈值配置下发到 BLE 设备固件
+     *
+     *   设计原则：
+     *     - 设备固件阈值存 RAM（不写 DataFlash），断电即丢失
+     *     - 手机每次连接成功后自动下发，确保设备运行时阈值与当前手机一致
+     *     - 不同手机连同一个 KeyGo → 设备使用各自手机的阈值 → per-phone 个性化
+     *
+     * ★ v3.12: cooldown_ms 不在此处下发（设备级参数，由固件 DataFlash 管理）
+     *   - 连接时不下发 → 设备保持自己的冷却时间
+     *   - 用户手动修改 → updateConfig() 单独下发 → 固件保存到 Flash
+     *   - 连接后 App 从 FF02 同步冷却时间 → 确保 UI 显示与设备一致
+     *
+     *   调用时机：
+     *     connect() 成功后（SN 就绪时）
+     *     _doReconnect() 成功后（SN 就绪时）
+     *
+     *   下发内容：unlock, lock, uc, lc, interval, dlock
+     *   （不含 rssi，rssi 由 _onPhoneRssiFound 实时转发）
+     *   （不含 cooldown_ms，cooldown 是设备级参数）
+     */
+    async _syncConfigToDevice() {
+      if (!this.deviceId || !this.connected) return
+      try {
+        await sendConfig(this.deviceId, {
+          unlock: this.unlockThreshold,
+          lock: this.lockThreshold,
+          uc: this.unlockCountRequired,
+          lc: this.lockCountRequired,
+          interval: this._rssiPollInterval || 800,
+          dlock: this.disconnectLockDelayMs,
+          // ★ v3.12: cooldown_ms 不下发 — 设备级参数，由固件 DataFlash 管理
+        })
+        console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ')')
+      } catch (e) {
+        console.warn('[Store] 配置下发失败:', e?.message || e)
       }
     },
 
@@ -1000,6 +1114,9 @@ export const useBleStore = defineStore('ble', {
           }
           // ★ v3.8: SN 就绪 → 从本地恢复设备自定义名称
           this._resolveDeviceName(sn)
+          // ★ v3.12: SN 就绪 → 加载设备专属配置 + 下发到固件（per-phone 个性化）
+          this._loadConfigForDevice(sn)
+          this._syncConfigToDevice()
         }).catch(err => {
           const msg = err?.message || String(err)
           // ★ 根据错误类型分类处理
@@ -1228,7 +1345,8 @@ export const useBleStore = defineStore('ble', {
       //   短暂闪烁可接受（仅 SN 已就绪 + 本地名与 d2 不同时才会发生）
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
 
-      // ★ v3.7: 冷却时间 ms (cd = cooldown duration)
+      // ★ v3.7 / v3.12: 冷却时间 ms (cd = cooldown duration)
+      //   设备级参数 — 从 FF02 Notify 被动同步，确保 App 显示与设备一致
       if (data.cd !== undefined && data.cd >= 2000 && data.cd <= 30000) {
         this.manualCooldownMs = data.cd
       }

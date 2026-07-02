@@ -76,10 +76,11 @@
         </view>
       </view>
 
-      <!-- ★ v3.7: RSSI 冷却时间配置 -->
+      <!-- ★ v3.12: RSSI 冷却时间（设备级配置，写入 DataFlash，所有手机共用） -->
       <view class="rssi-sim-section">
-        <view class="rssi-sim-title">⏱ RSSI 状态机冷却时长</view>
-        <view class="rssi-sim-hint">手动解锁/锁车后，RSSI 自动状态机暂停的时间（当前：{{ bleStore.manualCooldownMs / 1000 }}s）</view>
+        <view class="rssi-sim-title">⏱ RSSI 状态机冷却时长（设备级）</view>
+        <view class="rssi-sim-hint">手动解锁/锁车后状态机暂停时间（当前：{{ bleStore.manualCooldownMs / 1000 }}s）</view>
+        <view class="rssi-sim-sub-hint">⚠ 设备级配置：修改后写入设备 Flash，所有连接此设备的手机共用此值</view>
         <view class="rssi-presets">
           <button
             v-for="slot in cooldownSlots"
@@ -349,6 +350,14 @@ async function handleCooldownChange(value) {
   font-size: 20rpx;
   color: var(--signal-empty-muted);
   margin-bottom: 16rpx;
+}
+
+/* ★ v3.12: 设备级配置提示 */
+.rssi-sim-sub-hint {
+  font-size: 18rpx;
+  color: var(--accent-orange);
+  margin-bottom: 12rpx;
+  margin-top: -12rpx;
 }
 
 .rssi-presets {

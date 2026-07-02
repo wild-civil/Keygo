@@ -385,7 +385,13 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
  * ★ v3.5: FF01 配置解析 (KeyGo_ParseConfig)
  *
  *   解析 App 通过 FF01 下发的配置文本:
- *     "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000"
+ *     "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000 cooldown_ms=8000"
+ *
+ * ★ v3.12: 分类持久化策略
+ *   Per-phone (仅存 RAM): unlock lock uc lc interval dlock
+ *     → 手机每次连接后下发专属配置，不写 Flash（避免反复擦写损耗寿命）
+ *   Per-device (写 DataFlash): cooldown_ms
+ *     → 冷却时间是设备级参数，所有手机共用，变更时写入 Flash
  *
  *   与 ESP32 版本的 parseConfigLine() 功能等效。
  *   返回: 0=无配置变更, 1=有配置变更
@@ -398,6 +404,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
     if (!line || line[0] == '\0') return 0;
 
     uint8_t changed = 0;
+    uint8_t cooldown_changed = 0;   // ★ v3.12: 仅 cooldown_ms 变更时写 Flash（设备级参数）
     const char *p = line;
 
     while (*p) {
@@ -446,10 +453,13 @@ uint8_t KeyGo_ParseConfig(const char *line)
         else if (keyLen == 2 && tmos_memcmp(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
         else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) { /* App 轮询间隔，固件不直接使用 */ changed = 1; }
         else if (keyLen == 5 && tmos_memcmp(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
-        // ★ v3.7: 冷却时间 cooldown_ms (长度 11)
+        // ★ v3.7 / v3.12: 冷却时间 cooldown_ms (长度 11)
+        //   ★ 设备级参数（写入 DataFlash，所有连接此设备的手机共用）
+        //   ★ 仅在值实际变化且合法时标记 cooldown_changed（触发 Flash 保存）
         else if (keyLen == 11 && tmos_memcmp(p, "cooldown_ms", 11)) {
-            if (val >= 2000 && val <= 30000) {
+            if (val >= 2000 && val <= 30000 && g_cfgManualCooldownMs != (uint16_t)val) {
                 g_cfgManualCooldownMs = (uint16_t)val;
+                cooldown_changed = 1;
                 changed = 1;
             }
         }
@@ -464,19 +474,26 @@ uint8_t KeyGo_ParseConfig(const char *line)
         // ★ 配置变更后重置计数器，避免旧阈值下的累积计数影响新阈值判断
         g_unlockCounter = 0;
         g_lockCounter   = 0;
-        // ★ 持久化到 DataFlash，重启不丢失
-        KeyGo_SaveConfig();
+        // ★ v3.12: 仅 cooldown_ms 写 DataFlash（设备级参数，所有手机共用）
+        //   unlock/lock/uc/lc/dlock/interval 仅存 RAM，由手机每次连接后下发（per-phone 个性化）
+        if (cooldown_changed) {
+            KeyGo_SaveConfig();
+        }
     }
 
     return changed;
 }
 
 /* ─────────────────────────────────────────────────────────────────
- * ★ v3.5.1: 配置持久化到 DataFlash
+ * ★ v3.5.1: 配置持久化到 DataFlash（v3.12: 仅 cooldown_ms 自动调用）
+ *
+ * ★ v3.12: 此函数仅由 ParseConfig 在 cooldown_ms 值变更时自动调用。
+ *   冷却时间是设备级参数，写入 Flash 确保所有手机共享同一值。
+ *   其他参数 (unlock/lock/uc/lc/dlock) 不写 Flash（per-phone 方案）。
  *
  *   使用 DataFlash 0x77000~0x770FF 区域存储配置 (BLE SNV 在 0x77E00)
- *   写入前先擦除页 (256 字节对齐)，然后写入 15 字节配置块
- *   格式: [magic:4][unlock:2][lock:2][uc:1][lc:1][dlock:2][checksum:1][padding:2]
+ *   写入前先擦除页 (256 字节对齐)，然后写入 16 字节配置块
+ *   格式: [magic:4][unlock:2][lock:2][uc:1][lc:1][dlock:2][checksum:1][cooldown_ms:2][pad:1]
  *   checksum = XOR over magic+values (前 12 字节)
  * ───────────────────────────────────────────────────────────────── */
 

@@ -6,7 +6,7 @@
     </view>
 
     <template v-else>
-      <view class="section-title">RSSI 阈值设置</view>
+      <view class="section-title">RSSI 阈值设置（手机端保存，连接时自动下发）</view>
 
       <!-- 解锁阈值 -->
       <view class="config-item">
@@ -43,7 +43,7 @@
       </view>
 
       <view class="divider"></view>
-      <view class="section-title">确认次数设置</view>
+      <view class="section-title">确认次数设置（手机端保存）</view>
 
       <view class="config-item">
         <view class="config-header">
@@ -72,14 +72,14 @@
       </view>
 
       <view class="divider"></view>
-      <view class="section-title">其他设置</view>
+      <view class="section-title">其他设置（手机端保存）</view>
 
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">RSSI 采样间隔</text>
           <text class="config-value">{{ localConfig.interval }} ms</text>
         </view>
-        <view class="config-desc">设备端 RSSI 采样频率</view>
+        <view class="config-desc">手机端 RSSI 轮询间隔（300ms 起，过频可能影响连接稳定性）</view>
         <slider class="config-slider" :min="100" :max="2000" :step="100"
           :value="localConfig.interval" @change="onIntervalChange"
           :activeColor="sliderActiveGreen" :backgroundColor="sliderTrackColor"
@@ -111,7 +111,7 @@
         <button class="btn-submit" @tap="handleSubmit" :disabled="!bleStore.connected">
           下发配置到设备
         </button>
-        <text class="submit-hint">配置将保存到设备内置存储中，断电不丢失</text>
+        <text class="submit-hint">阈值/确认次数/间隔/断连续锁 → 保存到手机本地（每台 KeyGo 设备独立配置）</text>
       </view>
     </template>
   </view>
@@ -165,6 +165,8 @@ watch(() => bleStore.unlockThreshold, () => { localConfig.unlock = bleStore.unlo
 watch(() => bleStore.lockThreshold, () => { localConfig.lock = bleStore.lockThreshold })
 watch(() => bleStore.unlockCountRequired, () => { localConfig.uc = bleStore.unlockCountRequired })
 watch(() => bleStore.lockCountRequired, () => { localConfig.lc = bleStore.lockCountRequired })
+watch(() => bleStore._rssiPollInterval, () => { localConfig.interval = bleStore._rssiPollInterval || 800 })
+watch(() => bleStore.disconnectLockDelayMs, () => { localConfig.dlock = bleStore.disconnectLockDelayMs })
 
 function onUnlockChange(e) { localConfig.unlock = e.detail.value }
 function onLockChange(e) { localConfig.lock = e.detail.value }

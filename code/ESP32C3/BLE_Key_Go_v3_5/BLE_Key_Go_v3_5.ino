@@ -555,8 +555,9 @@ class ConfigCallbacks : public BLECharacteristicCallbacks {
         String value = characteristic->getValue().c_str();
         value.trim();
         if (parseConfigLine(value)) {
-            saveConfig();
-            Serial.printf("[CONFIG] updated by BLE: %s\n", value.c_str());
+            // ★ v3.12: 不自动 saveConfig() — 配置仅存 RAM，手机每次连接下发覆盖
+            //   ESP32 NVS Flash 也有擦写寿命限制，避免每次连接都写
+            Serial.printf("[CONFIG] updated by BLE (RAM-only): %s\n", value.c_str());
             notifyStatus();
         } else {
             Serial.printf("[CONFIG] invalid BLE config: %s\n", value.c_str());
