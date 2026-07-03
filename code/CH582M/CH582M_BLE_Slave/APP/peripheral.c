@@ -33,6 +33,23 @@ static uint8_t scanRspLen = 0;
 static uint8_t advertData[ADVERT_MAX_LEN];
 static uint8_t advertLen = 0;
 
+/* 想关掉广播电量的话：
+* 在 Peripheral_BuildAdvertData() 里把含电量的 AD 字段注释掉（目前是 Service Data 那段），
+* 然后把 SBP_START_DEVICE_EVT 里 tmos_start_task 的 SBP_BATTERY_CHECK_EVT 也注释掉（改回只在连接后启动电池检测）。
+* 这样 APP 只能连接后通过 GATT Read/Notify 拿到电量。
+* 
+* ① 注释掉广播包中的电量字段
+* （我目前用的3a）：把 [3a] Service Data 段整段注释掉。 让 idx 不再递增，广播包变短 5 字节。 // 注意： ─── 以下两段二选一 ─── 那段注释也改成"已关闭广播电量"之类说明。
+* 
+* ② 把电池检测从「开机即启动」改为「连接后才启动」
+* 需要改两个位置的  "tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);" ：
+* A. 删掉：SBP_START_DEVICE_EVT 中的启动; 在 "if (events & SBP_START_DEVICE_EVT) {" 中
+* B. 保留：连接回调中的启动 — 不动。这个已经是连接后才启动的，不用改。在 peripheralStateNotificationCB 的 GAPROLE_CONNECTED 分支里，原本就有，是连接后启动电池检测的入口。
+* 
+* ③（可选）连接断开时停止电池检测
+* 如果你希望断开连接后也停掉电池检测，可以在 GAPROLE_DISCONNECTED 或 GAPROLE_WAITING 分支里加一句：tmos_stop_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT);
+
+*/
 static void Peripheral_BuildAdvertData(void)
 {
     uint8_t idx = 0;
@@ -63,7 +80,7 @@ static void Peripheral_BuildAdvertData(void)
     //      AD Structure: Length(1) + AD_Type(1) + UUID(2) + Data(1) = 5 字节
     //      语义：我提供 0x180F 服务，当前电量=XX%
     advertData[idx++] = 0x04;
-    advertData[idx++] = GAP_ADTYPE_SERV_DATA;                               // 0x16
+    advertData[idx++] = GAP_ADTYPE_SERVICE_DATA;                            // 0x16
     advertData[idx++] = LO_UINT16(BATT_SERV_UUID);                          // Service UUID 0x180F 小端
     advertData[idx++] = HI_UINT16(BATT_SERV_UUID);
     advertData[idx++] = battLevel;                                          // 电池 0~100%
@@ -267,7 +284,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     if (events & SBP_START_DEVICE_EVT) {
         GAPRole_PeripheralStartDevice(Peripheral_TaskID, NULL,
                                        &Peripheral_PeripheralCBs);
-        /* ★ v3.14: 电池检测上电即运行，不再仅在连接后检测 */
+        /* ★ v3.14: 电池检测上电即运行（不依赖连接） ；若注释此行，则，电池检测移到连接建立后再启动，不再开机即跑*/
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
         return (events ^ SBP_START_DEVICE_EVT);
     }

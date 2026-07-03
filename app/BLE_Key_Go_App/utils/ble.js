@@ -19,6 +19,12 @@ export const BLE_CONFIG = {
   serialCharUUID: '0000FF04-0000-1000-8000-00805F9B34FB',      // ★ v3.3: Read-Only 设备序列号（永久唯一）
 }
 
+// ★ v3.14: 标准 Battery Service (0x180F) 用于电量读取
+export const BATT_SERVICE = {
+  serviceUUID: '0000180F-0000-1000-8000-00805F9B34FB',          // Battery Service
+  levelCharUUID: '00002A19-0000-1000-8000-00805F9B34FB',       // Battery Level (Read/Notify)
+}
+
 // ==================== 蓝牙适配器 ====================
 
 /**
@@ -501,7 +507,8 @@ export function startScan(onDeviceFound, timeout = 10) {
               RSSI: device.RSSI,
               advertisData: device.advertisData,
               localName: device.localName,
-              fingerprint: parseManufacturerFingerprint(device.advertisData)  // ★ v3.3: 设备指纹
+              fingerprint: parseManufacturerFingerprint(device.advertisData),  // ★ v3.3: 设备指纹
+              batteryLevel: parseBatteryFromAdvertData(device.advertisData),   // ★ v3.14: 扫描阶段提取电量
             }
             devices.push(dev)
             if (typeof onDeviceFound === 'function') {
@@ -931,6 +938,56 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
   })
 }
 
+/**
+ * ★ v3.14: 读取电池电量（Battery Service 0x180F / 0x2A19）
+ *
+ * 连接后通过 GATT Read 读取电池电量，不依赖扫描缓存。
+ * 返回的 Promise resolve 为电池百分比 0~100。
+ *
+ * @param {string} deviceId - 已连接的设备 ID
+ * @param {number} timeoutMs - 超时（毫秒），默认 3000
+ * @returns {Promise<number>} 电池电量 0~100
+ */
+export function readBatteryLevel(deviceId, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    let resolved = false
+
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true
+        try { uni.offBLECharacteristicValueChange(handler) } catch {}
+        reject(new Error('Read battery level timeout'))
+      }
+    }, timeoutMs)
+
+    const handler = (res) => {
+      if (resolved) return
+      if (res.deviceId !== deviceId) return
+      if ((res.characteristicId || '').toUpperCase() !== BATT_SERVICE.levelCharUUID.toUpperCase()) return
+
+      resolved = true
+      clearTimeout(timer)
+      try { uni.offBLECharacteristicValueChange(handler) } catch {}
+
+      const level = new Uint8Array(res.value)[0]
+      console.log('[BLE] 电池电量 (GATT Read):', level + '%')
+      resolve(level)
+    }
+
+    uni.onBLECharacteristicValueChange(handler)
+
+    readBLECharacteristicValue(deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID)
+      .catch((err) => {
+        if (!resolved) {
+          resolved = true
+          clearTimeout(timer)
+          try { uni.offBLECharacteristicValueChange(handler) } catch {}
+          reject(new Error(err?.errMsg || err?.message || '读电池电量失败'))
+        }
+      })
+  })
+}
+
 // ==================== 工具函数 ====================
 
 /**
@@ -1155,4 +1212,53 @@ export function parseManufacturerFingerprint(advBuffer) {
     // 字节解析失败，安全降级
   }
   return null
+}
+
+/**
+ * ★ v3.14: 从广播包 Service Data 解析电池电量
+ *
+ * BLE AD Structure (TLV):
+ *   Type 0x16 = Service Data - 16-bit UUID
+ *   Format: [Length(1)][Type=0x16(1)][UUID_LSB(1)][UUID_MSB(1)][Data…]
+ *
+ * KeyGo 固件广播包 Service Data 段:
+ *   0x04  0x16  0x0F  0x18  battLevel
+ *   len=4  type  UUID=0x180F (LE)  电量 0~100%
+ *
+ * @param {ArrayBuffer} advBuffer - device.advertisData 原始数据
+ * @returns {number} 电池电量 0~100，解析失败返回 -1（未知）
+ */
+export function parseBatteryFromAdvertData(advBuffer) {
+  if (!advBuffer || advBuffer.byteLength === 0) return -1
+  try {
+    const data = new Uint8Array(advBuffer)
+    let i = 0
+
+    while (i < data.length - 1) {
+      const len = data[i]
+      const type = data[i + 1]
+      if (len === 0) break
+
+      const valStart = i + 2
+      const valEnd = valStart + (len - 1)
+      if (valEnd > data.length) break
+
+      // AD Type 0x16 = Service Data (16-bit UUID)
+      // 结构: UUID_LSB(1) + UUID_MSB(1) + Data…
+      if (type === 0x16 && len >= 3 && valStart + 1 < valEnd) {
+        const uuid = data[valStart] | (data[valStart + 1] << 8)  // 16-bit UUID LE
+        if (uuid === 0x180F) {
+          // UUID 匹配 Battery Service，后面紧跟 1B 电量
+          const level = data[valStart + 2]
+          // 合法范围 0~100
+          if (level <= 100) return level
+        }
+      }
+
+      i = valEnd
+    }
+  } catch (e) {
+    // 字节解析失败，安全降级
+  }
+  return -1  // 未找到电池数据
 }

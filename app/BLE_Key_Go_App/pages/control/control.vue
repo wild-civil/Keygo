@@ -13,6 +13,11 @@
         <view class="car-status">
           <text class="car-state-text">{{ bleStore.stateText }}</text>
           <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
+          <!-- ★ v3.14: 电池电量显示（广播包 Service Data 提取） -->
+          <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
+            <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
+            <text class="batt-text">{{ bleStore.batteryText }}</text>
+          </view>
           <text class="car-cooldown" v-if="bleStore.manualCooldown">⏳ RSSI 状态机冷却中...</text>
         </view>
       </view>
@@ -239,6 +244,25 @@ async function handleCooldownChange(value) {
   margin-top: 6rpx;
   display: block;
 }
+
+/* ★ v3.14: 电池电量指示器 */
+.car-battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 6rpx;
+  margin-top: 10rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 12rpx;
+  font-size: 22rpx;
+}
+
+.batt-icon { font-size: 24rpx; }
+.batt-text { font-weight: 600; }
+
+.car-battery.batt-high   { background: rgba(52, 199, 89, 0.15); color: var(--accent-green); }
+.car-battery.batt-mid    { background: rgba(255, 169, 0, 0.15);  color: var(--accent-yellow); }
+.car-battery.batt-low    { background: rgba(255, 69, 58, 0.15);  color: var(--accent-red); }
+.car-battery.batt-unknown { background: rgba(142, 142, 147, 0.15); color: var(--text-muted); }
 
 
 /* ===== 信息网格 ===== */

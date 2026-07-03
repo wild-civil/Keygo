@@ -10,6 +10,7 @@
 import { defineStore } from 'pinia'
 import {
   BLE_CONFIG,
+  BATT_SERVICE,                   // ★ v3.14: 电池服务 UUID
   initBluetooth,
   getBluetoothAdapterState,
   getBLEDeviceServices,          // ★ used by _verifyConnection
@@ -26,6 +27,7 @@ import {
   arrayBufferToString,
   tryParseJSON,
   readSerialNumber,               // ★ v3.3: 读取设备序列号
+  readBatteryLevel,               // ★ v3.14: 读取电池电量 (GATT Read)
 } from '@/utils/ble.js'
 
 import {
@@ -53,6 +55,7 @@ export const useBleStore = defineStore('ble', {
     deviceState: 'LOCKED',        // LOCKED / UNLOCKED / ACTION
     rssi: -999,
     filteredRssi: -999,
+    batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
     unlockThreshold: -45,
     lockThreshold: -65,
     hystDb: 5,
@@ -115,6 +118,29 @@ export const useBleStore = defineStore('ble', {
     },
 
     isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
+
+    // ★ v3.14: 电池图标（四档 + 未知）
+    batteryIcon: (state) => {
+      if (state.batteryLevel < 0) return '❓'
+      if (state.batteryLevel >= 75) return '🔋'
+      if (state.batteryLevel >= 50) return '🛜'
+      if (state.batteryLevel >= 25) return '🛜'
+      return '🪫'
+    },
+
+    // ★ v3.14: 电池颜色 class（用于 CSS 动态色）
+    batteryColor: (state) => {
+      if (state.batteryLevel < 0) return 'batt-unknown'
+      if (state.batteryLevel >= 75) return 'batt-high'
+      if (state.batteryLevel >= 25) return 'batt-mid'
+      return 'batt-low'
+    },
+
+    // ★ v3.14: 电池文字（百分比或 "---"）
+    batteryText: (state) => {
+      if (state.batteryLevel < 0) return '---'
+      return state.batteryLevel + '%'
+    },
   },
 
   actions: {
@@ -216,6 +242,18 @@ export const useBleStore = defineStore('ble', {
             this._notifyBuffer = ''
             this._handleStatusNotify(fullData)
           }, 200)
+        }
+
+        // ★ v3.14: 电池电量 Notify (0x2A19) — 固件电压变化时实时推送
+        if (res.deviceId === this.deviceId &&
+            (res.characteristicId || '').toUpperCase() === BATT_SERVICE.levelCharUUID.toUpperCase()) {
+          try {
+            const level = new Uint8Array(res.value)[0]
+            if (level <= 100) {
+              this.batteryLevel = level
+              console.log('[Store] 电池电量更新 (Notify):', level + '%')
+            }
+          } catch {} // 字节解析失败，忽略
         }
       })
 
@@ -523,6 +561,7 @@ export const useBleStore = defineStore('ble', {
       this.deviceState = 'LOCKED'
       this.rssi = -999
       this.filteredRssi = -999
+      this.batteryLevel = -1        // ★ v3.14: 断连重置电量
 
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
       this._restoredForSn = ''
@@ -829,6 +868,29 @@ export const useBleStore = defineStore('ble', {
         BLE_CONFIG.statusCharUUID,
         true
       )
+      // ★ v3.14: 启用电池电量 Notify + 非阻塞读取初始电量
+      notifyBLECharacteristicValueChange(
+        this.deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
+      ).catch(() => {})
+      this._fetchBatteryLevel(this.deviceId).catch(() => {})
+    },
+
+    /**
+     * ★ v3.14: GATT Read 读取电池电量（独立数据源，不依赖扫描缓存）
+     *   连接建立后非阻塞调用，覆盖手动连接 + 自动重连两条路径。
+     */
+    async _fetchBatteryLevel(deviceId) {
+      if (!deviceId) return
+      try {
+        await new Promise(r => setTimeout(r, 1200)) // 等待 GATT 数据库就绪
+        const level = await readBatteryLevel(deviceId, 5000)
+        if (level >= 0 && level <= 100) {
+          this.batteryLevel = level
+          console.log('[Store] GATT 电池电量:', level + '%')
+        }
+      } catch (e) {
+        console.log('[Store] GATT 读取电池电量失败（设备可能未注册 Battery Service）:', e.message)
+      }
     },
 
     /**
@@ -1190,6 +1252,12 @@ export const useBleStore = defineStore('ble', {
           console.log('[Store] 设备指纹（广播包）:', this.fingerprint)
         }
 
+        // ★ v3.14: 从扫描缓存中提取电池电量（广播包 Service Data）
+        if (cached && cached.batteryLevel >= 0) {
+          this.batteryLevel = cached.batteryLevel
+          console.log('[Store] 电池电量（广播包）:', this.batteryLevel + '%')
+        }
+
         uni.setStorageSync('ble_device_id', deviceId)
 
         // ★ v3.6: 全局监听器已处理连接状态变化和特征值数据（不再重复注册）
@@ -1203,6 +1271,12 @@ export const useBleStore = defineStore('ble', {
           BLE_CONFIG.statusCharUUID,
           true
         )
+
+        // ★ v3.14: 启用电池电量 Notify + 非阻塞读取初始电量
+        notifyBLECharacteristicValueChange(
+          deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
+        ).catch(() => {})
+        this._fetchBatteryLevel(deviceId).catch(() => {})
 
         // ★ v3.3: 后台非阻塞读取设备序列号（不阻塞连接流程）
         readSerialNumber(deviceId, 5000).then(sn => {
