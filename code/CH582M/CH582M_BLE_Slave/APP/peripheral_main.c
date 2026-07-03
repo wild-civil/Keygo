@@ -40,6 +40,10 @@ void Main_Circulation()
     while(1)
     {
         TMOS_SystemProcess();
+        /* ★ v3.15: 每轮主循环喂狗
+         *   若 TMOS_SystemProcess() 内部死锁（任务队列阻塞/BLE 栈异常）
+         *   超过 557ms 未返回 → 看门狗触发硬件复位 → 设备自动恢复广播 */
+        WWDG_SetCounter(255);
     }
 }
 
@@ -70,6 +74,17 @@ int main(void)
     HAL_Init();
     GAPRole_PeripheralInit();
     Peripheral_Init();
+
+    /* ★ v3.15: 启用独立看门狗 (IWDT)
+     *   - 时钟 = Fsys / 131072 ≈ 458 Hz (@60MHz)，每 tick ≈ 2.18ms
+     *   - WDOG_COUNT = 255 → 超时约 557ms
+     *   - 主循环每次迭代喂狗；TMOS 死锁 > 557ms 触发芯片复位
+     */
+    sys_safe_access_enable();
+    R8_RST_WDOG_CTRL |= RB_WDOG_RST_EN;   // 使能看门狗复位
+    sys_safe_access_disable();
+    WWDG_SetCounter(255);                  // 首次喂狗（最大计数）
+
     Main_Circulation();
 }
 

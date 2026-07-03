@@ -92,6 +92,10 @@ onShow(async () => {
         tabIndex.value = 0
         await bleStore.startScanDevices(12)
       }
+    }).catch(err => {
+      /* ★ v3.15: 兜底捕获 tryAutoConnect/startScanDevices 中的未处理 rejection
+       *   防止蓝牙关闭、权限不足等场景下产生 unhandled rejection 崩溃 */
+      console.error('[Main] 自动连接/扫描失败:', err?.message || err)
     })
   } else {
     await bleStore.startScanDevices(12)

@@ -142,7 +142,12 @@ void Battery_Notify(void)
     noti.pValue = GATT_bm_alloc(connHandle, ATT_HANDLE_VALUE_NOTI, BATT_LEVEL_LEN, NULL, 0);
     if (noti.pValue) {
         noti.pValue[0] = batteryLevel;
-        GATT_Notification(connHandle, &noti, FALSE);
+        /* ★ v3.15-fix: GATT_Notification 失败时释放 GATT_bm_alloc 分配的内存
+         *   若不释放，每次 Notify 失败泄漏 BLE 堆内存，长期运行会耗尽堆区
+         *   最终导致 GATT_bm_alloc 返回 NULL → 无法发送任何通知 */
+        if (GATT_Notification(connHandle, &noti, FALSE) != SUCCESS) {
+            GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
+        }
     }
 }
 

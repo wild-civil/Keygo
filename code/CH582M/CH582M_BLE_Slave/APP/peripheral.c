@@ -48,7 +48,6 @@ static uint8_t advertLen = 0;
 * 
 * ③（可选）连接断开时停止电池检测
 * 如果你希望断开连接后也停掉电池检测，可以在 GAPROLE_DISCONNECTED 或 GAPROLE_WAITING 分支里加一句：tmos_stop_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT);
-
 */
 static void Peripheral_BuildAdvertData(void)
 {
