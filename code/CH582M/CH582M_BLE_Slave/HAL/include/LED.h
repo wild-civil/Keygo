@@ -48,8 +48,8 @@ extern "C" {
 
 /* 连接一个LED用于监控演示程序的进度,低电平LED亮 */
 
-/* 1 - LED */
-#define LED1_BV                 BV(15)
+/* 1 - LED (开发板 PB4) */
+#define LED1_BV                 BV(4)
 #define LED2_BV
 #define LED3_BV
 

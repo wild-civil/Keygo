@@ -60,8 +60,9 @@ void HAL_LedInit(void)
     /* Initialize all LEDs to OFF */
     LED1_DDR;
     HalLedSet(HAL_LED_ALL, HAL_LED_MODE_OFF);
-    // just test
-    HalLedBlink(HAL_LED_1, 10, 30, 4000);
+    /* ★ v3.15-diag: 快速诊断闪烁 — 3 次快闪 (500ms 周期, 50% 占空)
+     *   闪完后 LED 常亮 → 设备正常运行；重新开始闪 → 发生了复位 */
+    HalLedBlink(HAL_LED_1, 3, 50, 500);
     /* Initialize sleepActive to FALSE */
     HalLedStatusControl.sleepActive = FALSE;
 }

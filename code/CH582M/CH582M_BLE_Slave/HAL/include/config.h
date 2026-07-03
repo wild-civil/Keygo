@@ -23,9 +23,8 @@
  * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件)
  *   参考 ESP32 映射: UNLOCK=2, LOCK=3, TRUNK=4, KEY_POWER=5, LED=8, BIND=9
  *   CH582M 使用 PB 端口对应关系:
- *     PB15 = LED
+ *     PB4  = LED (开发板丝印 PB4)
  *     PB22 = KEY1 (BIND 按键)
- *     PB4  = KEY2 (预留)
  *     PA4  = UNLOCK
  *     PA5  = LOCK
  *     PA6  = TRUNK
