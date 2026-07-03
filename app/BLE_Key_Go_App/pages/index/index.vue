@@ -179,12 +179,43 @@ const pwModal = reactive({
 
 onShow(async () => {
   themeStore.applyNavBar()
-  if (bleStore.connected) return
-  // ★ v3.6: 重新检查蓝牙状态（用户可能从控制中心开启了蓝牙）
-  await bleStore._checkBluetoothState()
-  if (bleStore.btState === 'off') return
-  // ★ v3.6: 已有连接历史的且不是用户主动断的 → 尝试重连
-  if (bleStore.reconnectMode !== 'dormant') {
+
+  // ★ v3.14-bugfix2: btState='off' 是原生广播在后台确认的状态，直接信任。
+  //   _forceRefreshBluetoothState 内部调用 getBluetoothAdapterState(),
+  //   在 Android 上可能误报 available=true（系统蓝牙已关但 BLE 适配器
+  //   仍处于 initialized 状态），会覆盖正确的 'off' → 导致后续误判。
+  //   同时，锁屏→亮屏期间 Android 可能触发 STATE_ON 广播 → 诈尸重连
+  //   → connected=true（stale handle），之后的 _verifyConnection 会用
+  //   getConnectedBluetoothDevices 做系统级验证来识别并清理这种假连接。
+  if (bleStore.btState === 'off') {
+    console.log('[UI] onShow: btState=off（原生广播确认），清理残留状态')
+    if (bleStore.connected) {
+      bleStore._handleDisconnect()
+    }
+    return
+  }
+
+  // 蓝牙状态不明确（unknown / just_enabled）→ 强制刷新获取真实状态
+  const btOn = await bleStore._forceRefreshBluetoothState()
+
+  if (!btOn) {
+    console.log('[UI] onShow: 蓝牙已关闭，清理 stale 连接')
+    if (bleStore.connected) {
+      bleStore._handleDisconnect()
+    }
+    return
+  }
+
+  // 蓝牙已开启 → 验证连接或尝试重连
+  if (bleStore.connected) {
+    // 异步验证（不阻塞 UI），若为假连接会在 _verifyConnection 中自动清理
+    bleStore._verifyConnection()
+    return
+  }
+
+  // ★ v3.14-bugfix2: 仅在 idle 模式尝试自动重连
+  //   'paused'（蓝牙关闭等待恢复）和 'dormant'（用户主动断开）不触发
+  if (bleStore.reconnectMode === 'idle') {
     bleStore.tryAutoConnect()
   }
 })

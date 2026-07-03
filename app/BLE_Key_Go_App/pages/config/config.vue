@@ -172,8 +172,9 @@ function syncFromStore() {
 
 onShow(() => {
   themeStore.applyNavBar()
-  // ★ 确保配置已从本地存储恢复（解决 App 重启后直接进入配置页时值被重置的问题）
-  bleStore._restoreConfig()
+  // ★ BugFix: 传入 SN 才能读设备专属配置 ble_config_v1_{SN}
+  //   不传 SN 只会读旧版全局 ble_config_v1，切后台再切回时找不到设备专属配置导致重置为默认值
+  bleStore._restoreConfig(bleStore.serialNumber || undefined)
   syncFromStore()
 })
 

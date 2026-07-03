@@ -12,6 +12,7 @@ import {
   BLE_CONFIG,
   initBluetooth,
   getBluetoothAdapterState,
+  getBLEDeviceServices,          // ★ used by _verifyConnection
   onBluetoothAdapterStateChange,
   startScan,
   stopScan,
@@ -421,6 +422,38 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.14-bugfix: 强制刷新蓝牙适配器状态（用于 onShow 等从后台切回的场景）
+     *
+     *   与 _checkBluetoothState 的核心区别：
+     *     _checkBluetoothState:  信任原生广播缓存 → 避免 Android 初始化延迟误判
+     *     _forceRefreshBluetoothState: 不信任缓存 → 直接以 getBluetoothAdapterState 为准
+     *
+     *   场景：App 从后台切回时，原生广播可能错过了 STATE_OFF 事件，
+     *   btState 为 stale 'on' 而蓝牙实际已关。此时必须强制以实时查询结果为准，
+     *   否则会触发"信任原生广播"保护线 → btState 永远无法修正 → 重连死循环。
+     *
+     * @returns {Promise<boolean>} true=蓝牙已开启，false=蓝牙已关闭
+     */
+    async _forceRefreshBluetoothState() {
+      try {
+        const state = await getBluetoothAdapterState()
+        if (state.available) {
+          this.btState = 'on'
+          console.log('[Store] _forceRefreshBluetoothState: 蓝牙已开启')
+          return true
+        } else {
+          this.btState = 'off'
+          console.log('[Store] _forceRefreshBluetoothState: 蓝牙已关闭')
+          return false
+        }
+      } catch (e) {
+        // API 调用异常 → 保守回退到当前缓存值
+        console.warn('[Store] _forceRefreshBluetoothState 异常，回退缓存:', e)
+        return this.btState === 'on'
+      }
+    },
+
+    /**
      * 确保蓝牙适配器已开启，否则设置状态以便 UI 显示引导
      * @returns {Promise<boolean>} true=已就绪，false=蓝牙未开
      */
@@ -518,6 +551,74 @@ export const useBleStore = defineStore('ble', {
       //   若 btState 已为 'off' 则立即回滚，防止关蓝牙时闪现"已连接"。
       console.log('[Store] 异常断连，启动重连...')
       this._startReconnect()
+    },
+
+    /**
+     * ★ v3.14-bugfix: 轻量连接验证（App 从后台切回时使用）
+     *
+     *   通过 getBLEDeviceServices 做一次真实的 GATT 交互验证 BLE 连接是否仍然存活。
+     *   如果连接已丢失（设备走远、系统回收、蓝牙被关闭），此方法会超时失败。
+     *
+     *   场景：
+     *     - App 挂后台很久，BLE 物理断开但 _connHandler 未被触发
+     *     - 用户从控制中心关闭蓝牙后切回 App
+     *
+     *   超时设计：
+     *     - 正常连接：~200ms 内返回
+     *     - 连接已断：uni.getBLEDeviceServices 约 3-5 秒超时
+     *     - 额外 3000ms 兜底超时防止永久阻塞
+     *
+     * @returns {Promise<boolean>} true=连接正常，false=连接已失效
+     */
+    async _verifyConnection() {
+      if (!this.connected || !this.deviceId) return false
+
+      // ★ v3.14-bugfix: 如果蓝牙已确认关闭，无需验证，直接清理
+      if (this.btState === 'off') {
+        console.log('[Store] _verifyConnection: btState=off，直接清理')
+        this._handleDisconnect()
+        return false
+      }
+
+      // ★ v3.14-bugfix2: 优先使用 getConnectedBluetoothDevices 做系统级验证
+      //   getBLEDeviceServices 在 Android 上可能返回缓存数据（屏显唤醒时
+      //   Android 通过 stale handle "重连"成功，GATT services 被缓存），
+      //   导致虚假的"连接正常"。getConnectedBluetoothDevices 直接查询系统
+      //   蓝牙管理器，结果无法被缓存伪造。
+      try {
+        const devices = await new Promise((resolve, reject) => {
+          uni.getConnectedBluetoothDevices({
+            services: [BLE_CONFIG.serviceUUID],
+            success: (res) => resolve(res.devices || []),
+            fail: (err) => reject(err)
+          })
+        })
+        const found = devices.some(d => d.deviceId === this.deviceId)
+        if (found) {
+          console.log('[Store] _verifyConnection: 连接正常（系统级验证）')
+          return true
+        }
+        // 设备不在系统已连接列表 → 连接已失效
+        console.log('[Store] _verifyConnection: 设备不在已连接列表，连接已失效')
+        this._handleDisconnect()
+        return false
+      } catch (e) {
+        // ★ getConnectedBluetoothDevices 失败 → 回退到 GATT services 验证
+        console.warn('[Store] _verifyConnection: getConnectedBluetoothDevices 失败，回退 GATT:', e?.message || e)
+        try {
+          await Promise.race([
+            getBLEDeviceServices(this.deviceId),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('VERIFY_TIMEOUT')), 3000))
+          ])
+          console.log('[Store] _verifyConnection: 连接正常（GATT 回退验证）')
+          return true
+        } catch (e2) {
+          const msg = e2?.message || String(e2)
+          console.log('[Store] _verifyConnection: 连接已失效 —', msg)
+          this._handleDisconnect()
+          return false
+        }
+      }
     },
 
     /** 启动重连循环（v3.6 指数退避） */
