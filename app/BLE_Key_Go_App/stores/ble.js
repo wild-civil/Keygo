@@ -1342,6 +1342,14 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
+      // ★ v3.14-bugfix3: 蓝牙已关闭或正在关闭时，忽略设备推送的 stale 状态包。
+      //   _handleBtOff 先设 connected=false，但 TURNING_OFF → OFF 之间有 ~300ms，
+      //   期间 Notify 回调仍可能投递已排队的 FF02 包（c=1）→ 导致 connected 诈尸。
+      if (this.btState === 'off' || this.btState === 'turning_off') {
+        console.log('[Store] btState=' + this.btState + '，丢弃 stale FF02 status')
+        return
+      }
+
       // 连接与车辆状态
       if (data.c !== undefined) this.connected = data.c === 1
 
