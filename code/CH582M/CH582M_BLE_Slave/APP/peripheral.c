@@ -28,31 +28,43 @@
 static uint8_t scanRspData[SCAN_RSP_MAX_LEN];
 static uint8_t scanRspLen = 0;
 
-// 广播包
-static uint8_t advertData[] = {
-    // Flags (必须保留)
-    0x02, GAP_ADTYPE_FLAGS,
-    GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
+// 广播包（★ v3.14: 动态构建，含电池电量）
+#define ADVERT_MAX_LEN   31
+static uint8_t advertData[ADVERT_MAX_LEN];
+static uint8_t advertLen = 0;
 
-    // Appearance  (保留，手机图标靠它)，实测优先，可改为 0x08C1(Car)/0x0240(Keyring)/0x0180(RC)
-    0x03, GAP_ADTYPE_APPEARANCE,
-    LO_UINT16(GAP_APPEARE_GENERIC_WATCH), HI_UINT16(GAP_APPEARE_GENERIC_WATCH), // 值:   0xC0,0x00 (小端序 = 0x00C0 = 通用手表)
-    // LO_UINT16(GAP_APPEARE_WATCH_SPORTS), HI_UINT16(GAP_APPEARE_WATCH_SPORTS), // 值:   0xC1,0x00 (小端序 = 0x00C1 = 运动手表)
-    // LO_UINT16(GAP_APPEARE_HID_BARCODE_SCANNER), HI_UINT16(GAP_APPEARE_HID_BARCODE_SCANNER), // 手柄 不显示
-    // LO_UINT16(GAP_APPEARE_GENERIC_HID), HI_UINT16(GAP_APPEARE_GENERIC_HID), // 鼠标 显示
-    // LO_UINT16(0x08C0), HI_UINT16(0x08C0),  // 汽车 不显示
-    // LO_UINT16(0x0200), HI_UINT16(0x0200),  // Tag 不显示
+static void Peripheral_BuildAdvertData(void)
+{
+    uint8_t idx = 0;
+    uint8_t battLevel = Battery_GetLevel();
 
-    // 16-bit UUID list (incomplete) Service UUID (保留，App 扫描依赖)
-    0x03, GAP_ADTYPE_16BIT_MORE, 0x00, 0xFF,
-        // Service UUID (保留，App 扫描靠它)
+    // [0] Flags (必须保留)
+    advertData[idx++] = 0x02;
+    advertData[idx++] = GAP_ADTYPE_FLAGS;
+    advertData[idx++] = GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED;
 
-    // Manufacturer: 去掉，无实际用途，节约广播包空间
-    // // Manufacturer Specific: WCH 
-    // 0x05, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    // LO_UINT16(WCH_COMPANY_ID), HI_UINT16(WCH_COMPANY_ID),
-    // 0x00, 0x00
-};
+    // [1] Appearance  (保留，手机图标靠它)
+    advertData[idx++] = 0x03;
+    advertData[idx++] = GAP_ADTYPE_APPEARANCE;
+    advertData[idx++] = LO_UINT16(GAP_APPEARE_GENERIC_WATCH);
+    advertData[idx++] = HI_UINT16(GAP_APPEARE_GENERIC_WATCH);
+
+    // [2] 16-bit UUID list (incomplete)：KeyGo 0xFF00 + Battery 0x180F
+    advertData[idx++] = 0x05;
+    advertData[idx++] = GAP_ADTYPE_16BIT_MORE;
+    advertData[idx++] = 0x00; advertData[idx++] = 0xFF;                     // KeyGo Service
+    advertData[idx++] = LO_UINT16(BATT_SERV_UUID); advertData[idx++] = HI_UINT16(BATT_SERV_UUID);  // Battery Service
+
+    // [3] Manufacturer Specific: WCH + 电池电量% (1 字节)
+    advertData[idx++] = 0x06;
+    advertData[idx++] = GAP_ADTYPE_MANUFACTURER_SPECIFIC;
+    advertData[idx++] = LO_UINT16(WCH_COMPANY_ID);
+    advertData[idx++] = HI_UINT16(WCH_COMPANY_ID);
+    advertData[idx++] = 0x00;          // reserved
+    advertData[idx++] = battLevel;      // 电池 0~100%
+
+    advertLen = idx;
+}
 
 static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "";  // v3.13: 运行时动态构建
 
@@ -156,6 +168,7 @@ void Peripheral_Init(void)
     GetMACAddress(g_deviceMac);
 
     Peripheral_BuildScanRspData();
+    Peripheral_BuildAdvertData();     // ★ v3.14: 动态广播包（含电池电量）
     Peripheral_BuildBroadcastName((char*)attDeviceName, sizeof(attDeviceName));
 
     PRINT("[INIT] Device Name: %s\n", attDeviceName);
@@ -169,7 +182,7 @@ void Peripheral_Init(void)
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv_enable);
         GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, scanRspLen, scanRspData);
 
-        GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData);
+        GAPRole_SetParameter(GAPROLE_ADVERT_DATA, advertLen, advertData);
         GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(uint16_t), &desired_min);
         GAPRole_SetParameter(GAPROLE_MAX_CONN_INTERVAL, sizeof(uint16_t), &desired_max);
     }
@@ -240,6 +253,8 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     if (events & SBP_START_DEVICE_EVT) {
         GAPRole_PeripheralStartDevice(Peripheral_TaskID, NULL,
                                        &Peripheral_PeripheralCBs);
+        /* ★ v3.14: 电池检测上电即运行，不再仅在连接后检测 */
+        tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
         return (events ^ SBP_START_DEVICE_EVT);
     }
 
@@ -269,7 +284,17 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if (events & SBP_BATTERY_CHECK_EVT) {
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
-        Battery_UpdateLevel();
+        {
+            uint8_t oldLevel = Battery_GetLevel();
+            Battery_UpdateLevel();
+            /* ★ v3.14: 电量变化 → 重建广播包 + 实时更新 advertising data
+             *   GAP_UpdateAdvertisingData 可在广播中实时更新，无需重启 advertising */
+            if (Battery_GetLevel() != oldLevel) {
+                Peripheral_BuildAdvertData();
+                GAP_UpdateAdvertisingData(Peripheral_TaskID, GAP_ADTYPE_ADV_IND,
+                                          advertLen, advertData);
+            }
+        }
         return (events ^ SBP_BATTERY_CHECK_EVT);
     }
 
@@ -411,7 +436,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
-        tmos_stop_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT);
+        /* ★ v3.14: 电池检测持续运行（断开后不停），确保广播包电量实时更新 */
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
         advRestartRetryCount = 0;

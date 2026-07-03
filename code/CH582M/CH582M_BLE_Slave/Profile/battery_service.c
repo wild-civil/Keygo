@@ -157,8 +157,10 @@ void Battery_UpdateLevel(void)
         uint8_t savedChannel = R8_ADC_CHANNEL;
         uint8_t savedCfg     = R8_ADC_CFG;
 
-        /* 内部 VBAT 通道配置: 上电 + 输入缓冲 + PGA 0dB + 采样时钟 3 */
-        R8_ADC_CFG    = RB_ADC_POWER_ON | RB_ADC_BUF_EN | (2 << 4) | (3 << 6);
+        /* 内部 VBAT 通道配置: 上电 + 输入缓冲 + PGA -12dB(1/4) + 采样时钟 3
+         * ★ 必须用 -12dB: CH582M ADC 基准=1.05V, VBAT通道=VDD/3,
+         *   若用 0dB 则 VDD≥3.15V 时输入端超量程→ADC 饱和在 4095→电压读错 */
+        R8_ADC_CFG    = RB_ADC_POWER_ON | RB_ADC_BUF_EN | ADC_PGA_1_4 | (3 << 6);
         R8_ADC_CHANNEL = 14;   // CH_INTE_VBAT
         R8_ADC_CONVERT = RB_ADC_START;
         while (R8_ADC_CONVERT & RB_ADC_START);
@@ -170,14 +172,13 @@ void Battery_UpdateLevel(void)
     }
 
     /*
-     * VBAT 内部通道: 电压 = VDD / 3，基准 = 1.05V 内部 bandgap
-     * 所以: VDD(mV) = (adcVal * 1050 * 3) / 4096
-     * 简化: VDD(mV) ≈ adcVal * 0.769
+     * VBAT 内部通道: 电压 = VDD / 3，PGA = -12dB (1/4)，基准 = 1.05V bandgap
+     * 所以: VDD(mV) = (adcVal * 1050 * 3 * 4) / 4096 = adcVal * 12600 / 4096
      *
      * 注: 此公式需要根据实际板子校准。不同芯片的 bandgap
      *     和分压比有轻微差异，后续可用万用表实测校准。
      */
-    vdd_mV = (uint32_t)adcVal * 1050 * 3 / 4096;
+    vdd_mV = (uint32_t)adcVal * 1050 * 12 / 4096;
 
     /* ── 电压 → 电量百分比 ──
      * 简化线性映射: 3.0V → 0%, 4.2V → 100%
