@@ -14,13 +14,32 @@
  * 宏定义 (模块内部)
  * ───────────────────────────────────────────────────────────────── */
 
-#define SPIKE_DISCARD_COUNT     2
+#define SPIKE_DISCARD_COUNT         2
 // ★ v3.6-fixH: 从 3000ms → 8000ms，匹配 App 端 8s 冷却
 // ★ v3.7: MANUAL_COOLDOWN_MS 从宏改为 uint16_t 变量 g_manualCooldownMs，
 //         可在运行时通过 App 下发 "cooldown_ms=N" 修改，并持久化到 DataFlash
 //         bug: 固件冷却 3s 到期后状态机恢复运行，仅 ~5.5s 后即可自动覆盖手动操作，
 //               用户看到 App 显示"冷却 8s"但实际只有 3s 有效
-#define STATUS_JSON_MAX_LEN     200  // ★ 加了 cd 字段，json 更长，从 180 扩到 200
+#define STATUS_JSON_MAX_LEN         200  // ★ 加了 cd 字段，json 更长，从 180 扩到 200
+
+/* ★ v3.15: TMOS 时间转换常量
+ *   TMOS tick ≈ 0.625ms = 5/8 ms → ms = ticks × 5 ÷ 8, ticks = ms × 8 ÷ 5 */
+#define TMOS_TICK_NUM               5    // 1 tick = 5/8 ms → 分子
+#define TMOS_TICK_DEN               8    // 1 tick = 5/8 ms → 分母
+#define MS_TO_TMOS_TICK_NUM         8    // ms → ticks: 乘 8
+#define MS_TO_TMOS_TICK_DEN         5    // ms → ticks: 除 5
+
+/* ★ v3.15: RSSI 相关常量 */
+#define RSSI_UNINITIALIZED        (-999)   // RSSI 未初始化哨兵值（整数）
+#define RSSI_UNINITIALIZED_F      (-999.0f)// RSSI 未初始化哨兵值（浮点）
+#define RSSI_SPIKE_THRESHOLD_DBM  25.0f    // 单次 RSSI 跳变 >25dBm 视为毛刺
+#define RSSI_PERIOD_TICKS_MIN      100     // RSSI 读取周期下限 ~62.5ms
+#define RSSI_PERIOD_TICKS_MAX      4000    // RSSI 读取周期上限 ~2500ms
+
+/* ★ v3.15: Kalman 滤波器初始化默认值 */
+#define KALMAN_DEFAULT_Q           1.0f   // 过程噪声协方差
+#define KALMAN_DEFAULT_P           1.0f   // 初始估计协方差
+#define KALMAN_INITIAL_X          -80.0f  // 初始状态估计 (~-80dBm 典型空旷区)
 
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.5: 可运行时配置的 RSSI 阈值 (替代原来的 #define 硬编码)
@@ -46,12 +65,12 @@ uint8_t  g_cfgKalmanR           = 15;    // 卡尔曼滤波器 R 值 (范围 1~5
 static KalmanFilter1D_t g_kalman;                   // 由 InitKalmanFilter() 初始化 
 
 // RSSI
-static int16_t  g_latestRSSI        = -999;
-static float    g_filteredRSSI      = -999.0f;
+static int16_t  g_latestRSSI        = RSSI_UNINITIALIZED;
+static float    g_filteredRSSI      = RSSI_UNINITIALIZED_F;
 static int16_t  g_rssiBuffer[8]     = {0};
 static uint8_t  g_rssiBufIdx        = 0;
 static uint8_t  g_spikeConsecutive  = 0;
-static int16_t  g_lastRawRSSI       = -999;
+static int16_t  g_lastRawRSSI       = RSSI_UNINITIALIZED;
 static uint8_t  g_rssiUpdated       = 0;    // ★ 新 Kalman 样本标记
 
 // 状态机
@@ -77,7 +96,7 @@ static float UpdateKalman(float measurement);
 
 uint32_t Peripheral_GetSystemMs(void)
 {
-    return TMOS_GetSystemClock() * 5 / 8;
+    return TMOS_GetSystemClock() * TMOS_TICK_NUM / TMOS_TICK_DEN;
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -155,11 +174,11 @@ void KeyGo_KeyPower(uint8_t on)
 
 static void InitKalmanFilter(void)
 {
-    g_kalman.Q    = 1.0f;
+    g_kalman.Q    = KALMAN_DEFAULT_Q;
     g_kalman.R    = (float)g_cfgKalmanR;  // ★ v3.13: 使用运行时配置，不再硬编码
-    g_kalman.P    = 1.0f;
+    g_kalman.P    = KALMAN_DEFAULT_P;
     g_kalman.K    = 0.0f;
-    g_kalman.X    = -80.0f;
+    g_kalman.X    = KALMAN_INITIAL_X;
     g_kalman.init = 0;
 }
 
@@ -167,9 +186,9 @@ void KeyGo_ResetKalman(void)
 {
     InitKalmanFilter();
     g_spikeConsecutive = 0;
-    g_lastRawRSSI      = -999;
-    g_filteredRSSI     = -999.0f;
-    g_latestRSSI       = -999;
+    g_lastRawRSSI      = RSSI_UNINITIALIZED;
+    g_filteredRSSI     = RSSI_UNINITIALIZED_F;
+    g_latestRSSI       = RSSI_UNINITIALIZED;
 }
 
 /*
@@ -211,8 +230,8 @@ void KeyGo_RssiProcess(int8_t rssi)
     g_latestRSSI = rssi;
     float r = (float)rssi;
 
-    if (g_lastRawRSSI != -999) {
-        if (r - g_lastRawRSSI > 25.0f || g_lastRawRSSI - r > 25.0f) { // 设定毛刺阈值 20→25dBm——减少对真实信号移动的误判
+    if (g_lastRawRSSI != RSSI_UNINITIALIZED) {
+        if (r - g_lastRawRSSI > RSSI_SPIKE_THRESHOLD_DBM || g_lastRawRSSI - r > RSSI_SPIKE_THRESHOLD_DBM) {
             g_spikeConsecutive++;
         } else {
             g_spikeConsecutive = 0;
@@ -243,7 +262,7 @@ void KeyGo_ProcessStateMachine(void)
         }
     }
 
-    if (g_filteredRSSI == -999.0f || g_actionActive) return;
+    if (g_filteredRSSI == RSSI_UNINITIALIZED_F || g_actionActive) return;
 
     // ★ 只在有新 Kalman 样本时才计数（每 ~500ms 一次，而非每 125ms）
     if (!g_rssiUpdated) return;
@@ -305,7 +324,7 @@ void KeyGo_NotifyStatus(void)
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
-        (int)(g_filteredRSSI != -999.0f ? (int)g_filteredRSSI : -999),
+        (int)(g_filteredRSSI != RSSI_UNINITIALIZED_F ? (int)g_filteredRSSI : RSSI_UNINITIALIZED),
         d2,
         (int)g_cfgManualCooldownMs,  // ★ v3.7: 上报当前冷却时间，App 端同步
         (int)g_cfgKalmanR);           // ★ v3.13: 上报 kalmanR，App 同步 kalmanR
@@ -391,9 +410,9 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
  * ───────────────────────────────────────────────────────────────── */
 uint16_t KeyGo_GetRssiPeriodTicks(void)
 {
-    uint32_t ticks = (uint32_t)g_cfgRssiPeriodMs * 8 / 5;
-    if (ticks < 100) return 100;    // 下限 ~62.5ms
-    if (ticks > 4000) return 4000;  // 上限 ~2500ms
+    uint32_t ticks = (uint32_t)g_cfgRssiPeriodMs * MS_TO_TMOS_TICK_NUM / MS_TO_TMOS_TICK_DEN;
+    if (ticks < RSSI_PERIOD_TICKS_MIN) return RSSI_PERIOD_TICKS_MIN;   // 下限 ~62.5ms
+    if (ticks > RSSI_PERIOD_TICKS_MAX) return RSSI_PERIOD_TICKS_MAX;   // 上限 ~2500ms
     return (uint16_t)ticks;
 }
 
