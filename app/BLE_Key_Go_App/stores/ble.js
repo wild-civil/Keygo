@@ -119,12 +119,14 @@ export const useBleStore = defineStore('ble', {
 
     isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
 
-    // ★ v3.14: 电池图标（四档 + 未知）
+    /* ★ v3.15: 电池图标 — emoji 方案（默认启用）
+     *   若想切换为 CSS 组件，修改 control.vue 模板中的电池区域
+     *   （CSS 组件标记了 v3.15-css，注释掉 emoji 行即可启用） */
     batteryIcon: (state) => {
       if (state.batteryLevel < 0) return '❓'
       if (state.batteryLevel >= 75) return '🔋'
-      if (state.batteryLevel >= 50) return '🛜'
-      if (state.batteryLevel >= 25) return '🛜'
+      if (state.batteryLevel >= 50) return '🔋'
+      if (state.batteryLevel >= 25) return '🔋'
       return '🪫'
     },
 

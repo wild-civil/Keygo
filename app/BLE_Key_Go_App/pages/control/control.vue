@@ -13,11 +13,21 @@
         <view class="car-status">
           <text class="car-state-text">{{ bleStore.stateText }}</text>
           <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
-          <!-- ★ v3.14: 电池电量显示（广播包 Service Data 提取） -->
+          <!-- ★ v3.15: 电池电量 — 默认 emoji 图标
+               如需切换为 CSS 电池组件，注释下面 18 行，取消注释 19~24 行 -->
           <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
             <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
             <text class="batt-text">{{ bleStore.batteryText }}</text>
           </view>
+          <!-- ▼ v3.15-css: CSS 电池组件（备用方案） ──────────────────
+          <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
+            <view class="batt-shell">
+              <view class="batt-fill" :style="{ width: bleStore.batteryLevel + '%' }"></view>
+            </view>
+            <view class="batt-cap"></view>
+            <text class="batt-text">{{ bleStore.batteryText }}</text>
+          </view>
+          ▲ v3.15-css ────────────────────────────────────────────── -->
           <text class="car-cooldown" v-if="bleStore.manualCooldown">⏳ RSSI 状态机冷却中...</text>
         </view>
       </view>
@@ -245,7 +255,14 @@ async function handleCooldownChange(value) {
   display: block;
 }
 
-/* ★ v3.14: 电池电量指示器 */
+/* ★ v3.15: 电池电量指示器 — 双模式可选
+ *   - emoji 模式（默认）：.batt-icon 显示 🔋/🪫 图标
+ *   - CSS 组件模式：注释掉 emoji 行，启用 .batt-shell/.batt-fill/.batt-cap
+ *   ── emoji 样式 ── */
+.batt-icon { font-size: 24rpx; }
+.batt-text { font-weight: 600; }
+
+/* ── CSS 组件样式（备用） ── */
 .car-battery {
   display: inline-flex;
   align-items: center;
@@ -256,8 +273,39 @@ async function handleCooldownChange(value) {
   font-size: 22rpx;
 }
 
-.batt-icon { font-size: 24rpx; }
-.batt-text { font-weight: 600; }
+/* ── 电池外壳 ── */
+.batt-shell {
+  width: 40rpx;
+  height: 22rpx;
+  border: 2.5rpx solid currentColor;
+  border-radius: 4rpx;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* ── 电池正极帽 ── */
+.batt-cap {
+  width: 5rpx;
+  height: 10rpx;
+  border: 2.5rpx solid currentColor;
+  border-left: none;
+  border-radius: 0 3rpx 3rpx 0;
+  margin-left: -2rpx;
+  flex-shrink: 0;
+}
+
+/* ── 电池填充层（width 由 :style 绑定 batteryLevel 百分比控制） ── */
+.batt-fill {
+  position: absolute;
+  top: 1.5rpx;
+  left: 1.5rpx;
+  bottom: 1.5rpx;
+  background: currentColor;
+  border-radius: 2rpx;
+  /* 平滑过渡：电量变化时填充宽度有 0.4s 动画 */
+  transition: width 0.4s ease;
+}
 
 .car-battery.batt-high   { background: rgba(52, 199, 89, 0.15); color: var(--accent-green); }
 .car-battery.batt-mid    { background: rgba(255, 169, 0, 0.15);  color: var(--accent-yellow); }
