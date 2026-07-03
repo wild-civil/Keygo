@@ -153,7 +153,7 @@
 
 
 <script setup>
-import { reactive, computed } from 'vue'
+import { reactive, computed } from 'vue' // import { reactive, computed, watch } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
@@ -162,6 +162,17 @@ const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 
+// // ★★★ v3.14-bug watcher 诊断：监听 connected 变化，定位 phantom 连接的来源 ★★★ 
+// 在每次 connected 状态变化时，会打印：
+// 前后值：false → true 或 true → false
+// 关键上下文：btState、reconnectMode、deviceId、重连次数/延迟
+// 完整调用栈：精确定位是哪行代码改的 connected
+// watch(() => bleStore.connected, (newVal, oldVal) => {
+//   console.log(`[DIAG] connected: ${oldVal} → ${newVal}`)
+//   console.log(`[DIAG] btState=${bleStore.btState} mode=${bleStore.reconnectMode} deviceId=${bleStore.deviceId}`)
+//   console.log(`[DIAG] reconnectAttempt=${bleStore.reconnectAttempt} reconnectNextDelay=${bleStore.reconnectNextDelay}`)
+//   console.log(new Error('[DIAG] 调用栈').stack)
+// }, { flush: 'sync' })
 
 // ★ 通用 pwModal
 const pwModal = reactive({

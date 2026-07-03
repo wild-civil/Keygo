@@ -45,23 +45,37 @@ static void Peripheral_BuildAdvertData(void)
 
     // [1] Appearance  (保留，手机图标靠它)
     advertData[idx++] = 0x03;
-    advertData[idx++] = GAP_ADTYPE_APPEARANCE;
-    advertData[idx++] = LO_UINT16(GAP_APPEARE_GENERIC_WATCH);
+    advertData[idx++] = GAP_ADTYPE_APPEARANCE; // 0x19
+    advertData[idx++] = LO_UINT16(GAP_APPEARE_GENERIC_WATCH); //想定义啥自己去appearance.h找，记得包含头文件
     advertData[idx++] = HI_UINT16(GAP_APPEARE_GENERIC_WATCH);
 
     // [2] 16-bit UUID list (incomplete)：KeyGo 0xFF00 + Battery 0x180F
+    //     声明设备支持的 Service，手机扫描时可据此显示对应图标
     advertData[idx++] = 0x05;
     advertData[idx++] = GAP_ADTYPE_16BIT_MORE;
     advertData[idx++] = 0x00; advertData[idx++] = 0xFF;                     // KeyGo Service
     advertData[idx++] = LO_UINT16(BATT_SERV_UUID); advertData[idx++] = HI_UINT16(BATT_SERV_UUID);  // Battery Service
 
-    // [3] Manufacturer Specific: WCH + 电池电量% (1 字节)
-    advertData[idx++] = 0x06;
-    advertData[idx++] = GAP_ADTYPE_MANUFACTURER_SPECIFIC;
-    advertData[idx++] = LO_UINT16(WCH_COMPANY_ID);
-    advertData[idx++] = HI_UINT16(WCH_COMPANY_ID);
-    advertData[idx++] = 0x00;          // reserved
-    advertData[idx++] = battLevel;      // 电池 0~100%
+    // ─── 以下两段二选一，把电量塞进广播包 ───
+    //      需要哪种，取消注释对应段即可。
+
+    // [3a] Service Data (推荐): UUID=0x180F + 电池电量% (1 字节)
+    //      AD Structure: Length(1) + AD_Type(1) + UUID(2) + Data(1) = 5 字节
+    //      语义：我提供 0x180F 服务，当前电量=XX%
+    advertData[idx++] = 0x04;
+    advertData[idx++] = GAP_ADTYPE_SERV_DATA;                               // 0x16
+    advertData[idx++] = LO_UINT16(BATT_SERV_UUID);                          // Service UUID 0x180F 小端
+    advertData[idx++] = HI_UINT16(BATT_SERV_UUID);
+    advertData[idx++] = battLevel;                                          // 电池 0~100%
+
+    // [3b] Manufacturer Specific (备用): WCH + 电池电量% (1 字节)
+    //      需要时取消注释此段，同时注释掉上面的 [3a] 段
+    // advertData[idx++] = 0x06;
+    // advertData[idx++] = GAP_ADTYPE_MANUFACTURER_SPECIFIC;
+    // advertData[idx++] = LO_UINT16(WCH_COMPANY_ID);
+    // advertData[idx++] = HI_UINT16(WCH_COMPANY_ID);
+    // advertData[idx++] = 0x00;          // reserved
+    // advertData[idx++] = battLevel;      // 电池 0~100%
 
     advertLen = idx;
 }
