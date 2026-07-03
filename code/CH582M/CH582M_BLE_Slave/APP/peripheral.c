@@ -13,56 +13,48 @@
 #include "CONFIG.h"
 #include "devinfoservice.h"
 #include "gattprofile.h"
+#include "battery_service.h"
 #include "peripheral.h"
 #include "keygo_core.h"
 #include <stdlib.h>
-
-#define ADVERT_MFG_DATA_LEN  4
+#include <string.h>
 
 /* ─────────────────────────────────────────────────────────────────
  * 广播数据
  * ───────────────────────────────────────────────────────────────── */
 
-// 扫描响应
-static uint8_t scanRspData[] = {
-    // complete name: BLE-Key-Go
-    0x0B, // length = 1 + 10 = 11 = 0x0B
-    GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    'B','L','E','-','K','e','y','-','G','o',
-
-    0x05, // length of this data
-    GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE,
-    LO_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL),
-    HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL),
-    LO_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),
-    HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL),
-
-    // Tx power level
-    0x02, // length of this data
-    GAP_ADTYPE_POWER_LEVEL, 
-    0 // 0dBm
-};
+// 扫描响应（v3.13: 运行时动态构建，名称含 MAC 后 3 字节）
+#define SCAN_RSP_MAX_LEN  31
+static uint8_t scanRspData[SCAN_RSP_MAX_LEN];
+static uint8_t scanRspLen = 0;
 
 // 广播包
 static uint8_t advertData[] = {
-    // Flags
+    // Flags (必须保留)
     0x02, GAP_ADTYPE_FLAGS,
     GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
 
-    // Appearance: 通用手表 (0x00C1)
-    0x03, GAP_ADTYPE_APPEARANCE, // 长度: 0x03  (AD Type 1字节 + Appearance值 2字节)； 类型: 0x19      (GAP_ADTYPE_APPEARANCE)
-    LO_UINT16(0x00C1), HI_UINT16(0x00C1), // 值:   0xC1,0x00 (小端序 = 0x00C1 = 通用手表)
+    // Appearance  (保留，手机图标靠它)，实测优先，可改为 0x08C1(Car)/0x0240(Keyring)/0x0180(RC)
+    0x03, GAP_ADTYPE_APPEARANCE,
+    LO_UINT16(GAP_APPEARE_GENERIC_WATCH), HI_UINT16(GAP_APPEARE_GENERIC_WATCH), // 值:   0xC0,0x00 (小端序 = 0x00C0 = 通用手表)
+    // LO_UINT16(GAP_APPEARE_WATCH_SPORTS), HI_UINT16(GAP_APPEARE_WATCH_SPORTS), // 值:   0xC1,0x00 (小端序 = 0x00C1 = 运动手表)
+    // LO_UINT16(GAP_APPEARE_HID_BARCODE_SCANNER), HI_UINT16(GAP_APPEARE_HID_BARCODE_SCANNER), // 手柄 不显示
+    // LO_UINT16(GAP_APPEARE_GENERIC_HID), HI_UINT16(GAP_APPEARE_GENERIC_HID), // 鼠标 显示
+    // LO_UINT16(0x08C0), HI_UINT16(0x08C0),  // 汽车 不显示
+    // LO_UINT16(0x0200), HI_UINT16(0x0200),  // Tag 不显示
 
-    // 16-bit UUID list (incomplete)
+    // 16-bit UUID list (incomplete) Service UUID (保留，App 扫描依赖)
     0x03, GAP_ADTYPE_16BIT_MORE, 0x00, 0xFF,
+        // Service UUID (保留，App 扫描靠它)
 
-    // Manufacturer Specific: WCH
-    0x05, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    LO_UINT16(WCH_COMPANY_ID), HI_UINT16(WCH_COMPANY_ID),
-    0x00, 0x00
+    // Manufacturer: 去掉，无实际用途，节约广播包空间
+    // // Manufacturer Specific: WCH 
+    // 0x05, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+    // LO_UINT16(WCH_COMPANY_ID), HI_UINT16(WCH_COMPANY_ID),
+    // 0x00, 0x00
 };
 
-static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "KeyGo";
+static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "";  // v3.13: 运行时动态构建
 
 /* ─────────────────────────────────────────────────────────────────
  * 全局共享状态
@@ -116,12 +108,57 @@ static simpleProfileCBs_t Peripheral_SimpleProfileCBs = {
 };
 
 /*********************************************************************
+ * ────────────────────── 动态名称构建 ──────────────────────────────
+ * v3.13: scanRspData 和 attDeviceName 运行时动态构建，包含 MAC 后 3 字节
+ *********************************************************************/
+
+static void Peripheral_BuildBroadcastName(char *out, uint8_t outSize)
+{
+    snprintf(out, outSize, "KeyGo-%02X%02X%02X",
+             g_deviceMac[3], g_deviceMac[4], g_deviceMac[5]);
+}
+
+static void Peripheral_BuildScanRspData(void)
+{
+    char name[16];
+    Peripheral_BuildBroadcastName(name, sizeof(name));
+    uint8_t nameLen = (uint8_t)strlen(name);
+
+    uint8_t idx = 0;
+
+    scanRspData[idx++] = 1 + nameLen;                      // length
+    scanRspData[idx++] = GAP_ADTYPE_LOCAL_NAME_COMPLETE;   // type
+    memcpy(&scanRspData[idx], name, nameLen);              // "KeyGo-XXXXXX"
+    idx += nameLen;
+
+    scanRspData[idx++] = 0x05;                              // length
+    scanRspData[idx++] = GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE;
+    scanRspData[idx++] = LO_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL);
+    scanRspData[idx++] = HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL);
+    scanRspData[idx++] = LO_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL);
+    scanRspData[idx++] = HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL);
+
+    scanRspData[idx++] = 0x02;                              // length
+    scanRspData[idx++] = GAP_ADTYPE_POWER_LEVEL;
+    scanRspData[idx++] = 0;                                 // 0 dBm
+
+    scanRspLen = idx;
+}
+
+/*********************************************************************
  * ────────────────────── 初始化 ────────────────────────────────────
  *********************************************************************/
 
 void Peripheral_Init(void)
 {
     Peripheral_TaskID = TMOS_ProcessEventRegister(Peripheral_ProcessEvent);
+
+    GetMACAddress(g_deviceMac);
+
+    Peripheral_BuildScanRspData();
+    Peripheral_BuildBroadcastName((char*)attDeviceName, sizeof(attDeviceName));
+
+    PRINT("[INIT] Device Name: %s\n", attDeviceName);
 
     // ── GAP Role ──
     {
@@ -130,11 +167,7 @@ void Peripheral_Init(void)
         uint16_t desired_max         = DEFAULT_DESIRED_MAX_CONN_INTERVAL;
 
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv_enable);
-        GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scanRspData), scanRspData);
-
-        GetMACAddress(g_deviceMac);
-        advertData[11] = g_deviceMac[4]; // 这个好像是 MAC 写入索引
-        advertData[12] = g_deviceMac[5];
+        GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, scanRspLen, scanRspData);
 
         GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData);
         GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(uint16_t), &desired_min);
@@ -153,8 +186,9 @@ void Peripheral_Init(void)
     GATTServApp_AddService(GATT_ALL_SERVICES);
     DevInfo_AddService();
     SimpleProfile_AddService(GATT_ALL_SERVICES);
+    Battery_AddService();   // ★ v3.13: Battery Service (0x180F)
 
-    GGS_SetParameter(GGS_DEVICE_NAME_ATT, sizeof(attDeviceName), attDeviceName);
+    GGS_SetParameter(GGS_DEVICE_NAME_ATT, strlen((char*)attDeviceName), attDeviceName);
 
     {
         uint8_t zero1[SIMPLEPROFILE_CHAR1_LEN] = {0};
@@ -231,6 +265,12 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
         tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
         return (events ^ SBP_READ_RSSI_EVT);
+    }
+
+    if (events & SBP_BATTERY_CHECK_EVT) {
+        tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
+        Battery_UpdateLevel();
+        return (events ^ SBP_BATTERY_CHECK_EVT);
     }
 
     if (events & SBP_STATE_MACHINE_EVT) {
@@ -346,6 +386,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
         tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     KeyGo_GetRssiPeriodTicks());
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
+        tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
     }
@@ -370,6 +411,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
+        tmos_stop_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
         advRestartRetryCount = 0;

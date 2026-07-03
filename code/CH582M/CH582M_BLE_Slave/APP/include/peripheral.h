@@ -27,6 +27,7 @@ extern "C" {
 #define SBP_READ_RSSI_EVT           0x0004  // 读取 RSSI
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
 #define SBP_PHY_UPDATE_EVT          0x0010  // PHY 更新
+#define SBP_BATTERY_CHECK_EVT       0x0020  // ★ v3.13: 电池电量检测
 #define SBP_STATE_MACHINE_EVT       0x0080  // 状态机轮询
 #define SBP_GPIO_PULSE_END_EVT      0x0100  // GPIO 脉冲结束（非阻塞延迟）
 #define SBP_COMMAND_PARSE_EVT       0x0200  // 命令解析
@@ -39,6 +40,7 @@ extern "C" {
 #define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   连接参数更新
 #define SBP_ADV_RESTART_DELAY          320    // ★ v3.13: ~200ms advertising 恢复延迟（给 BLE Controller 缓冲时间）
 #define SBP_ADV_RESTART_MAX_RETRIES    3      // ★ v3.13: 最多重试 3 次（总计 ~800ms 恢复窗口）
+#define SBP_BATTERY_CHECK_PERIOD        48000  // ★ v3.13: ~30s 电池检测间隔
 
 // ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
 #define GPIO_PULSE_LOCK_TICKS          320    // ~200ms  解锁/锁车
