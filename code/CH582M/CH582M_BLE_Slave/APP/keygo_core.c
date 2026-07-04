@@ -110,6 +110,13 @@ static uint32_t g_lastCommandMs     = 0;
 // 命令处理
 static char     g_customName[21]    = {0};
 
+/* [LED_BEGIN] ──────── 后备箱 LED 闪烁状态机 ────────
+ *   g_ledBlinkLocked=1 时 KeyGo_Unlock/Lock 不会改变 LED 状态
+ *   g_ledTrunkBlinkToggle=0~9 共 10 次翻转 = 5 次亮灭 (500ms ON + 500ms OFF per cycle)
+ *   低功耗: 去掉 LED 时注释掉这两个变量 ——————————— [LED_END] */
+static uint8_t  g_ledBlinkLocked     = 0;
+static uint8_t  g_ledTrunkBlinkToggle = 0;
+
 /* ─────────────────────────────────────────────────────────────────
  * 前向声明
  * ───────────────────────────────────────────────────────────────── */
@@ -142,7 +149,17 @@ void KeyGo_GPIO_Init(void)
     GPIOA_ResetBits(PIN_KEYPOWER_GPIO);
 
     KeyGo_KeyPower(1);
-    PRINT("[GPIO] Initialized (PA4=UNLOCK, PA5=LOCK, PA6=TRUNK, PA7=KEY_POWER)\n");
+    /* ──────── [LED_BEGIN] PB4 LED 状态指示 ────────
+     * 电路: PB4 → 1kΩ 限流电阻 → LED 正极 (+) → LED 负极 (-) → GND
+     *   PB4 高电平 → 电流 PB4→电阻→LED→GND → LED 亮
+     *   PB4 低电平 → 无电位差 → LED 灭
+     * 低功耗注意事项: 后期量产需关闭 LED 时，搜索 [LED_BEGIN]/[LED_END]
+     *   标记删除/注释掉所有被标记的代码块即可完全移除 LED 功能。
+     *   这两行 (GPIOB_ModeCfg + ResetBits) 也要一起注释掉。
+     * ──────────────────────────────────────────── */
+    GPIOB_ModeCfg(GPIO_Pin_4, GPIO_ModeOut_PP_5mA);  // ★ 必须配置 push-pull 输出模式 (HAL 的 LED1_DDR 只设了方向位)
+    GPIOB_ResetBits(GPIO_Pin_4);                      // 初始状态 = 锁车 → LED 灭 (低电平)
+    PRINT("[GPIO] Initialized (PA4=UNLOCK, PA5=LOCK, PA6=TRUNK, PA7=KEY_POWER, PB4=LED)\n");
 }
 
 void KeyGo_Unlock(void)
@@ -151,6 +168,9 @@ void KeyGo_Unlock(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();  // ★ v3.15-#16: 看门狗启动时间
     g_pulsePinMask  = PIN_UNLOCK_GPIO;
+    /* [LED_BEGIN] 解锁 → PB4 高电平 = LED 亮
+     *   后备箱闪烁期间跳过 (g_ledBlinkLocked=1)，闪烁结束后恢复 [LED_END] */
+    if (!g_ledBlinkLocked) { GPIOB_SetBits(GPIO_Pin_4); }
     PRINT("[KEY] unlock\n");
     GPIOA_SetBits(PIN_UNLOCK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
@@ -162,6 +182,9 @@ void KeyGo_Lock(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();  // ★ v3.15-#16: 看门狗启动时间
     g_pulsePinMask  = PIN_LOCK_GPIO;
+    /* [LED_BEGIN] 锁车 → PB4 低电平 = LED 灭
+     *   后备箱闪烁期间跳过，闪烁结束后恢复 [LED_END] */
+    if (!g_ledBlinkLocked) { GPIOB_ResetBits(GPIO_Pin_4); }
     PRINT("[KEY] lock\n");
     GPIOA_SetBits(PIN_LOCK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
@@ -173,6 +196,14 @@ void KeyGo_Trunk(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();  // ★ v3.15-#16: 看门狗启动时间
     g_pulsePinMask  = PIN_TRUNK_GPIO;
+    /* [LED_BEGIN] 后备箱 → PB4 闪烁 5 次 (500ms ON / 500ms OFF ×5 周期 = 5s)
+     *   设置 g_ledBlinkLocked=1 防止闪烁期间 Unlock/Lock 覆盖 LED [LED_END] */
+    if (!g_ledBlinkLocked) {
+        g_ledBlinkLocked = 1;
+        g_ledTrunkBlinkToggle = 0;
+        GPIOB_SetBits(GPIO_Pin_4);                 // 第 1 个 500ms: LED ON (高电平)
+        tmos_start_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT, LED_TRUNK_BLINK_TICKS);
+    }
     PRINT("[KEY] trunk\n");
     GPIOA_SetBits(PIN_TRUNK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_TRUNK_TICKS);
@@ -195,6 +226,35 @@ void KeyGo_KeyPower(uint8_t on)
         GPIOA_SetBits(PIN_KEYPOWER_GPIO);
     else
         GPIOA_ResetBits(PIN_KEYPOWER_GPIO);
+}
+
+/* [LED_BEGIN] ──────── 后备箱 LED 闪烁 TMOS 回调 ────────
+ *   500ms 周期翻转 PB4，共 10 次翻转 = 5 次亮灭循环
+ *   完成后恢复 LED 到当前锁状态 (解锁=亮, 锁车=灭)
+ *   低功耗: 去掉 LED 时整个函数 + 声明一起注释掉 ──── [LED_END] */
+void KeyGo_LedTrunkBlinkHandler(void)
+{
+    g_ledTrunkBlinkToggle++;
+    if (g_ledTrunkBlinkToggle >= 10) {
+        /* 闪烁结束 → 恢复 LED 到当前锁状态 */
+        g_ledBlinkLocked = 0;
+        g_ledTrunkBlinkToggle = 0;
+        if (g_keyState == KSTATE_UNLOCKED) {
+            GPIOB_SetBits(GPIO_Pin_4);     // 解锁 → LED 亮 (高电平)
+        } else {
+            GPIOB_ResetBits(GPIO_Pin_4);   // 锁车 → LED 灭 (低电平)
+        }
+        PRINT("[LED] trunk blink end, restored to %s\n",
+              g_keyState == KSTATE_UNLOCKED ? "ON (HIGH)" : "OFF (LOW)");
+        return;
+    }
+    /* 翻转 LED: 奇数翻转 → OFF (低电平), 偶数翻转 → ON (高电平) */
+    if (g_ledTrunkBlinkToggle & 1) {
+        GPIOB_ResetBits(GPIO_Pin_4);   // odd → OFF
+    } else {
+        GPIOB_SetBits(GPIO_Pin_4);     // even → ON
+    }
+    tmos_start_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT, LED_TRUNK_BLINK_TICKS);
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -233,6 +293,10 @@ void KeyGo_ResetState(void)
     g_pulsePinMask    = 0;
     g_actionStartMs   = 0;   // ★ v3.15-#16: 看门狗时间戳清零
     g_manualCooldown  = 0;
+    /* [LED_BEGIN] 清理后备箱闪烁状态机，保持 LED 当前状态不变
+     *   断连/重连时不应改变 LED (锁车=灭, 解锁=亮 已反映真实状态) [LED_END] */
+    g_ledBlinkLocked  = 0;
+    g_ledTrunkBlinkToggle = 0;
 }
 
 static float UpdateKalman(float measurement)

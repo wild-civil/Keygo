@@ -344,6 +344,12 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         return (events ^ SBP_GPIO_PULSE_END_EVT);
     }
 
+    /* [LED_BEGIN] 后备箱 LED 闪烁回调 (500ms 周期翻转 PB4) [LED_END] */
+    if (events & SBP_LED_TRUNK_BLINK_EVT) {
+        KeyGo_LedTrunkBlinkHandler();
+        return (events ^ SBP_LED_TRUNK_BLINK_EVT);
+    }
+
     // ★ v3.13: advertising 重启兜底 — 延迟重试，避免 BLE Controller 偶发卡死
     if (events & SBP_ADV_RESTART_EVT) {
         uint8_t adv_state;
@@ -507,6 +513,8 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
         /* ★ v3.15-#15: 取消残留的断连锁车定时器（极速断连→重连→再断连） */
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
+        /* [LED_BEGIN] 取消残留的后备箱 LED 闪烁定时器 [LED_END] */
+        tmos_stop_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT);
         advRestartRetryCount = 0;
 
         KeyGo_ResetState();

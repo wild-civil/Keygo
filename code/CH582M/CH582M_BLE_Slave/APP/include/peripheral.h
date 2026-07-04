@@ -33,6 +33,11 @@ extern "C" {
 /* ★ v3.16-#4: SBP_COMMAND_PARSE_EVT (0x0200) 已移除 — 全代码库无引用，死定义
  *   命令解析直接通过 simpleProfileChangeCB → KeyGo_HandleCommand 同步执行，
  *   不需要 TMOS 事件。释放 0x0200 位供未来使用。 */
+/* [LED_BEGIN] ──────── 后备箱 LED 闪烁 ────────
+ *   复用 0x0200 位 — 直接操作 GPIO PB4，绕过 HAL LED 层避免竞态
+ *   500ms ON / 500ms OFF ×5 次 = 5s 总时长
+ *   低功耗: 去掉 LED 时注释掉这个事件 —──── [LED_END] */
+#define SBP_LED_TRUNK_BLINK_EVT     0x0200
 #define SBP_ADV_RESTART_EVT         0x0400  // ★ v3.13: advertising 重启兜底（BLE Controller 偶发卡死时重试）
 #define SBP_DISCONNECT_LOCK_EVT     0x0800  // ★ v3.15-#15: 断连延时锁车（c. disconnectLockMs）
 
@@ -48,6 +53,8 @@ extern "C" {
 // ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
 #define GPIO_PULSE_LOCK_TICKS          320    // ~200ms  解锁/锁车
 #define GPIO_PULSE_TRUNK_TICKS         3200    // ~2000ms  后备箱长按
+/* [LED_BEGIN] 后备箱 LED 闪烁半周期 (500ms = 800 ticks) [LED_END] */
+#define LED_TRUNK_BLINK_TICKS          800
 
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms

@@ -24,6 +24,9 @@ void KeyGo_Lock(void);
 void KeyGo_Trunk(void);
 void KeyGo_KeyPower(uint8_t on);
 void KeyGo_GPIO_PulseEnd(void);    // TMOS 事件回调：结束当前 GPIO 脉冲
+/* [LED_BEGIN] 后备箱 LED 闪烁 TMOS 回调 (每 500ms 翻转 PB4, 共 5 次)
+ *   低功耗: 去掉 LED 时注释掉此声明 [LED_END] */
+void KeyGo_LedTrunkBlinkHandler(void);
 
 // Kalman 滤波
 void KeyGo_ResetKalman(void);
