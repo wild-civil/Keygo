@@ -357,9 +357,9 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
         upper[i] = (cmd[i] >= 'a' && cmd[i] <= 'z') ? cmd[i] - 32 : cmd[i];
     }
 
-    g_manualCooldown  = 1;
-    g_lastCommandMs   = Peripheral_GetSystemMs();
-
+    /* ★ v3.15-fix1: 冷却期仅应在 GPIO 操作 (TRUNK/UNLOCK/LOCK) 后触发
+     *   NAME:xxx 和 STATUS 等请求不应占用冷却期
+     *   → 将 cooldown 移至各 GPIO 分支内部 */
     // NAME:xxx
     if (len > 5 && upper[0] == 'N' && upper[1] == 'A' && upper[2] == 'M' && upper[3] == 'E' && upper[4] == ':') {
         const char *name    = cmd + 5;
@@ -374,12 +374,18 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
 
     // TRUNK
     if (len >= 5 && upper[0] == 'T' && upper[1] == 'R' && upper[2] == 'U' && upper[3] == 'N' && upper[4] == 'K') {
+        /* ★ v3.15-fix1: 命令执行前设置冷却期，防止连续操作抖动 */
+        g_manualCooldown  = 1;
+        g_lastCommandMs   = Peripheral_GetSystemMs();
         KeyGo_Trunk();
         return;
     }
 
     // UNLOCK
     if (len >= 6 && upper[0] == 'U' && upper[1] == 'N' && upper[2] == 'L' && upper[3] == 'O' && upper[4] == 'C' && upper[5] == 'K') {
+        /* ★ v3.15-fix1: 冷却期仅在 GPIO 操作后触发 */
+        g_manualCooldown  = 1;
+        g_lastCommandMs   = Peripheral_GetSystemMs();
         g_keyState       = KSTATE_UNLOCKED;
         // ★ v3.6-fixH: 重置状态机计数器，防止冷却结束后累积的旧计数触发自动操作
         //   bug: 手动解锁后冷却期内计数未清零，冷却结束后状态机立即用累积计数覆盖手动状态
@@ -392,6 +398,9 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
 
     // LOCK
     if (len >= 4 && upper[0] == 'L' && upper[1] == 'O' && upper[2] == 'C' && upper[3] == 'K') {
+        /* ★ v3.15-fix1: 冷却期仅在 GPIO 操作后触发 */
+        g_manualCooldown  = 1;
+        g_lastCommandMs   = Peripheral_GetSystemMs();
         g_keyState       = KSTATE_LOCKED;
         // ★ v3.6-fixH: 同上，重置计数器
         g_unlockCounter  = 0;
@@ -556,7 +565,11 @@ void KeyGo_LoadConfig(void)
     }
 
     // 校验 magic
-    uint32_t magic = *((uint32_t*)buf);
+    /* ★ v3.15-fix3: 改用字节拼装替代指针强转 ((uint32_t*)buf)
+     *   Cortex-M0 不支持非对齐内存访问，栈上 buf 对齐非标准保证
+     *   若编译器未字对齐 buf，*(uint32_t*)buf 会触发 HardFault */
+    uint32_t magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                     ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
     if (magic != KEYGO_CFG_MAGIC) {
         PRINT("[CONFIG] No saved config (magic mismatch), using defaults\n");
         return;
@@ -571,14 +584,15 @@ void KeyGo_LoadConfig(void)
     }
 
     // 恢复配置
-    g_cfgUnlockThreshold  = *((int16_t*)(buf + 4));
-    g_cfgLockThreshold    = *((int16_t*)(buf + 6));
+    /* ★ v3.15-fix3: 字节拼装，避免未对齐访问 (LE) */
+    g_cfgUnlockThreshold  = (int16_t)((uint16_t)buf[4] | ((uint16_t)buf[5] << 8));
+    g_cfgLockThreshold    = (int16_t)((uint16_t)buf[6] | ((uint16_t)buf[7] << 8));
     g_cfgUnlockCount      = buf[8];
     g_cfgLockCount        = buf[9];
-    g_cfgDisconnectLockMs = *((uint16_t*)(buf + 10));
+    g_cfgDisconnectLockMs = (uint16_t)buf[10] | ((uint16_t)buf[11] << 8);
     // ★ v3.7: 读取 cooldownMs（buf[13-14]），旧格式此处为 0，需兜底
     {
-        uint16_t cd = *((uint16_t*)(buf + 13));
+        uint16_t cd = (uint16_t)buf[13] | ((uint16_t)buf[14] << 8);
         if (cd >= 2000 && cd <= 30000) {
             g_cfgManualCooldownMs = cd;
         } else {
@@ -605,18 +619,28 @@ void KeyGo_SaveConfig(void)
 
     uint8_t buf[16] = {0};
 
-    // Magic (4 bytes)
-    *((uint32_t*)buf) = KEYGO_CFG_MAGIC;
+    /* ★ v3.15-fix3: 字节写入替代指针强转，确保对齐安全 (LE) */
+    // Magic (4 bytes, LE)
+    buf[0] = (uint8_t)(KEYGO_CFG_MAGIC);
+    buf[1] = (uint8_t)(KEYGO_CFG_MAGIC >> 8);
+    buf[2] = (uint8_t)(KEYGO_CFG_MAGIC >> 16);
+    buf[3] = (uint8_t)(KEYGO_CFG_MAGIC >> 24);
 
-    // 配置值
-    *((int16_t*)(buf + 4))  = g_cfgUnlockThreshold;
-    *((int16_t*)(buf + 6))  = g_cfgLockThreshold;
+    // 配置值 (int16_t, LE)
+    buf[4] = (uint8_t)(g_cfgUnlockThreshold);
+    buf[5] = (uint8_t)(g_cfgUnlockThreshold >> 8);
+    buf[6] = (uint8_t)(g_cfgLockThreshold);
+    buf[7] = (uint8_t)(g_cfgLockThreshold >> 8);
     buf[8]  = g_cfgUnlockCount;
     buf[9]  = g_cfgLockCount;
-    *((uint16_t*)(buf + 10)) = g_cfgDisconnectLockMs;
+
+    // uint16_t disconnectLockMs (LE)
+    buf[10] = (uint8_t)(g_cfgDisconnectLockMs);
+    buf[11] = (uint8_t)(g_cfgDisconnectLockMs >> 8);
 
     // ★ v3.7: cooldownMs 存于 buf[13-14]（旧格式为 padding=0，兼容）
-    *((uint16_t*)(buf + 13)) = g_cfgManualCooldownMs;
+    buf[13] = (uint8_t)(g_cfgManualCooldownMs);
+    buf[14] = (uint8_t)(g_cfgManualCooldownMs >> 8);
 
     // Checksum: XOR over first 12 bytes（不含 cooldownMs，保持向后兼容）
     buf[12] = 0;
