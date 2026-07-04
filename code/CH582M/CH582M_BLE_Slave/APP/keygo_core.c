@@ -70,7 +70,8 @@ static float    g_filteredRSSI      = RSSI_UNINITIALIZED_F;
 static int16_t  g_rssiBuffer[8]     = {0};
 static uint8_t  g_rssiBufIdx        = 0;
 static uint8_t  g_spikeConsecutive  = 0;
-static int16_t  g_lastRawRSSI       = RSSI_UNINITIALIZED;
+/* ★ v3.15-fix8: float 类型与 Kalman 滤波器一致，避免 int→float 隐式截断歧义 */
+static float    g_lastRawRSSI       = RSSI_UNINITIALIZED_F;
 static uint8_t  g_rssiUpdated       = 0;    // ★ 新 Kalman 样本标记
 
 // 状态机
@@ -186,7 +187,7 @@ void KeyGo_ResetKalman(void)
 {
     InitKalmanFilter();
     g_spikeConsecutive = 0;
-    g_lastRawRSSI      = RSSI_UNINITIALIZED;
+    g_lastRawRSSI      = RSSI_UNINITIALIZED_F;
     g_filteredRSSI     = RSSI_UNINITIALIZED_F;
     g_latestRSSI       = RSSI_UNINITIALIZED;
 }
@@ -230,8 +231,10 @@ void KeyGo_RssiProcess(int8_t rssi)
     g_latestRSSI = rssi;
     float r = (float)rssi;
 
-    if (g_lastRawRSSI != RSSI_UNINITIALIZED) {
-        if (r - g_lastRawRSSI > RSSI_SPIKE_THRESHOLD_DBM || g_lastRawRSSI - r > RSSI_SPIKE_THRESHOLD_DBM) {
+    /* ★ v3.15-fix8: g_lastRawRSSI 改为 float，类型统一后使用 fabsf 简化判断 */
+    if (g_lastRawRSSI != RSSI_UNINITIALIZED_F) {
+        float delta = r - g_lastRawRSSI;
+        if (delta > RSSI_SPIKE_THRESHOLD_DBM || delta < -RSSI_SPIKE_THRESHOLD_DBM) {
             g_spikeConsecutive++;
         } else {
             g_spikeConsecutive = 0;
@@ -372,8 +375,8 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
         return;
     }
 
-    // TRUNK
-    if (len >= 5 && upper[0] == 'T' && upper[1] == 'R' && upper[2] == 'U' && upper[3] == 'N' && upper[4] == 'K') {
+    // TRUNK (精确匹配 5 字节，排除 TRUNKED/TRUNKING 等)
+    if (len == 5 && upper[0] == 'T' && upper[1] == 'R' && upper[2] == 'U' && upper[3] == 'N' && upper[4] == 'K') {
         /* ★ v3.15-fix1: 命令执行前设置冷却期，防止连续操作抖动 */
         g_manualCooldown  = 1;
         g_lastCommandMs   = Peripheral_GetSystemMs();
@@ -381,8 +384,8 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
         return;
     }
 
-    // UNLOCK
-    if (len >= 6 && upper[0] == 'U' && upper[1] == 'N' && upper[2] == 'L' && upper[3] == 'O' && upper[4] == 'C' && upper[5] == 'K') {
+    // UNLOCK (精确匹配 6 字节，排除 UNLOCKED/UNLOCKING 等)
+    if (len == 6 && upper[0] == 'U' && upper[1] == 'N' && upper[2] == 'L' && upper[3] == 'O' && upper[4] == 'C' && upper[5] == 'K') {
         /* ★ v3.15-fix1: 冷却期仅在 GPIO 操作后触发 */
         g_manualCooldown  = 1;
         g_lastCommandMs   = Peripheral_GetSystemMs();
@@ -396,8 +399,8 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
         return;
     }
 
-    // LOCK
-    if (len >= 4 && upper[0] == 'L' && upper[1] == 'O' && upper[2] == 'C' && upper[3] == 'K') {
+    // LOCK (精确匹配 4 字节，排除 LOCKED/LOCKER/LOCKING 等)
+    if (len == 4 && upper[0] == 'L' && upper[1] == 'O' && upper[2] == 'C' && upper[3] == 'K') {
         /* ★ v3.15-fix1: 冷却期仅在 GPIO 操作后触发 */
         g_manualCooldown  = 1;
         g_lastCommandMs   = Peripheral_GetSystemMs();

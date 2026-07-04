@@ -1275,6 +1275,14 @@ export const useBleStore = defineStore('ble', {
 
         await new Promise(r => setTimeout(r, 1000))
 
+        /* ★ v3.15-fix6: 1s GATT 就绪等待期间，用户可能断开连接
+         *   此时 this.connected 已为 false/deviceId 已清空，继续操作会抛异常
+         *   → 提前退出，避免在已断开的设备上调用 BLE API */
+        if (!this.connected || this.deviceId !== deviceId) {
+          console.log('[Store] 连接等待期间已断开，跳过 GATT 初始化')
+          return false
+        }
+
         // ★ 启用 Status 特征值的 Notify（每次连接时需重新启用）
         await notifyBLECharacteristicValueChange(
           deviceId,
