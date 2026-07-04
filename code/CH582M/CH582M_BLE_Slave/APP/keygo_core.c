@@ -474,6 +474,17 @@ uint16_t KeyGo_GetRssiPeriodTicks(void)
     return (uint16_t)ticks;
 }
 
+/* ★ v3.15-#15: 断连锁车延时 ms → TMOS ticks 转换
+ *   1 TMOS tick ≈ 0.625ms → ticks = ms × 8 / 5
+ *   g_cfgDisconnectLockMs 上限 60000ms → 96000 ticks, uint16_t 安全
+ *   dlockMs == 0 时返回 0（调用方判断为立即锁车，不启动定时器） */
+uint16_t KeyGo_GetDisconnectLockTicks(void)
+{
+    if (g_cfgDisconnectLockMs == 0) return 0;
+    uint32_t ticks = (uint32_t)g_cfgDisconnectLockMs * MS_TO_TMOS_TICK_NUM / MS_TO_TMOS_TICK_DEN;
+    return (uint16_t)ticks;
+}
+
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.5: FF01 配置解析 (KeyGo_ParseConfig)
  *

@@ -32,6 +32,7 @@ extern "C" {
 #define SBP_GPIO_PULSE_END_EVT      0x0100  // GPIO 脉冲结束（非阻塞延迟）
 #define SBP_COMMAND_PARSE_EVT       0x0200  // 命令解析
 #define SBP_ADV_RESTART_EVT         0x0400  // ★ v3.13: advertising 重启兜底（BLE Controller 偶发卡死时重试）
+#define SBP_DISCONNECT_LOCK_EVT     0x0800  // ★ v3.15-#15: 断连延时锁车（c. disconnectLockMs）
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
 #define SBP_PERIODIC_EVT_PERIOD        1600   // ~1s  系统状态更新

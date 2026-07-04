@@ -1242,6 +1242,10 @@ export const useBleStore = defineStore('ble', {
     async connect(deviceId, deviceName = '') {
       try {
         this._restoreConfig()  // ★ 确保连接前配置已恢复
+        /* ★ v3.15-#20: 销毁旧监听器后重新注册（防止跨连接残留）
+         *   _destroyGlobalListeners() 会设 _listenersInited=false，
+         *   随后 _ensureGlobalListeners() 重新绑定 → 每次 connect() 都是干净状态 */
+        this._destroyGlobalListeners()
         this._ensureGlobalListeners()  // ★ v3.6: 确保全局监听器已注册
 
         // ★ v3.6-fixE: 用户手动连接时，清除所有自动重连状态（防止冲突）

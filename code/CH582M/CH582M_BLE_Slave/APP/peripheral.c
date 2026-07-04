@@ -16,6 +16,7 @@
 #include "battery_service.h"
 #include "peripheral.h"
 #include "keygo_core.h"
+#include "CH58x_common.h"  /* ★ v3.15-#18: SYS_ResetExecute() 用于 advertising 耗尽时复位 */
 #include <stdlib.h>
 #include <string.h>
 
@@ -360,11 +361,42 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
                   advRestartRetryCount, SBP_ADV_RESTART_MAX_RETRIES, adv_state);
             tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
         } else {
-            // 重试耗尽，打印警告
+            /* ★ v3.15-#18: 重试耗尽 → 触发系统软件复位
+             *   BLE Controller 持续卡死无法恢复 advertising 时，设备进入静默状态：
+             *   不广播、不能连接、不干活。复位是唯一可靠的恢复手段。
+             *   ─────────────────────────────────────────────────────────────
+             *   触发路径：User → 走出范围断连 → BLE Controller 状态异常 →
+             *             advertising 无法启动 → 重试 3 次(~800ms)仍失败 →
+             *             SYS_ResetExecute() → 完整固件重新初始化
+             *   ─────────────────────────────────────────────────────────────
+             *   代价：设备短暂的 ~2s 不可用（复位 + 重新初始化），远优于永久死锁
+             *   SYS_ResetExecute() 内部执行：PFIC 系统复位 → 等同于上电复位 */
             advRestartRetryCount = 0;
-            PRINT("[GAP] advertising FAILED after %d retries, giving up\n", SBP_ADV_RESTART_MAX_RETRIES);
+            PRINT("[GAP] advertising FAILED after %d retries, triggering system reset\n",
+                  SBP_ADV_RESTART_MAX_RETRIES);
+            SYS_ResetExecute();
         }
         return (events ^ SBP_ADV_RESTART_EVT);
+    }
+
+    /* ★ v3.15-#15: 断连锁车延时回调 — 定时器到期后检查是否仍断连，是则锁车 */
+    if (events & SBP_DISCONNECT_LOCK_EVT) {
+        /* 仅当设备仍处于断连状态且 KeyGo 仍标记为已解锁时才执行锁车
+         *  如果期间重连成功，Peripheral_LinkEstablished 已调用
+         *  tmos_stop_task 取消此事件，不会到达这里。
+         *  双重校验（+g_deviceConnected）防止极端竞态：
+         *  取消指令发出前 TMOS 已调度此事件 → 仍会触发 → 但 g_deviceConnected==1 跳过 */
+        if (!g_deviceConnected && g_keyState == KSTATE_UNLOCKED) {
+            PRINT("[SAFETY] disconnect lock timer expired, locking\n");
+            KeyGo_Lock();
+            g_keyState = KSTATE_LOCKED;
+            /* ★ 锁车完成后刷新 Status Notify（advertising 已在断连时启动，
+             *  但 Status 需要反映最新锁车状态） */
+            KeyGo_NotifyStatus();
+        } else {
+            PRINT("[SAFETY] disconnect lock timer expired, but device reconnected — skip\n");
+        }
+        return (events ^ SBP_DISCONNECT_LOCK_EVT);
     }
 
     return 0;
@@ -437,6 +469,10 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         KeyGo_ResetState();
 
+        /* ★ v3.15-#15: 重连成功后取消断连锁车定时器
+         *   用户在 dlockMs 窗口内重连 → 取消自动锁车，状态保持不变 */
+        tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
+
         tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,      SBP_PERIODIC_EVT_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
         tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     KeyGo_GetRssiPeriodTicks());
@@ -469,14 +505,29 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         /* ★ v3.14: 电池检测持续运行（断开后不停），确保广播包电量实时更新 */
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
+        /* ★ v3.15-#15: 取消残留的断连锁车定时器（极速断连→重连→再断连） */
+        tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
         advRestartRetryCount = 0;
 
         KeyGo_ResetState();
 
+        /* ★ v3.15-#15: 断连锁车支持可配置延时
+         *   传统行为（dlockMs==0）：立即锁车，向后兼容
+         *   延时模式（dlockMs>0）：启动定时器延迟锁车，允许断连后快速重连恢复
+         *   重连成功后由 Peripheral_LinkEstablished 取消此定时器
+         *   定时器到期时若仍断连则执行锁车 */
         if (g_keyState == KSTATE_UNLOCKED) {
-            PRINT("[SAFETY] disconnected while unlocked, auto lock\n");
-            KeyGo_Lock();
-            g_keyState = KSTATE_LOCKED;
+            uint16_t dlockTicks = KeyGo_GetDisconnectLockTicks();
+            if (dlockTicks > 0) {
+                PRINT("[SAFETY] disconnected unlocked, scheduling auto lock in %lums\n",
+                      (unsigned long)g_cfgDisconnectLockMs);
+                tmos_start_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT, dlockTicks);
+            } else {
+                // dlockMs==0 → 立即锁车（传统行为，向后兼容）
+                PRINT("[SAFETY] disconnected while unlocked, auto lock\n");
+                KeyGo_Lock();
+                g_keyState = KSTATE_LOCKED;
+            }
         }
 
         // ★ v3.13: 立即启动 advertising（BLE Controller 正常情况）

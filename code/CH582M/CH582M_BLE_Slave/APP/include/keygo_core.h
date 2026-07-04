@@ -63,6 +63,10 @@ uint8_t KeyGo_ParseConfig(const char *line);
 // ★ v3.13: RSSI 读取周期 ms → TMOS ticks 转换（供 peripheral.c 使用）
 uint16_t KeyGo_GetRssiPeriodTicks(void);
 
+// ★ v3.15-#15: 断连锁车延时 ms → TMOS ticks 转换（供 peripheral.c 使用）
+//   返回 (uint16_t) 保证 ≤ 65535 ticks (~41s), g_cfgDisconnectLockMs 上限 60000ms
+uint16_t KeyGo_GetDisconnectLockTicks(void);
+
 // ── ★ v3.5.1: 配置持久化到 DataFlash (解决设备重启后阈值丢失) ──
 //    保存到 DataFlash 0x77000 (在 BLE SNV 区域 0x77E00 之前，安全不冲突)
 #define KEYGO_CFG_ADDR          0x00077000
