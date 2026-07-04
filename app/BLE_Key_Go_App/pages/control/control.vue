@@ -7,6 +7,11 @@
     </view>
 
     <template v-else>
+      <!-- ★ v3.15-#21: Status Notify 过期警告 — 设备连接中但推送超时（静默断连） -->
+      <view class="stale-warning" v-if="bleStore.statusStale">
+        <text>⚠️ 设备状态已过期，连接可能已中断</text>
+      </view>
+
       <!-- ★ 车辆状态大卡 -->
       <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
         <view class="car-icon">🚗</view>
@@ -214,6 +219,19 @@ async function handleCooldownChange(value) {
   flex-direction: column;
   align-items: center;
   gap: 16rpx;
+  margin-bottom: 24rpx;
+}
+
+/* ★ v3.15-#21: Status 过期警告 — 比断连警告更严重（无声中断） */
+.stale-warning {
+  background: rgba(255, 69, 58, 0.12);
+  border: 1rpx solid rgba(255, 69, 58, 0.3);
+  border-radius: 16rpx;
+  padding: 20rpx 24rpx;
+  text-align: center;
+  color: var(--accent-red);
+  font-size: 26rpx;
+  font-weight: 600;
   margin-bottom: 24rpx;
 }
 

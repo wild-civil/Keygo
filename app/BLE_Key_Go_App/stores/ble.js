@@ -1358,6 +1358,12 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
+      // ★ v3.15-#19: 清理 Status 看门狗（用户主动断开，无需标记过期）
+      if (this._statusStaleTimer) {
+        clearTimeout(this._statusStaleTimer)
+        this._statusStaleTimer = null
+      }
+      this.statusStale = false
 
       this._scanAborted = true
       const targetId = this.deviceId
