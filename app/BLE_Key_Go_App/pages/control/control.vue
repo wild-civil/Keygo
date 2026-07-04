@@ -13,21 +13,22 @@
         <view class="car-status">
           <text class="car-state-text">{{ bleStore.stateText }}</text>
           <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
-          <!-- ★ v3.15: 电池电量 — 默认 emoji 图标
+          <!-- ▼ ★ v3.15: 电池电量 — 默认 emoji 图标
                如需切换为 CSS 电池组件，注释下面 18 行，取消注释 19~24 行 -->
           <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
             <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
             <text class="batt-text">{{ bleStore.batteryText }}</text>
           </view>
-          <!-- ▼ v3.15-css: CSS 电池组件（备用方案） ──────────────────
-          <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
+		  <!-- ▲ v3.15-css emoji 图标─────────────────────────────────── -->
+          <!-- ▼ v3.15-css: CSS 电池组件（备用方案） ────────────────── -->
+          <!-- <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
             <view class="batt-shell">
               <view class="batt-fill" :style="{ width: bleStore.batteryLevel + '%' }"></view>
             </view>
             <view class="batt-cap"></view>
             <text class="batt-text">{{ bleStore.batteryText }}</text>
-          </view>
-          ▲ v3.15-css ────────────────────────────────────────────── -->
+          </view> -->
+          <!-- ▲ v3.15-css CSS 电池图标────────────────────────────────────────────── -->
           <text class="car-cooldown" v-if="bleStore.manualCooldown">⏳ RSSI 状态机冷却中...</text>
         </view>
       </view>

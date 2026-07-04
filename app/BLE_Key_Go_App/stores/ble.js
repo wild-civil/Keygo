@@ -91,6 +91,9 @@ export const useBleStore = defineStore('ble', {
     _notifyTimer: null,
     _reconnectGuard: 0,            // 重连会话锁，蓝牙关闭时递增
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
+    /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
+     *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
+    _configDirty: false,
   }),
 
   getters: {
@@ -850,10 +853,31 @@ export const useBleStore = defineStore('ble', {
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
 
-      /* ★ v3.15: 统一后处理（Notify + 电池 + 序列号 + 配置恢复）
-       *   _onDidConnect 封装了重连 & 手动连接共同的 80% 初始化逻辑
-       *   任何步骤失败都不阻塞流程（均为 .catch 静默降级） */
-      await this._onDidConnect('reconnect')
+      // ★ v3.11-fix4: 重连成功后恢复本地设备名称
+      //   不能依赖内存中的 serialNumber（disconnect 会清空），必须主动读取
+      readSerialNumber(this.deviceId, 5000).then(sn => {
+        this.serialNumber = sn
+        this._resolveDeviceName(sn)
+        // ★ v3.12: 重连成功后加载设备专属配置 + 下发到固件（per-phone 个性化）
+        this._loadConfigForDevice(sn)
+        this._syncConfigToDevice()
+      }).catch(err => {
+        console.log('[Store] 重连后读取序列号失败（名称/配置恢复跳过）:', err?.message || err)
+      })
+
+      // 恢复 Notify
+      await new Promise(r => setTimeout(r, 800))
+      await notifyBLECharacteristicValueChange(
+        this.deviceId,
+        BLE_CONFIG.serviceUUID,
+        BLE_CONFIG.statusCharUUID,
+        true
+      )
+      // ★ v3.14: 启用电池电量 Notify + 非阻塞读取初始电量
+      notifyBLECharacteristicValueChange(
+        this.deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
+      ).catch(() => {})
+      this._fetchBatteryLevel(this.deviceId).catch(() => {})
     },
 
     /**
@@ -872,60 +896,6 @@ export const useBleStore = defineStore('ble', {
       } catch (e) {
         console.log('[Store] GATT 读取电池电量失败（设备可能未注册 Battery Service）:', e.message)
       }
-    },
-
-    /**
-     * ★ v3.15: 连接建立后的统一后处理
-     *   _doReconnect 和 connect 共用，消除 ~40 行重复代码。
-     *   负责：GATT 延迟等待 → Notify 启用 → 电池读取 → 序列号恢复
-     *
-     * @param {'connect'|'reconnect'} source - 连接来源
-     */
-    async _onDidConnect(source = 'reconnect') {
-      const deviceId = this.deviceId
-      const label = source === 'reconnect' ? '重连' : '手动连接'
-
-      // 1. 延迟等待 GATT 数据库就绪
-      const delayMs = source === 'reconnect' ? 800 : 1000
-      await new Promise(r => setTimeout(r, delayMs))
-
-      // 2. Status Notify（非致命：连接已建立，失败不中断）
-      notifyBLECharacteristicValueChange(
-        deviceId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true
-      ).catch(err => {
-        console.warn(`[Store] ${label}后 Status Notify 失败（连接仍有效）:`, err?.errMsg || err?.message)
-      })
-
-      // 3. Battery Notify + 非阻塞读取电量
-      notifyBLECharacteristicValueChange(
-        deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
-      ).catch(() => {})
-      this._fetchBatteryLevel(deviceId).catch(() => {})
-
-      // 4. 序列号读取 + 设备名/配置恢复（非阻塞）
-      readSerialNumber(deviceId, 5000).then(sn => {
-        this.serialNumber = sn
-        console.log('[Store] 设备序列号（FF04）:', sn)
-
-        // 手动连接时与广播包指纹比对
-        if (source === 'connect' && this.fingerprint &&
-            sn.slice(-6).toUpperCase() !== this.fingerprint.toUpperCase()) {
-          console.warn('[Store] ⚠ 序列号指纹不匹配！广播:', this.fingerprint, '序列号:', sn.slice(-6))
-        }
-
-        this._resolveDeviceName(sn)
-        this._loadConfigForDevice(sn)
-        this._syncConfigToDevice()
-      }).catch(err => {
-        const msg = err?.message || String(err)
-        if (/not support|no characteristic|FF04 not in/i.test(msg)) {
-          console.log(`[Store] 固件不支持 FF04 序列号（需升级 v3.3）:`, msg)
-        } else if (/timeout/i.test(msg)) {
-          console.log(`[Store] 序列号读取超时:`, msg)
-        } else {
-          console.warn(`[Store] ${label}后序列号读取失败:`, msg)
-        }
-      })
     },
 
     /**
@@ -1043,18 +1013,16 @@ export const useBleStore = defineStore('ble', {
     /**
      * ★ v3.12: 持久化当前配置到本地存储（按设备序列号分 key）
      *
-     *   存储 key: ble_config_v1_{SN}
-     *   每个手机对每个 KeyGo 设备有独立的阈值配置
-     *   设备固件不持久化阈值（RAM-only），由手机连接后自动下发
+     *   ★ v3.15: key 策略对齐 _restoreConfig —— 两级回退
+     *     1. serialNumber 就绪 → ble_config_v1_{SN}  （设备专属，支持多设备）
+     *     2. serialNumber 为空 → ble_config_v1        （旧版通用 key 兜底）
+     *     原因：部分固件未升级 v3.3，FF04 不支持 GATT Read，
+     *           若 _persistConfig 因无 SN 而跳过 → 配置永久丢失（无恢复路径）
+     *     _restoreConfig 已内置迁移逻辑：下次 SN 就绪时会从 ble_config_v1 迁移到专属 key
      */
     _persistConfig() {
-      if (!this.serialNumber) {
-        console.warn('[Store] _persistConfig: 序列号未就绪，跳过持久化')
-        return
-      }
       try {
-        const key = 'ble_config_v1_' + this.serialNumber
-        uni.setStorageSync(key, {
+        const config = {
           unlockThreshold: this.unlockThreshold,
           lockThreshold: this.lockThreshold,
           unlockCountRequired: this.unlockCountRequired,
@@ -1063,8 +1031,16 @@ export const useBleStore = defineStore('ble', {
           disconnectLockDelayMs: this.disconnectLockDelayMs,
           kalmanR: this.kalmanR,
           // ★ v3.12: cooldown_ms 不在这里持久化（设备级参数，由固件 DataFlash 管理）
-        })
-        console.log('[Store] 配置已持久化 (' + key.slice(-12) + '): unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold)
+        }
+        /* ★ v3.15: 优先 SN 专属 key，无 SN 时回退通用 key
+         *   - 有 SN: ble_config_v1_{SN}，每个设备独立配置（per-phone 个性化）
+         *   - 无 SN: ble_config_v1，兼容未升级 v3.3 的固件（多设备会共享，属降级行为） */
+        const key = this.serialNumber
+          ? 'ble_config_v1_' + this.serialNumber
+          : 'ble_config_v1'
+        this._configDirty = false
+        uni.setStorageSync(key, config)
+        console.log('[Store] 配置已持久化 (' + (this.serialNumber ? key.slice(-12) : '全局KEY') + '): unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold)
       } catch (e) {
         console.warn('[Store] 配置持久化失败:', e)
       }
@@ -1297,10 +1273,49 @@ export const useBleStore = defineStore('ble', {
 
         // ★ v3.6: 全局监听器已处理连接状态变化和特征值数据（不再重复注册）
 
-        /* ★ v3.15: 统一后处理（Notify + 电池 + 序列号 + 配置恢复）
-         *   _onDidConnect 封装了重连 & 手动连接共同的 80% 初始化逻辑
-         *   任何步骤失败都不阻塞流程（均为 .catch 静默降级） */
-        await this._onDidConnect('connect')
+        await new Promise(r => setTimeout(r, 1000))
+
+        // ★ 启用 Status 特征值的 Notify（每次连接时需重新启用）
+        await notifyBLECharacteristicValueChange(
+          deviceId,
+          BLE_CONFIG.serviceUUID,
+          BLE_CONFIG.statusCharUUID,
+          true
+        )
+
+        // ★ v3.14: 启用电池电量 Notify + 非阻塞读取初始电量
+        notifyBLECharacteristicValueChange(
+          deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
+        ).catch(() => {})
+        this._fetchBatteryLevel(deviceId).catch(() => {})
+
+        // ★ v3.3: 后台非阻塞读取设备序列号（不阻塞连接流程）
+        readSerialNumber(deviceId, 5000).then(sn => {
+          this.serialNumber = sn
+          console.log('[Store] 设备序列号（FF04）:', sn)
+          // 验证：与广播包指纹比对
+          if (this.fingerprint && sn.slice(-6).toUpperCase() !== this.fingerprint.toUpperCase()) {
+            console.warn('[Store] ⚠ 序列号指纹不匹配！广播:', this.fingerprint, '序列号:', sn.slice(-6))
+          }
+          // ★ v3.8: SN 就绪 → 从本地恢复设备自定义名称
+          this._resolveDeviceName(sn)
+          // ★ v3.12: SN 就绪 → 加载设备专属配置 + 下发到固件（per-phone 个性化）
+          this._loadConfigForDevice(sn)
+          this._syncConfigToDevice()
+        }).catch(err => {
+          const msg = err?.message || String(err)
+          // ★ 根据错误类型分类处理
+          if (/not support|no characteristic|FF04 not in/i.test(msg)) {
+            console.log('[Store] 固件不支持 FF04 序列号（需升级 v3.3）:', msg)
+          } else if (/timeout/i.test(msg)) {
+            console.log('[Store] 序列号读取超时:', msg)
+          } else {
+            console.warn('[Store] 序列号读取失败:', msg)
+          }
+        })
+
+        // ★ v3.13: 手机端 RSSI 转发已移除，固件 GAP 读取为主通道
+        //   RSSI 显示数据来自固件 FF02 Notify (r/f 字段)
 
         return true
       } catch (err) {
@@ -1354,6 +1369,7 @@ export const useBleStore = defineStore('ble', {
       this.customDeviceName = ''
       this.serialNumber = ''              // ★ v3.3
       this.fingerprint = ''               // ★ v3.3
+      this._configDirty = false           // ★ v3.15: 重置脏标记（新连接重新初始化）
       this.deviceState = 'LOCKED'
       this.rssi = -999
       this.filteredRssi = -999
