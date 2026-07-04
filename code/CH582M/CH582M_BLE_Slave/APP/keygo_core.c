@@ -21,6 +21,9 @@
 //         bug: 固件冷却 3s 到期后状态机恢复运行，仅 ~5.5s 后即可自动覆盖手动操作，
 //               用户看到 App 显示"冷却 8s"但实际只有 3s 有效
 #define STATUS_JSON_MAX_LEN         200  // ★ 加了 cd 字段，json 更长，从 180 扩到 200
+/* ★ v3.16-#26: 固件版本号 — 通过 FF02 Notify JSON 字段 "v" 上报
+ *   App 可据此做兼容性检查，提示用户升级固件 */
+#define KEYGO_FW_VERSION           "3.16"
 
 /* ★ v3.15: TMOS 时间转换常量
  *   TMOS tick ≈ 0.625ms = 5/8 ms → ms = ticks × 5 ÷ 8, ticks = ms × 8 ÷ 5 */
@@ -365,14 +368,15 @@ void KeyGo_NotifyStatus(void)
     }
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"v\":\"%s\"}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
         (int)(g_filteredRSSI != RSSI_UNINITIALIZED_F ? (int)g_filteredRSSI : RSSI_UNINITIALIZED),
         d2,
         (int)g_cfgManualCooldownMs,  // ★ v3.7: 上报当前冷却时间，App 端同步
-        (int)g_cfgKalmanR);           // ★ v3.13: 上报 kalmanR，App 同步 kalmanR
+        (int)g_cfgKalmanR,           // ★ v3.13: 上报 kalmanR，App 同步 kalmanR
+        KEYGO_FW_VERSION);           /* ★ v3.16-#26: 固件版本号上报，App 可做兼容性检查 */
 
     if (n > 0 && n < (int)sizeof(json)) {
         attHandleValueNoti_t noti;
@@ -385,6 +389,12 @@ void KeyGo_NotifyStatus(void)
                 GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
             }
         }
+    }
+    /* ★ v3.16-#10: JSON 截断或编码错误 → 打印警告，方便排查
+     *   snprintf 返回值 >= sizeof(json) 表示 JSON 被截断（超长自定义名称、
+     *   extreme 配置值等场景），此前静默丢弃没有任何提示 */
+    else {
+        PRINT("[WARN] NotifyStatus JSON trunc: snprintf=%d, max=%d\n", n, (int)sizeof(json));
     }
 }
 
@@ -568,8 +578,15 @@ uint8_t KeyGo_ParseConfig(const char *line)
             if (val >= KALMAN_R_MIN && val <= KALMAN_R_MAX && g_cfgKalmanR != (uint8_t)val) {
                 g_cfgKalmanR = (uint8_t)val;
                 g_kalman.R = (float)g_cfgKalmanR;
+                /* ★ v3.16-#24: R 值变更后重置滤波器内部状态
+                 *   bug: 旧 P 已收敛到极小值 → 新 R 几乎无效果（假平滑）
+                 *   例如从 kr=1（极快响应）切到 kr=50（极度平滑），
+                 *   旧 P≈0 → K≈0 → 新测量值权重极低 → 滤波器"卡死"
+                 *   重置 P + init → 下一帧 Kalman 用新 R 重新初始化 X */
+                g_kalman.P = KALMAN_DEFAULT_P;
+                g_kalman.init = 0;
                 changed = 1;
-                PRINT("[KALMAN] R updated to %d\n", val);
+                PRINT("[KALMAN] R updated to %d, filter reset\n", val);
             }
         }
         // ★ v3.7 / v3.12: 冷却时间 cooldown_ms (长度 11)

@@ -390,9 +390,9 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             PRINT("[SAFETY] disconnect lock timer expired, locking\n");
             KeyGo_Lock();
             g_keyState = KSTATE_LOCKED;
-            /* ★ 锁车完成后刷新 Status Notify（advertising 已在断连时启动，
-             *  但 Status 需要反映最新锁车状态） */
-            KeyGo_NotifyStatus();
+            /* ★ v3.16-#23: 断连状态下 NotifyStatus 无法发出（函数首行检查
+             *   !g_deviceConnected → 立即 return），此处不调用避免死代码。
+             *   锁车状态变更在下次重连后的首条周期性 Status Notify 中反映。 */
         } else {
             PRINT("[SAFETY] disconnect lock timer expired, but device reconnected — skip\n");
         }

@@ -429,6 +429,13 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._statusStaleTimer)
         this._statusStaleTimer = null
       }
+      /* ★ v3.16-#22: 清理 Notify 缓冲区（同 _handleDisconnect 的保护逻辑）
+       *   蓝牙关闭后缓冲区残留的半截 JSON 可能在恢复后被误解析 */
+      if (this._notifyTimer) {
+        clearTimeout(this._notifyTimer)
+        this._notifyTimer = null
+      }
+      this._notifyBuffer = ''
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
@@ -577,6 +584,14 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._statusStaleTimer)
         this._statusStaleTimer = null
       }
+      /* ★ v3.16-#22: 清理 Notify 缓冲区，防止跨连接 JSON 污染
+       *   断连时缓冲区残留的半截 JSON 片段可能在重连后被误解析，
+       *   导致状态显示错乱（如 connected=1 但实际刚重连还未收到 Status） */
+      if (this._notifyTimer) {
+        clearTimeout(this._notifyTimer)
+        this._notifyTimer = null
+      }
+      this._notifyBuffer = ''
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999

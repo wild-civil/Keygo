@@ -30,7 +30,9 @@ extern "C" {
 #define SBP_BATTERY_CHECK_EVT       0x0020  // ★ v3.13: 电池电量检测
 #define SBP_STATE_MACHINE_EVT       0x0080  // 状态机轮询
 #define SBP_GPIO_PULSE_END_EVT      0x0100  // GPIO 脉冲结束（非阻塞延迟）
-#define SBP_COMMAND_PARSE_EVT       0x0200  // 命令解析
+/* ★ v3.16-#4: SBP_COMMAND_PARSE_EVT (0x0200) 已移除 — 全代码库无引用，死定义
+ *   命令解析直接通过 simpleProfileChangeCB → KeyGo_HandleCommand 同步执行，
+ *   不需要 TMOS 事件。释放 0x0200 位供未来使用。 */
 #define SBP_ADV_RESTART_EVT         0x0400  // ★ v3.13: advertising 重启兜底（BLE Controller 偶发卡死时重试）
 #define SBP_DISCONNECT_LOCK_EVT     0x0800  // ★ v3.15-#15: 断连延时锁车（c. disconnectLockMs）
 
