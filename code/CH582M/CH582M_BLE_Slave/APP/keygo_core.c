@@ -41,6 +41,21 @@
 #define KALMAN_DEFAULT_P           1.0f   // 初始估计协方差
 #define KALMAN_INITIAL_X          -80.0f  // 初始状态估计 (~-80dBm 典型空旷区)
 
+/* ★ v3.15-#12: 参数合法范围常量 — 替代原代码中的裸数字（魔术数字）
+ *   用于配置下发 (ParseConfig) 和 Flash 加载 (LoadConfig) 时的边界检查。
+ *   改动仅是给已有的数字起名，不改变任何逻辑行为。 */
+#define RSSI_THRESHOLD_MIN       -100      // RSSI 阈值合法性下限 (dBm)
+#define COUNT_MIN                   1      // 解锁/锁车累计次数下限
+#define COUNT_MAX                  30      // 解锁/锁车累计次数上限
+#define KALMAN_R_MIN                1      // Kalman 滤波器 R 值下限
+#define KALMAN_R_MAX               50      // Kalman 滤波器 R 值上限
+#define RSSI_PERIOD_MIN_MS        100      // RSSI 读取周期下限 (ms)
+#define RSSI_PERIOD_MAX_MS       2000      // RSSI 读取周期上限 (ms)
+#define COOLDOWN_MIN_MS          2000      // 手动命令冷却时间下限 (ms)
+#define COOLDOWN_MAX_MS         30000      // 手动命令冷却时间上限 (ms)
+#define DLOCK_MAX_MS            60000      // 断连自动锁车延时上限 (ms)
+#define COOLDOWN_DEFAULT_MS      8000      // 冷却时间默认值 (旧格式兜底)
+
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.5: 可运行时配置的 RSSI 阈值 (替代原来的 #define 硬编码)
  *    由 App 通过 FF01 下发 "unlock=-30 lock=-45 uc=2..." 更新
@@ -500,7 +515,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
         else if (keyLen == 2 && tmos_memcmp(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
         // ★ v3.13: interval 改为控制固件 RSSI 读取周期 (原为 App 轮询间隔，已废弃)
         else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) {
-            if (val >= 100 && val <= 2000 && g_cfgRssiPeriodMs != (uint16_t)val) {
+            if (val >= RSSI_PERIOD_MIN_MS && val <= RSSI_PERIOD_MAX_MS && g_cfgRssiPeriodMs != (uint16_t)val) {
                 g_cfgRssiPeriodMs = (uint16_t)val;
                 changed = 1;
             }
@@ -508,7 +523,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
         else if (keyLen == 5 && tmos_memcmp(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
         // ★ v3.13: Kalman R 值 (kr)
         else if (keyLen == 2 && tmos_memcmp(p, "kr", 2)) {
-            if (val >= 1 && val <= 50 && g_cfgKalmanR != (uint8_t)val) {
+            if (val >= KALMAN_R_MIN && val <= KALMAN_R_MAX && g_cfgKalmanR != (uint8_t)val) {
                 g_cfgKalmanR = (uint8_t)val;
                 g_kalman.R = (float)g_cfgKalmanR;
                 changed = 1;
@@ -519,7 +534,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
         //   ★ 设备级参数（写入 DataFlash，所有连接此设备的手机共用）
         //   ★ 仅在值实际变化且合法时标记 cooldown_changed（触发 Flash 保存）
         else if (keyLen == 11 && tmos_memcmp(p, "cooldown_ms", 11)) {
-            if (val >= 2000 && val <= 30000 && g_cfgManualCooldownMs != (uint16_t)val) {
+            if (val >= COOLDOWN_MIN_MS && val <= COOLDOWN_MAX_MS && g_cfgManualCooldownMs != (uint16_t)val) {
                 g_cfgManualCooldownMs = (uint16_t)val;
                 cooldown_changed = 1;
                 changed = 1;
@@ -596,19 +611,19 @@ void KeyGo_LoadConfig(void)
     // ★ v3.7: 读取 cooldownMs（buf[13-14]），旧格式此处为 0，需兜底
     {
         uint16_t cd = (uint16_t)buf[13] | ((uint16_t)buf[14] << 8);
-        if (cd >= 2000 && cd <= 30000) {
+        if (cd >= COOLDOWN_MIN_MS && cd <= COOLDOWN_MAX_MS) {
             g_cfgManualCooldownMs = cd;
         } else {
-            g_cfgManualCooldownMs = 8000;  // 旧格式或越界 → 默认 8s
+            g_cfgManualCooldownMs = COOLDOWN_DEFAULT_MS;  // 旧格式或越界 → 默认 8s
         }
     }
 
-    // 合理性校验
-    if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < -100) g_cfgUnlockThreshold = -45;
-    if (g_cfgLockThreshold >= 0 || g_cfgLockThreshold < -100)     g_cfgLockThreshold   = -65;
-    if (g_cfgUnlockCount < 1 || g_cfgUnlockCount > 30)           g_cfgUnlockCount     = 2;
-    if (g_cfgLockCount < 1 || g_cfgLockCount > 30)               g_cfgLockCount       = 3;
-    if (g_cfgDisconnectLockMs > 60000)                           g_cfgDisconnectLockMs = 5000;
+    // 合理性校验（使用命名常量替代魔术数字）
+    if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < RSSI_THRESHOLD_MIN) g_cfgUnlockThreshold = -45;
+    if (g_cfgLockThreshold >= 0 || g_cfgLockThreshold < RSSI_THRESHOLD_MIN)     g_cfgLockThreshold   = -65;
+    if (g_cfgUnlockCount < COUNT_MIN || g_cfgUnlockCount > COUNT_MAX)           g_cfgUnlockCount     = 2;
+    if (g_cfgLockCount < COUNT_MIN || g_cfgLockCount > COUNT_MAX)               g_cfgLockCount       = 3;
+    if (g_cfgDisconnectLockMs > DLOCK_MAX_MS)                                   g_cfgDisconnectLockMs = 5000;
 
     PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d\n",
           g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,

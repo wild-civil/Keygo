@@ -56,6 +56,7 @@ export const useBleStore = defineStore('ble', {
     rssi: -999,
     filteredRssi: -999,
     batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
+    statusStale: false,            // ★ v3.15-#13: 超时未收到 Status Notify → 连接可能已中断
     unlockThreshold: -45,
     lockThreshold: -65,
     hystDb: 5,
@@ -94,6 +95,9 @@ export const useBleStore = defineStore('ble', {
     /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
      *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
     _configDirty: false,
+    /* ★ v3.15-#13: Status Notify 看门狗 — 超过 3s 未收到 FF02 推送则标记过期
+     *   设备可能静默断开但 App 未感知，UI 可据此提示"连接可能已中断" */
+    _statusStaleTimer: null,
   }),
 
   getters: {
@@ -420,10 +424,16 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
+      // ★ v3.15-#13: 清理 Status 看门狗（已确认断开，无需标记过期）
+      if (this._statusStaleTimer) {
+        clearTimeout(this._statusStaleTimer)
+        this._statusStaleTimer = null
+      }
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
       this.filteredRssi = -999
+      this.statusStale = false
       this.reconnectMode = 'paused'
       this.reconnectNextDelay = 0
     },
@@ -562,10 +572,16 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
+      // ★ v3.15-#13: 清理 Status 看门狗（已确认断开）
+      if (this._statusStaleTimer) {
+        clearTimeout(this._statusStaleTimer)
+        this._statusStaleTimer = null
+      }
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
       this.filteredRssi = -999
+      this.statusStale = false
       this.batteryLevel = -1        // ★ v3.14: 断连重置电量
 
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
@@ -1465,6 +1481,28 @@ export const useBleStore = defineStore('ble', {
       if (data.cd !== undefined && data.cd >= 2000 && data.cd <= 30000) {
         this.manualCooldownMs = data.cd
       }
+
+      // ★ v3.15-#13: 每次收到有效 Status 后重置看门狗
+      this._resetStatusStaleTimer()
+    },
+
+    /**
+     * ★ v3.15-#13: 重置 Status Notify 看门狗
+     *   设备每 ~1s 推送一次 FF02 Notify，超过 3s 未收到 → 标记过期
+     */
+    _resetStatusStaleTimer() {
+      this.statusStale = false
+      if (this._statusStaleTimer) {
+        clearTimeout(this._statusStaleTimer)
+      }
+      this._statusStaleTimer = setTimeout(() => {
+        // 仅在仍处于"已连接"状态且未明确断开时标记过期
+        if (this.connected) {
+          console.warn('[Store] Status Notify 超时，设备可能静默断连')
+          this.statusStale = true
+        }
+        this._statusStaleTimer = null
+      }, 3000)  // 3s = 3 × 固件 1s 推送周期，留足余量
     },
 
     // ==================== 命令 (v3.2) ====================
