@@ -380,6 +380,22 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             advRestartRetryCount = 0;
             PRINT("[GAP] advertising FAILED after %d retries, triggering system reset\n",
                   SBP_ADV_RESTART_MAX_RETRIES);
+
+            /* ★ v3.16-P1: 复位前将所有控制 GPIO 拉低
+             *   问题：SYS_ResetExecute() → PFIC 系统复位 → 所有 GPIO 回退到
+             *         输入+内部上拉(弱高电平) → PA4~PA7 不确定、PB4 LED 短暂亮起
+             *   修复：提前将控制引脚拉低为输出低电平，确保复位窗口内输出安全状态
+             *   ─────────────────────────────────────────────────────────────
+             *   引脚说明：
+             *     PA4 = UNLOCK 控制线,  PA5 = LOCK 控制线
+             *     PA6 = TRUNK 控制线,    PA7 = KEY_POWER 控制线
+             *     PB4 = LED 指示灯 (高电平=亮, 低电平=灭)
+             *   ─────────────────────────────────────────────────────────────
+             *   GPIO_Pin_4/5/6/7 = (1<<4)~(1<<7) 在 PA 和 PB 端口上值是相同的，
+             *   所以可以直接用 GPIO_Pin_4 操作 PA4 和 PB4 */
+            GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+            GPIOB_ResetBits(GPIO_Pin_4);
+
             SYS_ResetExecute();
         }
         return (events ^ SBP_ADV_RESTART_EVT);

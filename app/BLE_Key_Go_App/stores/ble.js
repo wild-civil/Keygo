@@ -883,6 +883,10 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
+      this._reconnectGuard = 0   /* ★ v3.16-P1: 连接成功，所有旧重连会话已失效，归零重置
+                                  *   之前的 _reconnectGuard 值（如 5, 42, 28347...）
+                                  *   在日志中会让人误以为是 bug，其实它们已经没用了，
+                                  *   归零后视觉干净，下次断连从 1 开始递增 */
 
       // ★ v3.11-fix4: 重连成功后恢复本地设备名称
       //   不能依赖内存中的 serialNumber（disconnect 会清空），必须主动读取

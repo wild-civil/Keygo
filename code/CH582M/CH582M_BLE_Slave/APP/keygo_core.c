@@ -65,6 +65,19 @@
  *   看门狗周期 = 最长脉冲(trunk=2s) × 2 + 余量 = 4s，TMOS 未响应则强制清零 */
 #define ACTION_WATCHDOG_MS         4000      // GPIO 脉冲看门狗超时 (ms)
 
+/* ★ v3.16-P1: 字符串相等判断封装 — 解决 tmos_memcmp 语义陷阱
+ *   ─────────────────────────────────────────────────────────────────
+ *   问题：TMOS SDK 的 tmos_memcmp(a,b,n) 返回值与标准 C 的 memcmp 完全相反！
+ *       • tmos_memcmp  → TRUE (非零) = 相等，FALSE (零) = 不相等
+ *       • memcmp       → 0 = 相等，非零 = 不相等
+ *   如果新成员或将来移植时把两者搞混，会导致 if 条件完全写反，全线 bug。
+ *
+ *   解决：统一用 KEYGO_STREQ 宏做字符串相等判断，语义自明：
+ *       if (KEYGO_STREQ(p, "unlock", 6))  → "p 的前 6 字节等于 'unlock'？"
+ *   将来即使 SDK 升级 / 移植到其他平台，只需改这一处宏定义即可。
+ *   ───────────────────────────────────────────────────────────────── */
+#define KEYGO_STREQ(ptr, str, n)    tmos_memcmp((ptr), (str), (n))
+
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.5: 可运行时配置的 RSSI 阈值 (替代原来的 #define 硬编码)
  *    由 App 通过 FF01 下发 "unlock=-30 lock=-45 uc=2..." 更新
@@ -625,20 +638,20 @@ uint8_t KeyGo_ParseConfig(const char *line)
         }
 
         // ── 匹配 key 并更新对应变量 ──
-        if      (keyLen == 6 && tmos_memcmp(p, "unlock", 6))   { g_cfgUnlockThreshold = (int16_t)val; changed = 1; }
-        else if (keyLen == 4 && tmos_memcmp(p, "lock", 4))     { g_cfgLockThreshold = (int16_t)val;   changed = 1; }
-        else if (keyLen == 2 && tmos_memcmp(p, "uc", 2))       { g_cfgUnlockCount = (uint8_t)val;     changed = 1; }
-        else if (keyLen == 2 && tmos_memcmp(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
+        if      (keyLen == 6 && KEYGO_STREQ(p, "unlock", 6))   { g_cfgUnlockThreshold = (int16_t)val; changed = 1; }
+        else if (keyLen == 4 && KEYGO_STREQ(p, "lock", 4))     { g_cfgLockThreshold = (int16_t)val;   changed = 1; }
+        else if (keyLen == 2 && KEYGO_STREQ(p, "uc", 2))       { g_cfgUnlockCount = (uint8_t)val;     changed = 1; }
+        else if (keyLen == 2 && KEYGO_STREQ(p, "lc", 2))       { g_cfgLockCount = (uint8_t)val;       changed = 1; }
         // ★ v3.13: interval 改为控制固件 RSSI 读取周期 (原为 App 轮询间隔，已废弃)
-        else if (keyLen == 8 && tmos_memcmp(p, "interval", 8)) {
+        else if (keyLen == 8 && KEYGO_STREQ(p, "interval", 8)) {
             if (val >= RSSI_PERIOD_MIN_MS && val <= RSSI_PERIOD_MAX_MS && g_cfgRssiPeriodMs != (uint16_t)val) {
                 g_cfgRssiPeriodMs = (uint16_t)val;
                 changed = 1;
             }
         }
-        else if (keyLen == 5 && tmos_memcmp(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
+        else if (keyLen == 5 && KEYGO_STREQ(p, "dlock", 5))    { g_cfgDisconnectLockMs = (uint16_t)val; changed = 1; }
         // ★ v3.13: Kalman R 值 (kr)
-        else if (keyLen == 2 && tmos_memcmp(p, "kr", 2)) {
+        else if (keyLen == 2 && KEYGO_STREQ(p, "kr", 2)) {
             if (val >= KALMAN_R_MIN && val <= KALMAN_R_MAX && g_cfgKalmanR != (uint8_t)val) {
                 g_cfgKalmanR = (uint8_t)val;
                 g_kalman.R = (float)g_cfgKalmanR;
@@ -656,7 +669,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
         // ★ v3.7 / v3.12: 冷却时间 cooldown_ms (长度 11)
         //   ★ 设备级参数（写入 DataFlash，所有连接此设备的手机共用）
         //   ★ 仅在值实际变化且合法时标记 cooldown_changed（触发 Flash 保存）
-        else if (keyLen == 11 && tmos_memcmp(p, "cooldown_ms", 11)) {
+        else if (keyLen == 11 && KEYGO_STREQ(p, "cooldown_ms", 11)) {
             if (val >= COOLDOWN_MIN_MS && val <= COOLDOWN_MAX_MS && g_cfgManualCooldownMs != (uint16_t)val) {
                 g_cfgManualCooldownMs = (uint16_t)val;
                 cooldown_changed = 1;
