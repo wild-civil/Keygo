@@ -49,7 +49,7 @@
 #define HAL_KEY                             TRUE
 #endif
 #ifndef HAL_LED
-#define HAL_LED                             TRUE
+#define HAL_LED                             FALSE   /* KeyGo 自行管理 PB4 LED，关闭 HAL LED 子系统以免极性冲突 */
 #endif
 
 /* 【MAC】使用芯片出厂 MAC */

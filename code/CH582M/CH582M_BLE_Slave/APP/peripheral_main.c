@@ -182,28 +182,6 @@ int main(void)
 #endif
     SetSysClock(CLK_SOURCE_PLL_60MHz);
 
-    /* ★★★ v3.16: WWDG 中断模式 — 软看门狗 2.5s ★★★
-     *
-     *  ┌─ WWDG 配置 ─────────────────────────────────────────────┐
-     *  │                                                         │
-     *  │  时钟源:   系统主频 / 131072 = 60MHz / 131072 ≈ 457.8Hz │
-     *  │  每拍时间: 1 / 457.8Hz ≈ 2.1845ms                      │
-     *  │  计数器:   26 → 255 需要 (255-26)=229 拍                 │
-     *  │  溢出时间: 229 × 2.1845ms ≈ 500ms                       │
-     *  │                                                         │
-     *  │  WWDG_ResetCfg(DISABLE) ← 溢出不硬件复位                 │
-     *  │  WWDG_ITCfg(ENABLE)     ← 溢出触发中断 ISR               │
-     *  │  WWDG_SetCounter(26)    ← 初值 → ~500ms 后首次溢出       │
-     *  │                                                         │
-     *  └─────────────────────────────────────────────────────────┘
-     *
-     *  ISR 每 500ms 检查 g_mainLoopAlive → 连续 5 次为 0 → 软件复位
-     *  更多细节见本文件头部 WDOG_BAT_IRQHandler 的注释
-     */
-    WWDG_ResetCfg(DISABLE);     /* 禁用溢出→硬件复位（557ms 会误杀 BLE 连接事件） */
-    WWDG_ITCfg(ENABLE);         /* 启用溢出→中断（进入 WDOG_BAT_IRQHandler）     */
-    WWDG_SetCounter(26);        /* 计数器初值 → ~500ms 后首次溢出                    */
-
 #if(defined(HAL_SLEEP)) && (HAL_SLEEP == TRUE)
     GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
@@ -218,6 +196,32 @@ int main(void)
     HAL_Init();
     GAPRole_PeripheralInit();
     Peripheral_Init();
+
+    /* ★ v3.16-fix: WWDG 放到 init 完成后才启动
+     *   ─────────────────────────────────────────────────────────
+     *   bug: WWDG 在 main() 入口处启动后，漫长的初始化流程
+     *        (CH58X_BLEInit + DataFlash SNV 读写 + GATT 服务注册
+     *         + KeyGo_LoadConfig 的 EEPROM_READ) 可能耗时超过 2.5s，
+     *        导致 ISR 连续读到 g_mainLoopAlive==0 → 触发复位。
+     *
+     *   symptom: 设备重启时 LED 闪三下（3 次复位循环），且最终
+     *            PB4 因复位时序不确定，LED 可能停留在高电平亮起状态。
+     *
+     *   fix: 把 WWDG 启动推迟到所有初始化完成之后，确保进入主循环
+     *        后 g_mainLoopAlive 能在第一个 500ms 周期内被设为 1，
+     *        不会误触发复位。同时显式同步 LED 到当前锁状态。
+     *   ───────────────────────────────────────────────────────── */
+    WWDG_ResetCfg(DISABLE);
+    WWDG_ITCfg(ENABLE);
+    WWDG_SetCounter(26);
+
+    /* LED 最终同步：确保 LED 反映实际锁状态 */
+    if (g_keyState == KSTATE_UNLOCKED) {
+        GPIOB_SetBits(GPIO_Pin_4);     /* 解锁 → LED 亮 (高电平) */
+    } else {
+        GPIOB_ResetBits(GPIO_Pin_4);   /* 锁车 → LED 灭 (低电平) */
+    }
+
     Main_Circulation();
 }
 
