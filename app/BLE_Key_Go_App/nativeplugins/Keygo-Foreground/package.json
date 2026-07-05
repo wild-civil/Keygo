@@ -20,7 +20,8 @@
         "android.permission.WAKE_LOCK",
         "android.permission.POST_NOTIFICATIONS"
       ],
-      "abis": []
+      "abis": [],
+      "integrateType": "none"
     }
   }
 }
