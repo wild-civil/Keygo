@@ -1,0 +1,30 @@
+{
+  "name": "Keygo-Foreground",
+  "id": "Keygo-Foreground",
+  "version": "1.0.0",
+  "description": "KeyGo 前台服务插件，保持 Android 后台 BLE 重连活跃，防止 Doze 冻结",
+  "_dp_type": "nativeplugin",
+  "_dp_nativeplugin": {
+    "android": {
+      "plugins": [
+        {
+          "type": "module",
+          "name": "Keygo-Foreground",
+          "class": "com.keygo.foreground.ForegroundPlugin"
+        }
+      ],
+      "hooksClass": "",
+      "permissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+        "android.permission.WAKE_LOCK",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
+      "abis": [
+        "armeabi-v7a",
+        "arm64-v8a",
+        "x86"
+      ]
+    }
+  }
+}

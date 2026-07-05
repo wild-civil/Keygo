@@ -38,9 +38,15 @@ onShow(() => {
   themeStore.onAppShow()
 })
 
-// ★ App 进入后台 → 停止轮询省电
+// ★ App 进入后台 → 停止轮询省电 + 确保前台服务运行（Android BLE 保活）
 onHide(() => {
   themeStore.onAppHide()
+  // ★ v3.17: 如果处于连接/重连模式，确保前台服务在后台运行
+  //   这是兜底保护：正常情况下 connect/_doReconnect 成功后已启动，
+  //   但若之前启动失败，onHide 时再尝试一次
+  if (bleStore.connected || bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused') {
+    bleStore._ensureForegroundService()
+  }
 })
 </script>
 

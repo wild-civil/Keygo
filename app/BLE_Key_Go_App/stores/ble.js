@@ -36,6 +36,11 @@ import {
   isNativeBroken,
 } from '@/utils/ble-native.js'
 
+import {
+  startForegroundService,
+  stopForegroundService,
+} from '@/utils/foreground-service.js'
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -81,6 +86,9 @@ export const useBleStore = defineStore('ble', {
     reconnectMode: 'idle',        // 'idle' | 'active' | 'paused' | 'dormant'
     reconnectAttempt: 0,          // 当前重连次数
     reconnectNextDelay: 0,        // 下次重连等待秒数（UI 显示用）
+
+    // ★ v3.17: 前台服务状态（Android 保活）
+    _foregroundServiceActive: false,
 
     // ★ v3.11: 全局单例监听器（只在 store 初始化时注册一次）
     _listenersInited: false,
@@ -443,6 +451,48 @@ export const useBleStore = defineStore('ble', {
       this.statusStale = false
       this.reconnectMode = 'paused'
       this.reconnectNextDelay = 0
+    },
+
+    /**
+     * ★ v3.17: 启动前台服务（Android 保活）
+     *
+     * 调用时机：
+     *   - BLE 连接成功后
+     *   - 重连成功后
+     *   - App 进入后台时（兜底）
+     *
+     * 幂等：如果已启动则跳过
+     */
+    async _ensureForegroundService() {
+      if (this._foregroundServiceActive) return
+      // 非 Android 平台静默跳过
+      try {
+        const result = await startForegroundService()
+        this._foregroundServiceActive = result === true
+        if (result) {
+          console.log('[Store] 🔒 前台服务已启动')
+        }
+      } catch (e) {
+        console.warn('[Store] 前台服务启动失败:', e?.message || e)
+      }
+    },
+
+    /**
+     * ★ v3.17: 停止前台服务（Android 保活）
+     *
+     * 调用时机：用户主动断开连接时
+     * 注意：异常断连（_handleDisconnect）不停止前台服务！
+     */
+    async _stopForegroundService() {
+      if (!this._foregroundServiceActive) return
+      try {
+        await stopForegroundService()
+        console.log('[Store] 🔓 前台服务已停止')
+      } catch (e) {
+        console.warn('[Store] 前台服务停止失败:', e?.message || e)
+      } finally {
+        this._foregroundServiceActive = false
+      }
     },
 
     /**
@@ -883,6 +933,8 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
+      // ★ v3.17: 连接成功后启动前台服务（Android 保活）
+      this._ensureForegroundService()
       this._reconnectGuard = 0   /* ★ v3.16-P1: 连接成功，所有旧重连会话已失效，归零重置
                                   *   之前的 _reconnectGuard 值（如 5, 42, 28347...）
                                   *   在日志中会让人误以为是 bug，其实它们已经没用了，
@@ -1294,6 +1346,8 @@ export const useBleStore = defineStore('ble', {
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
+        // ★ v3.17: 连接成功后启动前台服务（Android 保活）
+        this._ensureForegroundService()
 
         // ★ v3.3: 从扫描缓存中提取设备指纹
         const cached = this.devices.find(d => d.deviceId === deviceId)
@@ -1415,6 +1469,8 @@ export const useBleStore = defineStore('ble', {
       }
       // ★ v3.6: 精准清理全局监听器，避免泄残留 listener
       this._destroyGlobalListeners()
+      // ★ v3.17: 用户主动断开 → 停止前台服务
+      this._stopForegroundService()
       this.connected = false
       this.deviceId = ''
       this.deviceName = ''
