@@ -20,11 +20,7 @@
         "android.permission.WAKE_LOCK",
         "android.permission.POST_NOTIFICATIONS"
       ],
-      "abis": [
-        "armeabi-v7a",
-        "arm64-v8a",
-        "x86"
-      ]
+      "abis": []
     }
   }
 }

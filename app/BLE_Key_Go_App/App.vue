@@ -11,6 +11,10 @@ import CustomTabBar from '@/components/CustomTabBar.vue'
 import { useThemeStore } from '@/stores/theme.js'
 import { useBleStore } from '@/stores/ble.js'
 import { initBluetooth } from '@/utils/ble.js'
+import {
+  getPluginStatus,
+  requestNotificationPermission,
+} from '@/utils/foreground-service.js'
 
 const themeStore = useThemeStore()
 const bleStore = useBleStore()
@@ -20,6 +24,20 @@ onLaunch(() => {
 
   // ★ 初始化主题（读取持久化 → 检测系统主题 → 监听变化 → 启动 auto 轮询）
   themeStore.init()
+
+  // ★ v3.17.1: 诊断前台服务插件状态
+  const pluginStatus = getPluginStatus()
+  console.log('[App] 前台服务插件状态:', JSON.stringify(pluginStatus))
+
+  // ★ v3.17.1: Android 13+ 请求通知权限（前台服务必须）
+  //   即使当前未连接设备，提前请求权限避免后续阻塞
+  requestNotificationPermission().then((granted) => {
+    console.log('[App] 通知权限结果:', granted ? '已授予' : '未授予')
+    if (!granted) {
+      // 失败不阻塞：即使没权限，startForeground 也会跑，只是通知不显示
+      console.warn('[App] ⚠ 未获得通知权限，前台服务通知可能不会显示')
+    }
+  })
 
   // ★ v3.11-fix3: 初始化蓝牙适配器，传入 onAllowing 回调
   //   当蓝牙关闭时自动弹出系统弹窗，用户点「允许」→ 立即亮绿 banner（与 nRF Connect 一致）

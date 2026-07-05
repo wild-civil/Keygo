@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -29,6 +30,7 @@ public class ForegroundService extends Service {
     private static final String CHANNEL_ID = "keygo_foreground_channel";
     private static final String CHANNEL_NAME = "KeyGo 后台服务";
     private static final int NOTIFICATION_ID = 1001;
+    private static final String TAG = "KeyGo-Foreground";
 
     private PowerManager.WakeLock wakeLock;
 
@@ -43,8 +45,24 @@ public class ForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification();
-        startForeground(NOTIFICATION_ID, notification);
+        try {
+            // ★ v3.17.1: 先检查通知权限（Android 13+）
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    android.util.Log.w(TAG,
+                        "POST_NOTIFICATIONS 权限未授予，startForeground 通知可能不显示");
+                    // 不阻断：即使没权限，startForeground 也会成功，只是通知不显示
+                }
+            }
+
+            Notification notification = buildNotification();
+            startForeground(NOTIFICATION_ID, notification);
+            android.util.Log.i(TAG, "ForegroundService started (foreground), WakeLock="
+                + (wakeLock != null && wakeLock.isHeld()));
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "onStartCommand failed: " + e.getMessage(), e);
+        }
         return START_STICKY;
     }
 
@@ -110,14 +128,19 @@ public class ForegroundService extends Service {
     // ==================== WakeLock ====================
 
     private void acquireWakeLock() {
-        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        if (pm != null) {
-            wakeLock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "KeyGo::BleKeepAlive"
-            );
-            wakeLock.setReferenceCounted(false);
-            wakeLock.acquire();
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "KeyGo::BleKeepAlive"
+                );
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+                android.util.Log.i(TAG, "WakeLock acquired: PARTIAL_WAKE_LOCK");
+            }
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "WakeLock acquire failed: " + e.getMessage());
         }
     }
 
@@ -125,6 +148,7 @@ public class ForegroundService extends Service {
         if (wakeLock != null && wakeLock.isHeld()) {
             try {
                 wakeLock.release();
+                android.util.Log.i(TAG, "WakeLock released");
             } catch (RuntimeException ignored) {
                 // WakeLock 可能已被系统回收
             }
@@ -144,8 +168,10 @@ public class ForegroundService extends Service {
             } else {
                 context.startService(intent);
             }
+            android.util.Log.i(TAG, "Service start intent sent");
         } catch (Exception e) {
-            android.util.Log.e("KeyGo-Foreground", "start failed: " + e.getMessage());
+            android.util.Log.e(TAG, "start failed: " + e.getMessage(), e);
+            throw new RuntimeException("ForegroundService start failed", e);
         }
     }
 
@@ -156,8 +182,30 @@ public class ForegroundService extends Service {
         Intent intent = new Intent(context, ForegroundService.class);
         try {
             context.stopService(intent);
+            android.util.Log.i(TAG, "Service stop intent sent");
         } catch (Exception e) {
-            android.util.Log.e("KeyGo-Foreground", "stop failed: " + e.getMessage());
+            android.util.Log.e(TAG, "stop failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * ★ v3.17.1: 检查前台服务是否正在运行
+     */
+    public static boolean isServiceRunning(Context context) {
+        try {
+            android.app.ActivityManager manager = (android.app.ActivityManager)
+                context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (manager == null) return false;
+            for (android.app.ActivityManager.RunningServiceInfo service :
+                 manager.getRunningServices(Integer.MAX_VALUE)) {
+                if (ForegroundService.class.getName().equals(
+                        service.service.getClassName())) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "isRunning check failed: " + e.getMessage());
+        }
+        return false;
     }
 }

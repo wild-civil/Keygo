@@ -39,6 +39,7 @@ import {
 import {
   startForegroundService,
   stopForegroundService,
+  getPluginStatus,
 } from '@/utils/foreground-service.js'
 
 export const useBleStore = defineStore('ble', {
@@ -89,6 +90,7 @@ export const useBleStore = defineStore('ble', {
 
     // ★ v3.17: 前台服务状态（Android 保活）
     _foregroundServiceActive: false,
+    _foregroundServiceFailCount: 0,       // 失败次数（超过上限不再重试）
 
     // ★ v3.11: 全局单例监听器（只在 store 初始化时注册一次）
     _listenersInited: false,
@@ -461,19 +463,35 @@ export const useBleStore = defineStore('ble', {
      *   - 重连成功后
      *   - App 进入后台时（兜底）
      *
-     * 幂等：如果已启动则跳过
+     * 幂等 + 重试限制：成功后不再重试，失败最多尝试 3 次
      */
     async _ensureForegroundService() {
       if (this._foregroundServiceActive) return
-      // 非 Android 平台静默跳过
+      if (this._foregroundServiceFailCount >= 3) {
+        // 已经失败 3 次，放弃
+        return
+      }
+
       try {
         const result = await startForegroundService()
-        this._foregroundServiceActive = result === true
-        if (result) {
-          console.log('[Store] 🔒 前台服务已启动')
+        if (result === true) {
+          this._foregroundServiceActive = true
+          this._foregroundServiceFailCount = 0
+          console.log('[Store] 🔒 前台服务已启动（通知栏应可见）')
+        } else {
+          this._foregroundServiceFailCount++
+          // ★ v3.17.1: 打印诊断信息帮助定位失败原因
+          const status = getPluginStatus()
+          console.warn(
+            `[Store] ⚠ 前台服务启动失败 (${this._foregroundServiceFailCount}/3)`,
+            `\n  插件状态: ${status.status} (${status.reason})`,
+            `\n  isAndroidApp: ${status.isAndroidApp}`,
+            `\n  pluginLoaded: ${status.pluginLoaded}`
+          )
         }
       } catch (e) {
-        console.warn('[Store] 前台服务启动失败:', e?.message || e)
+        this._foregroundServiceFailCount++
+        console.warn('[Store] 前台服务启动异常:', e?.message || e)
       }
     },
 
