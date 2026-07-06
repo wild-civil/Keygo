@@ -149,13 +149,14 @@ function getAppIconResId(main, pkgName) {
       } catch (_) { /* next */ }
     }
 
-    // 回退：android.R.drawable.stat_notify_more (17301631) — 最通用的通知图标
-    const fallback = 17301631
-    console.log(`${TAG} ⚠ 未找到 app 图标，使用系统通用图标: ${fallback}`)
+    // ★ v3.20.1-fix: 回退到 ic_lock_lock (17301638)，与 v3.20.0 一致
+    //   17301631 (stat_notify_more) 在 API 22 已废弃，现代设备上可能不存在
+    const fallback = 17301638
+    console.log(`${TAG} ⚠ 未找到 app 图标，使用系统图标 ic_lock_lock: ${fallback}`)
     return fallback
   } catch (e) {
     console.error(`${TAG} ❌ getAppIconResId 失败:`, e?.message || e)
-    return 17301631 // 最后的回退
+    return 17301638 // ★ 与 v3.20.0 一致的最后回退
   }
 }
 
