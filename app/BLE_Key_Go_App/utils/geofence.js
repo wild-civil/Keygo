@@ -1,12 +1,20 @@
 /**
- * ★ v3.23 Phase 3: 地理围栏工具
+ * ★ v3.23 Phase 3: 地理围栏工具（v2 — 真后台 GPS 监控）
  *
  * 用于极速模式（Geofence Speed Mode）：
- *   1. 停车时保存 GPS 位置（仅前台获取一次）
- *   2. App 回到前台时计算距离
- *   3. 距离 < 半径 → 触发 BLE 扫描秒连
+ *   1. 停车时保存 GPS 位置
+ *   2. 启动 plus.geolocation.watchPosition() 后台低功耗 GPS 监控
+ *   3. 进入 100m 围栏 → 回调触发 BLE 扫描 → 走到车边就已连好
  *
- * 不依赖后台定位权限，只在前台时获取位置，极致省电。
+ * GPS 策略：
+ *   - enableHighAccuracy: false → 网络/基站定位为主 (~15mAh/天)
+ *   - maximumAge: 60s → 复用系统缓存减少 GPS 芯片唤醒
+ *   - provider: 'system' → 系统自动选择最优定位源
+ *
+ * 生命周期：
+ *   speed 模式 + 未连接 → startGeofenceMonitor(onEnter)
+ *   BLE 连接成功 → stopGeofenceMonitor()
+ *   退出 speed 模式 → stopGeofenceMonitor()
  *
  * @module geofence
  */
@@ -182,6 +190,167 @@ export function checkGeofence(currentLat, currentLng) {
 
   console.log(`${TAG} 📍 围栏检测: 距离 ${distance}m (半径 ${GEOFENCE_RADIUS}m) → ${inside ? '✅ 在围栏内' : '❌ 在围栏外'}`)
   return { inside, distance, parking }
+}
+
+// ==================== ★ v3.23.1: 后台 GPS 围栏监控 ====================
+
+/** watchPosition 句柄，null = 未运行 */
+let _watchId = null
+
+/** 当前围栏状态：是否在围栏内（防重复触发） */
+let _isInside = false
+
+/** 进入围栏回调 */
+let _onEnterCallback = null
+
+/** 离开围栏回调 */
+let _onLeaveCallback = null
+
+/** 最后收到 GPS 位置的时间戳（用于诊断） */
+let _lastPositionTime = 0
+
+/**
+ * 启动后台 GPS 围栏监控
+ *
+ * 使用 plus.geolocation.watchPosition() 实现低功耗后台持续定位。
+ * 每次收到位置更新时计算到停车点的距离，进出围栏时触发回调。
+ *
+ * 注意：
+ *   - 需要前台服务保活，否则后台 GPS 可能被系统暂停
+ *   - 荣耀/Huawei 设备无 GMS 也可使用（不依赖 Google Location API）
+ *   - GPS 关闭时 watchPosition 仍返回网络定位（精度 ~50-200m）
+ *
+ * @param {Function} onEnter  进入围栏回调 (distance: number) => void
+ * @param {Function} onLeave  离开围栏回调 (distance: number) => void（可选）
+ * @returns {boolean} 是否成功启动
+ */
+export function startGeofenceMonitor(onEnter, onLeave) {
+  const parking = getParkingLocation()
+  if (!parking) {
+    console.warn(`${TAG} ⚠ 无法启动监控：无停车位置`)
+    return false
+  }
+
+  if (_watchId !== null) {
+    console.log(`${TAG} ℹ Geofence 监控已在运行，跳过 (watchId=${_watchId})`)
+    return true
+  }
+
+  _onEnterCallback = onEnter || null
+  _onLeaveCallback = onLeave || null
+  _isInside = false
+  _lastPositionTime = 0
+
+  try {
+    _watchId = plus.geolocation.watchPosition(
+      (position) => {
+        _lastPositionTime = Date.now()
+        const coords = position.coords
+        if (!coords || typeof coords.latitude !== 'number') return
+
+        const distance = calculateDistance(
+          coords.latitude, coords.longitude,
+          parking.lat, parking.lng
+        )
+
+        // 精度信息（用于日志）
+        const acc = coords.accuracy != null ? `±${Math.round(coords.accuracy)}m` : '?'
+
+        if (distance <= GEOFENCE_RADIUS && !_isInside) {
+          // ★ 进入围栏
+          _isInside = true
+          console.log(`${TAG} 📍 🟢 进入围栏！距停车点 ${distance}m (${acc})`)
+          if (_onEnterCallback) {
+            try { _onEnterCallback(distance) } catch (e) {
+              console.error(`${TAG} ❌ onEnter 回调异常:`, e?.message || e)
+            }
+          }
+        } else if (distance > GEOFENCE_RADIUS && _isInside) {
+          // ★ 离开围栏
+          _isInside = false
+          console.log(`${TAG} 📍 🔴 离开围栏，距停车点 ${distance}m (${acc})`)
+          if (_onLeaveCallback) {
+            try { _onLeaveCallback(distance) } catch (e) {
+              console.error(`${TAG} ❌ onLeave 回调异常:`, e?.message || e)
+            }
+          }
+        }
+        // 仍在同状态 → 静默（不发日志，避免刷屏）
+      },
+      (err) => {
+        // GPS 错误（定位服务关闭、权限被拒等）
+        const code = err?.code
+        const msg = err?.message || err?.errMsg || ''
+        if (code === 1) {
+          // PERMISSION_DENIED — 只打一次
+          console.warn(`${TAG} ⚠ GPS 权限被拒绝`)
+        } else if (code === 2) {
+          // POSITION_UNAVAILABLE — 正常（室内/地下停车场）
+          // 不打印，等 GPS 恢复
+        } else if (code === 3) {
+          // TIMEOUT — 可能 GPS 信号弱
+          console.warn(`${TAG} ⚠ GPS 超时`)
+        } else {
+          console.warn(`${TAG} ⚠ watchPosition 错误 (${code}): ${msg}`)
+        }
+      },
+      {
+        enableHighAccuracy: false,   // ★ 低功耗：网络/基站定位为主
+        timeout: 30000,              // 30 秒超时
+        maximumAge: 60000,           // 允许 60 秒缓存（减少 GPS 唤醒）
+        provider: 'system',          // 系统自动选择（network → gps）
+        coordsType: 'gcj02',         // 国测局坐标
+      }
+    )
+
+    console.log(`${TAG} ✅ 后台 Geofence 监控已启动 (watchId=${_watchId})`)
+    console.log(`${TAG}    停车点: ${parking.lat.toFixed(6)}, ${parking.lng.toFixed(6)}`)
+    console.log(`${TAG}    围栏半径: ${GEOFENCE_RADIUS}m`)
+    console.log(`${TAG}    GPS 模式: network(低功耗), 超时30s, 缓存60s`)
+    return true
+  } catch (e) {
+    console.error(`${TAG} ❌ watchPosition 启动失败:`, e?.message || e)
+    _watchId = null
+    return false
+  }
+}
+
+/**
+ * 停止后台 GPS 围栏监控
+ */
+export function stopGeofenceMonitor() {
+  if (_watchId === null) return
+  try {
+    plus.geolocation.clearWatch(_watchId)
+    console.log(`${TAG} 🛑 后台 Geofence 监控已停止 (watchId=${_watchId})`)
+  } catch (e) {
+    console.warn(`${TAG} ⚠ clearWatch 失败:`, e?.message || e)
+  }
+  _watchId = null
+  _isInside = false
+  _onEnterCallback = null
+  _onLeaveCallback = null
+}
+
+/**
+ * 查询监控是否正在运行
+ * @returns {boolean}
+ */
+export function isGeofenceMonitorActive() {
+  return _watchId !== null
+}
+
+/**
+ * 获取监控诊断信息
+ * @returns {{ active: boolean, watchId: number|null, isInside: boolean, lastPositionAge: number }}
+ */
+export function getGeofenceMonitorStatus() {
+  return {
+    active: _watchId !== null,
+    watchId: _watchId,
+    isInside: _isInside,
+    lastPositionAge: _lastPositionTime ? Date.now() - _lastPositionTime : -1,
+  }
 }
 
 // #endif

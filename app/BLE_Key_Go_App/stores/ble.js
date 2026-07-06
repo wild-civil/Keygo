@@ -50,6 +50,9 @@ import {
   getCurrentPositionCoarse,
   saveParkingLocation,
   getParkingLocation,
+  startGeofenceMonitor,
+  stopGeofenceMonitor,
+  isGeofenceMonitorActive,
 } from '@/utils/geofence.js'
 
 export const useBleStore = defineStore('ble', {
@@ -105,6 +108,7 @@ export const useBleStore = defineStore('ble', {
 
     // ★ v3.23 Phase 3: 极速模式地理围栏
     _geofenceApproachChecked: false, // 本次 onShow 是否已触发围栏检测（防重复）
+    _geofenceBleTriggered: false,    // 围栏是否已触发过 BLE 扫描（本轮监控内防重复）
 
     // ★ v3.17: 前台服务状态（Android 保活）
     _foregroundServiceActive: false,
@@ -702,13 +706,26 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
       this._restoredForSn = ''
 
-      // ★ v3.23 Phase 3: 极速模式下断连 → 记录停车位置
+      // ★ v3.23 Phase 3: 极速模式下断连 → 记录停车位置 + 启动后台 GPS 围栏
       if (this.autoReconnectMode === 'speed') {
-        console.log('[Store] ⚡ 极速模式断连，记录停车位置...')
-        // 异步保存，不阻塞断连处理
+        console.log('[Store] ⚡ 极速模式断连，记录停车位置 + 启动围栏监控...')
+        // 1. 异步保存停车位置
         getCurrentPosition().then(pos => {
-          if (pos) saveParkingLocation(pos.lat, pos.lng)
-        }).catch(() => {})
+          if (pos) {
+            saveParkingLocation(pos.lat, pos.lng)
+            // 2. 保存成功后启动后台 GPS 围栏监控
+            this._startGeofenceMonitor()
+          } else {
+            console.warn('[Store] ⚡ GPS 不可用，围栏监控启动失败')
+            // 仍启动前台服务，下次 onShow 时检测
+            this._ensureForegroundService()
+          }
+        }).catch(() => {
+          this._ensureForegroundService()
+        })
+        // 3. 确保前台服务存活（GPS 监控需要）
+        this._ensureForegroundService()
+        return
       }
 
       // ★ v3.6-fixD2: 递增重连锁，过期任何已在执行的 _doReconnect
@@ -723,9 +740,9 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
-      // ★ v3.23 Phase 3: 极速模式下异常断连不启动后台轮询（零后台功耗）
+      // ★ v3.23 Phase 3: 极速模式下不启动 BLE 后台重连（GPS 围栏接管）
       if (this.autoReconnectMode === 'speed') {
-        console.log('[Store] ⚡ 极速模式：不启动后台重连，等待用户靠近围栏')
+        console.log('[Store] ⚡ 极速模式：不启动 BLE 重连，GPS 围栏监控已在运行')
         return
       }
 
@@ -1131,8 +1148,9 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
-      // ★ v3.23: 重连成功 → 停止舒适模式轮询
+      // ★ v3.23: 重连成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏
       this._stopDormantPoll()
+      this._stopGeofenceMonitor()
       // ★ v3.17: 连接成功后启动前台服务（Android 保活）
       this._ensureForegroundService()
       this._reconnectGuard = 0   /* ★ v3.16-P1: 连接成功，所有旧重连会话已失效，归零重置
@@ -1546,8 +1564,9 @@ export const useBleStore = defineStore('ble', {
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
-        // ★ v3.23: 连接成功 → 停止舒适模式轮询
+        // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏
         this._stopDormantPoll()
+        this._stopGeofenceMonitor()
         // ★ v3.17: 连接成功后启动前台服务（Android 保活）
         this._ensureForegroundService()
 
@@ -1959,8 +1978,9 @@ export const useBleStore = defineStore('ble', {
 
     /**
      * 进入极速模式
-     *   - 停止所有后台轮询（零后台功耗）
+     *   - 停止所有 BLE 后台轮询
      *   - 获取当前 GPS 位置作为停车点
+     *   - 启动前台服务 + 后台 GPS 围栏监控
      */
     _onSpeedModeEnter() {
       this._stopDormantPoll()
@@ -1971,18 +1991,24 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
+      this._geofenceBleTriggered = false
 
       // 获取当前位置保存为停车点
-      this._saveParkingNow()
+      this._saveParkingNow().then((saved) => {
+        // ★ 停车位置保存成功后，启动后台 GPS 围栏监控
+        if (saved && !this.connected) {
+          this._startGeofenceMonitor()
+        }
+      })
     },
 
     /**
-     * 退出极速模式 → 清理围栏数据
+     * 退出极速模式 → 停止围栏监控 + 清理前台服务
      */
     _onSpeedModeExit() {
-      // 不主动清除停车位置，留给用户手动管理
-      // 避免切换到舒适/省电后又切回来时丢失停车点
+      this._stopGeofenceMonitor()
       this._geofenceApproachChecked = false
+      this._geofenceBleTriggered = false
     },
 
     /**
@@ -2013,10 +2039,121 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.23.1: 启动后台 GPS 围栏监控
+     *
+     * 前置条件：
+     *   - autoReconnectMode === 'speed'
+     *   - 有停车位置记录
+     *   - 未连接
+     *
+     * 进入围栏 → _onGeofenceEnter() → 启动 BLE 扫描
+     * 离开围栏 → _onGeofenceLeave() → 停止 BLE 扫描
+     */
+    _startGeofenceMonitor() {
+      if (this.autoReconnectMode !== 'speed') return
+      if (this.connected) return
+      if (isGeofenceMonitorActive()) {
+        console.log('[Store] ⚡ 围栏监控已在运行，跳过')
+        return
+      }
+
+      const parking = getParkingLocation()
+      if (!parking) {
+        console.log('[Store] ⚡ 无停车位置，跳过围栏监控')
+        return
+      }
+
+      // 重置触发标记（新一轮监控）
+      this._geofenceBleTriggered = false
+
+      // ★ 确保前台服务存活（后台 GPS 监控需要）
+      this._ensureForegroundService()
+
+      const started = startGeofenceMonitor(
+        // onEnter: 进入围栏
+        (distance) => { this._onGeofenceEnter(distance) },
+        // onLeave: 离开围栏
+        (distance) => { this._onGeofenceLeave(distance) }
+      )
+
+      if (started) {
+        console.log('[Store] ⚡ 围栏监控已启动 → 零 BLE 功耗，GPS 后台静默监听')
+      } else {
+        console.warn('[Store] ⚡ 围栏监控启动失败')
+      }
+    },
+
+    /**
+     * ★ v3.23.1: 停止后台 GPS 围栏监控
+     */
+    _stopGeofenceMonitor() {
+      stopGeofenceMonitor()
+      this._geofenceBleTriggered = false
+    },
+
+    /**
+     * ★ v3.23.1: 围栏进入回调 → 启动 BLE 扫描
+     *
+     * 由 geofence.js 的 watchPosition 回调触发（可能在后台线程）。
+     * 防重复：每轮监控期间最多触发一次 BLE 重连。
+     */
+    _onGeofenceEnter(distance) {
+      if (this._geofenceBleTriggered) {
+        console.log(`[Store] ⚡ 围栏进入（${distance}m），但 BLE 已触发过，跳过`)
+        return
+      }
+      if (this.connected) {
+        console.log('[Store] ⚡ 围栏进入，但已连接，跳过')
+        return
+      }
+
+      this._geofenceBleTriggered = true
+      console.log(`[Store] ⚡ 🚀 围栏进入（${distance}m）→ 启动 BLE 扫描`)
+
+      // 重置重连状态，立即启动激进扫描
+      this.reconnectMode = 'idle'
+      this.reconnectAttempt = 0
+      this.reconnectNextDelay = 0
+      this._startReconnect()
+    },
+
+    /**
+     * ★ v3.23.1: 围栏离开回调 → 停止 BLE 扫描
+     *
+     * 用户已远离车辆，BLE 扫描不再有意义。
+     * 但保留 GPS 监控继续运行（等待下次进入）。
+     */
+    _onGeofenceLeave(distance) {
+      if (this.connected) {
+        // 已连接成功，停止 GPS 监控
+        console.log('[Store] ⚡ 已连接，停止围栏监控')
+        this._stopGeofenceMonitor()
+        return
+      }
+
+      this._geofenceBleTriggered = false
+      console.log(`[Store] ⚡ 离开围栏（${distance}m），停止 BLE 扫描，保留 GPS 监听`)
+
+      // 停止 BLE 扫描/重连
+      this._stopDormantPoll()
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer)
+        this._reconnectTimer = null
+      }
+      this.reconnectMode = 'idle'
+      this.reconnectAttempt = 0
+      this.reconnectNextDelay = 0
+    },
+
+    /**
      * 检测是否接近停车位置，若在围栏内则触发 BLE 扫描
      *
      * 由 index.vue 的 onShow 调用（仅 speed 模式）。
      * 每次 onShow 最多触发一次，防止重复扫描。
+     *
+     * ★ v3.23.1: 这是后台 GPS 监控的兜底机制。
+     *   如果后台 GPS 被系统暂停，用户打开 App 时仍会检测。
+     *   如果后台 GPS 正常运行，_geofenceBleTriggered 已为 true，不会重复触发。
      *
      * @returns {Promise<boolean>} true=已触发扫描，false=不需要或已处理
      */
@@ -2025,6 +2162,12 @@ export const useBleStore = defineStore('ble', {
       if (this.connected) return false
       if (this._geofenceApproachChecked) return false  // 本次已检测过
       this._geofenceApproachChecked = true
+
+      // ★ 如果后台 GPS 围栏已经触发过 BLE，不需要前台再触发
+      if (this._geofenceBleTriggered) {
+        console.log('[Store] ⚡ 后台围栏已触发 BLE，前台跳过')
+        return false
+      }
 
       const parking = getParkingLocation()
       if (!parking) {
@@ -2045,6 +2188,7 @@ export const useBleStore = defineStore('ble', {
       if (distance <= GEOFENCE_RADIUS) {
         // ★ 在围栏内 → 立即启动 BLE 扫描
         console.log('[Store] ⚡ 进入围栏！启动 BLE 扫描...')
+        this._geofenceBleTriggered = true
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this._startReconnect()

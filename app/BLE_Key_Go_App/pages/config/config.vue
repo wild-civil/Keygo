@@ -36,8 +36,8 @@
             <text class="mode-name">极速模式</text>
             <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'speed'">当前</text>
           </view>
-          <text class="mode-desc">基于地理围栏，走到车边秒连</text>
-          <text class="mode-power">GPS 仅在打开 App 时检测，零后台功耗</text>
+          <text class="mode-desc">基于地理围栏，走到车边自动连好</text>
+          <text class="mode-power">后台 GPS 静默监听，额外耗电 ~0.5%/天</text>
         </view>
       </view>
 
@@ -53,6 +53,14 @@
         <view class="geofence-row">
           <text class="geofence-meta">保存时间：{{ parkingInfo.timeText }}</text>
           <text class="geofence-meta">围栏半径：{{ geofenceRadius }}m</text>
+        </view>
+        <view class="geofence-row" v-if="monitorActive">
+          <text class="geofence-status-dot">●</text>
+          <text class="geofence-status-text">GPS 后台监控中</text>
+        </view>
+        <view class="geofence-row" v-else-if="!bleStore.connected">
+          <text class="geofence-status-dot dim">●</text>
+          <text class="geofence-status-text dim">GPS 监控待启动</text>
         </view>
       </view>
     </view>
@@ -203,7 +211,7 @@ import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 // ★ v3.23 Phase 3: 地理围栏工具
-import { getParkingLocation, GEOFENCE_RADIUS } from '@/utils/geofence.js'
+import { getParkingLocation, GEOFENCE_RADIUS, isGeofenceMonitorActive } from '@/utils/geofence.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
@@ -247,6 +255,13 @@ function handleModeChange(mode) {
 
 // ★ v3.23 Phase 3: 极速模式围栏信息
 const geofenceRadius = GEOFENCE_RADIUS
+
+/** 后台 GPS 围栏监控是否正在运行 */
+const monitorActive = computed(() => {
+  if (bleStore.autoReconnectMode !== 'speed') return false
+  if (bleStore.connected) return false
+  return isGeofenceMonitorActive()
+})
 
 const parkingInfo = computed(() => {
   const p = getParkingLocation()
@@ -626,6 +641,26 @@ async function handleSubmit() {
 
 .geofence-meta {
   font-size: 20rpx;
+  color: var(--text-muted);
+}
+
+/* ★ v3.23.1: GPS 监控状态指示 */
+.geofence-status-dot {
+  font-size: 20rpx;
+  color: #22c55e;        /* 绿色：运行中 */
+  margin-right: 8rpx;
+}
+
+.geofence-status-dot.dim {
+  color: var(--text-muted); /* 灰色：待启动 */
+}
+
+.geofence-status-text {
+  font-size: 20rpx;
+  color: var(--text-secondary);
+}
+
+.geofence-status-text.dim {
   color: var(--text-muted);
 }
 </style>

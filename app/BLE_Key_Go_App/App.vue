@@ -221,7 +221,7 @@ onShow(() => {
   // #endif
 })
 
-// ★ App 进入后台 → 停止轮询省电 + 确保前台服务运行（Android BLE 保活）
+// ★ App 进入后台 → 停止轮询省电 + 确保前台服务运行（Android BLE/GPS 保活）
 onHide(() => {
   themeStore.onAppHide()
   // ★ v3.23 Phase 3: 极速模式 — 重置围栏检测标记，下次 onShow 可再次触发
@@ -230,6 +230,10 @@ onHide(() => {
   //   这是兜底保护：正常情况下 connect/_doReconnect 成功后已启动，
   //   但若之前启动失败，onHide 时再尝试一次
   if (bleStore.connected || bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused') {
+    bleStore._ensureForegroundService()
+  }
+  // ★ v3.23.1: 极速模式下确保前台服务存活（后台 GPS 围栏监控需要）
+  if (bleStore.autoReconnectMode === 'speed' && !bleStore.connected) {
     bleStore._ensureForegroundService()
   }
 })
