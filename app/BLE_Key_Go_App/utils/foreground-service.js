@@ -159,6 +159,33 @@ function getAppIconResId(main, pkgName) {
   }
 }
 
+/**
+ * 手动构建启动 Activity 的 Intent
+ * 不用 getLaunchIntentForPackage（plus.android 对其支持不佳）
+ */
+function buildLauncherIntent(main) {
+  try {
+    const Intent = plus.android.importClass('android.content.Intent')
+    const ComponentName = plus.android.importClass('android.content.ComponentName')
+
+    const pkgName = plus.android.invoke(main, 'getPackageName')
+    const className = plus.android.invoke(
+      plus.android.invoke(main, 'getClass'),
+      'getName'
+    )
+
+    const intent = new Intent(Intent.ACTION_MAIN)
+    intent.addCategory(Intent.CATEGORY_LAUNCHER)
+    intent.setComponent(new ComponentName(pkgName, className))
+    intent.addFlags(0x10000000 | 0x00020000)  // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+
+    return intent
+  } catch (e) {
+    console.error(`${TAG} ❌ buildLauncherIntent 失败:`, e?.message || e)
+    return null
+  }
+}
+
 function buildNotification() {
   try {
     const main = getMainActivity()
