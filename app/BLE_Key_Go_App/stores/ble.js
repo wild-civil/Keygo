@@ -42,6 +42,16 @@ import {
   getPluginStatus,
 } from '@/utils/foreground-service.js'
 
+// ★ v3.23 Phase 3: 地理围栏工具
+import {
+  GEOFENCE_RADIUS,
+  calculateDistance,
+  getCurrentPosition,
+  getCurrentPositionCoarse,
+  saveParkingLocation,
+  getParkingLocation,
+} from '@/utils/geofence.js'
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -92,6 +102,9 @@ export const useBleStore = defineStore('ble', {
     autoReconnectMode: 'comfort', // 'comfort' | 'power_saver' | 'speed'
     _dormantPollTimer: null,      // 舒适模式后台轮询定时器
     _dormantPollGuard: 0,         // 轮询会话锁
+
+    // ★ v3.23 Phase 3: 极速模式地理围栏
+    _geofenceApproachChecked: false, // 本次 onShow 是否已触发围栏检测（防重复）
 
     // ★ v3.17: 前台服务状态（Android 保活）
     _foregroundServiceActive: false,
@@ -689,6 +702,15 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
       this._restoredForSn = ''
 
+      // ★ v3.23 Phase 3: 极速模式下断连 → 记录停车位置
+      if (this.autoReconnectMode === 'speed') {
+        console.log('[Store] ⚡ 极速模式断连，记录停车位置...')
+        // 异步保存，不阻塞断连处理
+        getCurrentPosition().then(pos => {
+          if (pos) saveParkingLocation(pos.lat, pos.lng)
+        }).catch(() => {})
+      }
+
       // ★ v3.6-fixD2: 递增重连锁，过期任何已在执行的 _doReconnect
       //   当 _handleDisconnect 领先于适配器事件到达时，旧 session 立刻失效，
       //   防止 _checkBluetoothState 用 Android 延迟的 available=true 写回 btState='on'
@@ -698,6 +720,12 @@ export const useBleStore = defineStore('ble', {
       // 用户主动断开 → 不重连
       if (this.reconnectMode === 'dormant') {
         console.log('[Store] 用户主动断开，不启动重连')
+        return
+      }
+
+      // ★ v3.23 Phase 3: 极速模式下异常断连不启动后台轮询（零后台功耗）
+      if (this.autoReconnectMode === 'speed') {
+        console.log('[Store] ⚡ 极速模式：不启动后台重连，等待用户靠近围栏')
         return
       }
 
@@ -1903,11 +1931,15 @@ export const useBleStore = defineStore('ble', {
 
       // ★ 模式切换时的行为调整
       if (mode === 'comfort') {
+        // 退出 speed 模式 → 清理围栏相关
+        if (prev === 'speed') this._onSpeedModeExit()
         // 切换到舒适模式 → 如果当前未连接，启动轮询
         if (!this.connected) {
           this._startDormantPoll()
         }
       } else if (mode === 'power_saver') {
+        // 退出 speed 模式 → 清理围栏相关
+        if (prev === 'speed') this._onSpeedModeExit()
         // 切换到省电模式 → 停止所有轮询
         this._stopDormantPoll()
         if (this._reconnectTimer) {
@@ -1917,8 +1949,118 @@ export const useBleStore = defineStore('ble', {
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
+      } else if (mode === 'speed') {
+        // ★ Phase 3: 切换到极速模式 → 停止后台轮询，记录当前停车位置
+        this._onSpeedModeEnter()
       }
-      // speed 模式本次为占位，将在 Phase 3 实现
+    },
+
+    // ==================== ★ v3.23 Phase 3: 极速模式（地理围栏） ====================
+
+    /**
+     * 进入极速模式
+     *   - 停止所有后台轮询（零后台功耗）
+     *   - 获取当前 GPS 位置作为停车点
+     */
+    _onSpeedModeEnter() {
+      this._stopDormantPoll()
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer)
+        this._reconnectTimer = null
+      }
+      this.reconnectMode = 'idle'
+      this.reconnectAttempt = 0
+      this.reconnectNextDelay = 0
+
+      // 获取当前位置保存为停车点
+      this._saveParkingNow()
+    },
+
+    /**
+     * 退出极速模式 → 清理围栏数据
+     */
+    _onSpeedModeExit() {
+      // 不主动清除停车位置，留给用户手动管理
+      // 避免切换到舒适/省电后又切回来时丢失停车点
+      this._geofenceApproachChecked = false
+    },
+
+    /**
+     * 获取当前位置并保存为停车点
+     * @returns {Promise<boolean>} 是否保存成功
+     */
+    async _saveParkingNow() {
+      console.log('[Store] 🅿️ 正在获取停车位置...')
+      const pos = await getCurrentPosition()
+      if (!pos) {
+        console.warn('[Store] ⚠ 停车位置获取失败（GPS 不可用）')
+        uni.showToast({ title: '无法获取位置，请稍后重试', icon: 'none', duration: 2000 })
+        return false
+      }
+      saveParkingLocation(pos.lat, pos.lng)
+      console.log(`[Store] 🅿️ 停车位置已记录: ${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`)
+      uni.showToast({ title: '停车位置已记录 ✅', icon: 'success', duration: 1500 })
+      return true
+    },
+
+    /**
+     * 手动更新停车位置（用户从配置页触发）
+     * @returns {Promise<boolean>}
+     */
+    async saveCurrentParkingLocation() {
+      if (this.autoReconnectMode !== 'speed') return false
+      return await this._saveParkingNow()
+    },
+
+    /**
+     * 检测是否接近停车位置，若在围栏内则触发 BLE 扫描
+     *
+     * 由 index.vue 的 onShow 调用（仅 speed 模式）。
+     * 每次 onShow 最多触发一次，防止重复扫描。
+     *
+     * @returns {Promise<boolean>} true=已触发扫描，false=不需要或已处理
+     */
+    async checkGeofenceApproach() {
+      if (this.autoReconnectMode !== 'speed') return false
+      if (this.connected) return false
+      if (this._geofenceApproachChecked) return false  // 本次已检测过
+      this._geofenceApproachChecked = true
+
+      const parking = getParkingLocation()
+      if (!parking) {
+        console.log('[Store] ⚡ 极速模式：无停车位置记录，不启动扫描')
+        return false
+      }
+
+      console.log('[Store] ⚡ 极速模式：获取当前位置进行围栏检测...')
+      const pos = await getCurrentPositionCoarse()
+      if (!pos) {
+        console.warn('[Store] ⚡ GPS 不可用，跳过围栏检测')
+        return false
+      }
+
+      const distance = calculateDistance(pos.lat, pos.lng, parking.lat, parking.lng)
+      console.log(`[Store] ⚡ 极速模式：距停车点 ${distance}m (半径 ${GEOFENCE_RADIUS}m)`)
+
+      if (distance <= GEOFENCE_RADIUS) {
+        // ★ 在围栏内 → 立即启动 BLE 扫描
+        console.log('[Store] ⚡ 进入围栏！启动 BLE 扫描...')
+        this.reconnectMode = 'idle'
+        this.reconnectAttempt = 0
+        this._startReconnect()
+        uni.showToast({ title: '已进入停车区域，正在连接...', icon: 'none', duration: 2000 })
+        return true
+      } else {
+        console.log(`[Store] ⚡ 距停车点 ${distance}m，不在围栏内，不扫描`)
+        return false
+      }
+    },
+
+    /**
+     * 重置围栏检测标记（app 切后台时调用）
+     */
+    _resetGeofenceApproachCheck() {
+      this._geofenceApproachChecked = false
     },
   }
 })

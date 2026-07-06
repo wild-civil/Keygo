@@ -236,8 +236,12 @@ onShow(async () => {
     if (bleStore.reconnectMode === 'idle') {
       bleStore.tryAutoConnect()
     }
+  } else if (bleStore.autoReconnectMode === 'speed') {
+    // ★ Phase 3: 极速模式 → GPS 围栏检测，在围栏内才启动 BLE 扫描
+    if (!bleStore.connected) {
+      bleStore.checkGeofenceApproach()
+    }
   }
-  // speed 模式 Phase 3 实现
 })
 
 // ==================== 扫描 & 连接 ====================

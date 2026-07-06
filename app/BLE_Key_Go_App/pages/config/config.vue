@@ -28,14 +28,31 @@
           <text class="mode-power">额外功耗 = 0</text>
         </view>
 
-        <view class="mode-card mode-card-disabled">
+        <view class="mode-card"
+          :class="{ active: bleStore.autoReconnectMode === 'speed' }"
+          @tap="handleModeChange('speed')">
           <view class="mode-card-header">
             <text class="mode-icon">⚡</text>
             <text class="mode-name">极速模式</text>
-            <text class="mode-soon">即将推出</text>
+            <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'speed'">当前</text>
           </view>
           <text class="mode-desc">基于地理围栏，走到车边秒连</text>
-          <text class="mode-power">需后台定位权限</text>
+          <text class="mode-power">GPS 仅在打开 App 时检测，零后台功耗</text>
+        </view>
+      </view>
+
+      <!-- ★ v3.23 Phase 3: 极速模式围栏信息 -->
+      <view class="geofence-info" v-if="bleStore.autoReconnectMode === 'speed' && parkingInfo">
+        <view class="geofence-row">
+          <text class="geofence-label">📍 停车位置</text>
+          <text class="geofence-action" @tap="handleUpdateParking">更新</text>
+        </view>
+        <view class="geofence-row">
+          <text class="geofence-val">{{ parkingInfo.latText }}, {{ parkingInfo.lngText }}</text>
+        </view>
+        <view class="geofence-row">
+          <text class="geofence-meta">保存时间：{{ parkingInfo.timeText }}</text>
+          <text class="geofence-meta">围栏半径：{{ geofenceRadius }}m</text>
         </view>
       </view>
     </view>
@@ -185,6 +202,8 @@ import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
+// ★ v3.23 Phase 3: 地理围栏工具
+import { getParkingLocation, GEOFENCE_RADIUS } from '@/utils/geofence.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
@@ -224,6 +243,29 @@ onShow(() => {
 function handleModeChange(mode) {
   if (mode === bleStore.autoReconnectMode) return
   bleStore.setAutoReconnectMode(mode)
+}
+
+// ★ v3.23 Phase 3: 极速模式围栏信息
+const geofenceRadius = GEOFENCE_RADIUS
+
+const parkingInfo = computed(() => {
+  const p = getParkingLocation()
+  if (!p) return null
+  const d = new Date(p.savedAt)
+  return {
+    latText: p.lat.toFixed(6),
+    lngText: p.lng.toFixed(6),
+    timeText: `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
+    lat: p.lat,
+    lng: p.lng,
+    savedAt: p.savedAt,
+  }
+})
+
+async function handleUpdateParking() {
+  uni.showLoading({ title: '定位中...' })
+  const ok = await bleStore.saveCurrentParkingLocation()
+  uni.hideLoading()
 }
 
 // ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
@@ -538,6 +580,51 @@ async function handleSubmit() {
 
 .mode-power {
   display: block;
+  font-size: 20rpx;
+  color: var(--text-muted);
+}
+
+/* ★ v3.23 Phase 3: 极速模式围栏信息面板 */
+.geofence-info {
+  margin-top: 16rpx;
+  background: var(--alpha-06);
+  border: 1rpx solid var(--border);
+  border-radius: 12rpx;
+  padding: 20rpx 24rpx;
+}
+
+.geofence-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6rpx;
+}
+
+.geofence-row:last-child {
+  margin-bottom: 0;
+}
+
+.geofence-label {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.geofence-val {
+  font-size: 22rpx;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.geofence-action {
+  font-size: 22rpx;
+  color: var(--accent);
+  padding: 4rpx 16rpx;
+  border: 1rpx solid var(--accent);
+  border-radius: 8rpx;
+}
+
+.geofence-meta {
   font-size: 20rpx;
   color: var(--text-muted);
 }

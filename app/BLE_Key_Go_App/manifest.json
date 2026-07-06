@@ -67,7 +67,7 @@
         "usingComponents" : true,
         "permission" : {
             "scope.userLocation" : {
-                "desc" : "用于蓝牙扫描"
+                "desc" : "用于蓝牙扫描和极速模式停车定位"
             }
         }
     },
