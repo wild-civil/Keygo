@@ -15,9 +15,61 @@ import {
   getPluginStatus,
   requestNotificationPermission,
 } from '@/utils/foreground-service.js'
+import {
+  isIgnoringBatteryOptimizations,
+  openBatteryOptimizationSettings,
+} from '@/utils/power-saver.js'
 
 const themeStore = useThemeStore()
 const bleStore = useBleStore()
+
+/**
+ * ★ v3.21: 电池优化豁免引导
+ *
+ * Android Doze / Deep Doze 会在熄屏 30~60 分钟后冻结后台进程，
+ * 导致 BLE 断开且无法扫描重连。
+ *
+ * 逻辑:
+ *   1. 已豁免 → 静默跳过
+ *   2. 未豁免 + 从未提醒 → 弹窗引导
+ *   3. 未豁免 + 上次提醒距今 > 3 天 → 再次弹窗
+ *   4. 未豁免 + 最近提醒过 → 静默跳过（不骚扰用户）
+ */
+function checkBatteryOptimization() {
+  // #ifdef APP-PLUS
+  if (isIgnoringBatteryOptimizations()) {
+    // 已豁免，清除提醒标记
+    uni.removeStorageSync('battery_opt_last_reminded')
+    uni.removeStorageSync('battery_opt_pending')
+    return
+  }
+
+  const KEY = 'battery_opt_last_reminded'
+  const lastReminded = Number(uni.getStorageSync(KEY) || 0)
+  const now = Date.now()
+  const THREE_DAYS = 3 * 24 * 60 * 60 * 1000
+
+  if (now - lastReminded < THREE_DAYS) {
+    console.log('[App] 电池豁免: 未豁免但距上次提醒不足3天，跳过')
+    return
+  }
+
+  console.log('[App] 电池豁免: 未豁免，弹窗引导')
+  uni.showModal({
+    title: '保持后台运行',
+    content: 'KeyGo 需要在后台持续运行，才能靠近车辆自动解锁。\n\n点击「去设置」后，请在打开的页面里找到「耗电详情」或「应用启动管理」，将 KeyGo 设为「允许后台运行」或「不优化」。',
+    confirmText: '去设置',
+    cancelText: '稍后提醒',
+    success: (res) => {
+      uni.setStorageSync(KEY, now)
+      if (res.confirm) {
+        uni.setStorageSync('battery_opt_pending', 1)
+        openBatteryOptimizationSettings()
+      }
+    }
+  })
+  // #endif
+}
 
 onLaunch(() => {
   console.log('[BLE-KeyGo] App launched')
@@ -49,11 +101,32 @@ onLaunch(() => {
   }).catch(() => {
     // code=10001（系统蓝牙未开启）时静默，让 index 页横幅引导用户
   })
+
+  // ★ v3.21: 电池优化豁免检测（延迟 2.5s 执行，不阻塞启动流程）
+  setTimeout(() => {
+    checkBatteryOptimization()
+  }, 2500)
 })
 
-// ★ App 回到前台 → 立刻重新检测系统主题（覆盖用户在系统设置切换主题的场景）
+// ★ App 回到前台 → 重新检测系统主题 + 电池豁免状态
 onShow(() => {
   themeStore.onAppShow()
+
+  // ★ v3.21: 从电池优化设置页返回后，核查是否已授权豁免
+  // #ifdef APP-PLUS
+  if (uni.getStorageSync('battery_opt_pending')) {
+    uni.removeStorageSync('battery_opt_pending')
+    if (isIgnoringBatteryOptimizations()) {
+      uni.removeStorageSync('battery_opt_last_reminded')
+      console.log('[App] ✅ 用户已授权电池豁免')
+      uni.showToast({
+        title: '已允许后台运行',
+        icon: 'success',
+        duration: 2000
+      })
+    }
+  }
+  // #endif
 })
 
 // ★ App 进入后台 → 停止轮询省电 + 确保前台服务运行（Android BLE 保活）

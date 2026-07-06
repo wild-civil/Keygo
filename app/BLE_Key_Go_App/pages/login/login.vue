@@ -3,7 +3,7 @@
     <!-- 头部 -->
     <view class="login-header">
       <text class="login-logo">🔑</text>
-      <text class="login-title">BLE KeyGo</text>
+      <text class="login-title">KeyGo·钥启程</text>
       <text class="login-subtitle">使用帮助 · 快速指南</text>
     </view>
 
@@ -74,6 +74,35 @@
       </view>
     </view>
 
+    <!-- ★ v3.21: 电池优化豁免 -->
+    <view class="login-card battery-card" style="margin-top: 24rpx;" @tap="handleBatteryOpt">
+      <view class="battery-row">
+        <text class="card-title">🔋 电池优化豁免</text>
+        <view class="battery-badge" :class="{ ok: batteryOptimized }">
+          <text>{{ batteryOptimized ? '✅ 已豁免' : '⚠️ 未豁免' }}</text>
+        </view>
+      </view>
+      <view class="battery-desc">
+        将 KeyGo 加入电池优化白名单，防止系统休眠后中断蓝牙连接。点击此处可<text class="highlight">随时修改</text>设置。
+      </view>
+      <!-- 操作步骤 -->
+      <view class="battery-steps" v-if="!batteryOptimized">
+        <view class="battery-step-item">
+          <text class="battery-step-num">1</text>
+          <text class="battery-step-text">点击卡片，打开「应用信息」页</text>
+        </view>
+        <view class="battery-step-item">
+          <text class="battery-step-num">2</text>
+          <text class="battery-step-text">找到「耗电详情」或「应用启动管理」</text>
+        </view>
+        <view class="battery-step-item">
+          <text class="battery-step-num">3</text>
+          <text class="battery-step-text">选择「手动管理」→ 开启「允许后台运行」</text>
+        </view>
+      </view>
+      <view class="battery-arrow">→</view>
+    </view>
+
     <!-- 主题切换 -->
     <view class="login-card theme-card" style="margin-top: 24rpx;">
       <text class="card-title">🎨 外观主题</text>
@@ -106,12 +135,22 @@
 import { ref, computed } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useThemeStore } from '@/stores/theme.js'
+import {
+  isIgnoringBatteryOptimizations,
+  openBatteryOptimizationSettings,
+} from '@/utils/power-saver.js'
 
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 
+// ★ v3.21: 电池优化豁免状态（必须在 onShow 之前声明）
+const batteryOptimized = ref(false)
+
 onShow(() => {
   themeStore.applyNavBar()
+  // #ifdef APP-PLUS
+  batteryOptimized.value = isIgnoringBatteryOptimizations()
+  // #endif
 })
 
 const themeOptions = ref([
@@ -119,6 +158,13 @@ const themeOptions = ref([
   { value: 'dark', label: '深色', icon: '🌙' },
   { value: 'auto', label: '跟随系统', icon: '🔄' },
 ])
+
+function handleBatteryOpt() {
+  // #ifdef APP-PLUS
+  uni.setStorageSync('battery_opt_pending', 1)
+  openBatteryOptimizationSettings()
+  // #endif
+}
 </script>
 
 <style scoped>
@@ -236,6 +282,91 @@ const themeOptions = ref([
   color: var(--text-tertiary);
   text-align: center;
   display: block;
+}
+
+/* ★ v3.21: 电池优化卡片 */
+.battery-card {
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.2s;
+}
+
+.battery-card:active {
+  transform: scale(0.98);
+  border-color: var(--accent);
+}
+
+.battery-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12rpx;
+}
+
+.battery-badge {
+  font-size: 20rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 20rpx;
+  background: var(--orange-alpha-27);
+  color: var(--accent-orange);
+}
+
+.battery-badge.ok {
+  background: var(--green-alpha-27);
+  color: var(--accent-green);
+}
+
+.battery-desc {
+  font-size: 22rpx;
+  color: var(--login-step-desc);
+  line-height: 1.6;
+  padding-right: 40rpx;
+}
+
+.battery-steps {
+  margin-top: 16rpx;
+  padding-top: 16rpx;
+  border-top: 1rpx solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 10rpx;
+}
+
+.battery-step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12rpx;
+}
+
+.battery-step-num {
+  width: 36rpx;
+  height: 36rpx;
+  border-radius: 50%;
+  background: var(--alpha-20);
+  color: var(--accent);
+  font-size: 20rpx;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2rpx;
+}
+
+.battery-step-text {
+  font-size: 22rpx;
+  color: var(--login-step-desc);
+  line-height: 1.5;
+  flex: 1;
+}
+
+.battery-arrow {
+  position: absolute;
+  right: 40rpx;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 32rpx;
+  color: var(--text-muted);
 }
 
 /* ---- Footer ---- */

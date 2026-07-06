@@ -2,8 +2,8 @@
     "name" : "BLE车钥匙",
     "appid" : "__UNI__35B0789",
     "description" : "BLE车钥匙舒适进入系统",
-    "versionName" : "1.0.1",
-    "versionCode" : 101,
+    "versionName" : "1.0.2",
+    "versionCode" : 102,
     "transformPx" : false,
     "app-plus" : {
         "usingComponents" : true,
@@ -30,7 +30,8 @@
                     "<uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\"/>",
                     "<uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE\"/>",
                     "<uses-permission android:name=\"android.permission.WAKE_LOCK\"/>",
-                    "<uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>"
+                    "<uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\"/>",
+                    "<uses-permission android:name=\"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS\"/>"
                 ]
             },
             "ios" : {
@@ -41,6 +42,17 @@
                     }
                 },
                 "dSYMs" : false
+            },
+            "icons" : {
+                "android" : {
+                    "hdpi" : "static/icons/hdpi.png",
+                    "xhdpi" : "static/icons/xhdpi.png",
+                    "xxhdpi" : "static/icons/xxhdpi.png",
+                    "xxxhdpi" : "static/icons/xxxhdpi.png"
+                },
+                "ios" : {
+                    "appstore" : "static/icons/ios-1024.png"
+                }
             }
         }
     },
