@@ -1,27 +1,29 @@
 <template>
   <view class="app-root">
     <router-view />
-    <!-- ★ v3.22: 电池优化豁免自定义弹窗（3 选项 + 返回后重新检查） -->
-    <view v-if="batteryModalVisible" class="battery-overlay">
-      <view class="battery-modal">
-        <text class="battery-modal-title">{{ batteryModalTitle }}</text>
-        <scroll-view class="battery-modal-body" scroll-y>
-          <text class="battery-modal-text">{{ batteryModalContent }}</text>
-        </scroll-view>
-        <view class="battery-modal-btns">
-          <view class="battery-btn never" hover-class="battery-btn-never-hover" @tap="onBatteryNever">
-            <text>永不提醒</text>
-          </view>
-          <view class="battery-btn later" hover-class="battery-btn-later-hover" @tap="onBatteryLater">
-            <text>稍后提醒</text>
-          </view>
-          <view class="battery-btn go" hover-class="battery-btn-go-hover" @tap="onBatteryGoSettings">
-            <text>去设置</text>
-          </view>
+    <CustomTabBar />
+  </view>
+  <!-- ★ v3.22: 电池优化豁免自定义弹窗（3 选项 + 返回后重新检查）
+       ★ v3.23-fix: 提升到 .app-root 外部，避免荣耀 MagicOS WebView 的
+          position:fixed 嵌套 containing-block 异常导致弹窗不可见 -->
+  <view v-if="batteryModalVisible" class="battery-overlay">
+    <view class="battery-modal">
+      <text class="battery-modal-title">{{ batteryModalTitle }}</text>
+      <scroll-view class="battery-modal-body" scroll-y>
+        <text class="battery-modal-text">{{ batteryModalContent }}</text>
+      </scroll-view>
+      <view class="battery-modal-btns">
+        <view class="battery-btn never" hover-class="battery-btn-never-hover" @tap="onBatteryNever">
+          <text>永不提醒</text>
+        </view>
+        <view class="battery-btn later" hover-class="battery-btn-later-hover" @tap="onBatteryLater">
+          <text>稍后提醒</text>
+        </view>
+        <view class="battery-btn go" hover-class="battery-btn-go-hover" @tap="onBatteryGoSettings">
+          <text>去设置</text>
         </view>
       </view>
     </view>
-    <CustomTabBar />
   </view>
 </template>
 
