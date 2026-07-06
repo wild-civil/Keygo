@@ -88,6 +88,11 @@ export const useBleStore = defineStore('ble', {
     reconnectAttempt: 0,          // 当前重连次数
     reconnectNextDelay: 0,        // 下次重连等待秒数（UI 显示用）
 
+    // ★ v3.23: 智能重连模式
+    autoReconnectMode: 'comfort', // 'comfort' | 'power_saver' | 'speed'
+    _dormantPollTimer: null,      // 舒适模式后台轮询定时器
+    _dormantPollGuard: 0,         // 轮询会话锁
+
     // ★ v3.17: 前台服务状态（Android 保活）
     _foregroundServiceActive: false,
     _foregroundServiceFailCount: 0,       // 失败次数（超过上限不再重试）
@@ -178,6 +183,18 @@ export const useBleStore = defineStore('ble', {
      * @param {string} [sn] 设备序列号，不传则仅尝试旧版迁移
      */
     _restoreConfig(sn) {
+      // ★ v3.23: 首次调用时恢复智能重连模式（全局设置，只恢复一次）
+      if (!this._autoReconnectModeRestored) {
+        this._autoReconnectModeRestored = true
+        try {
+          const mode = uni.getStorageSync('ble_auto_reconnect_mode')
+          if (mode === 'comfort' || mode === 'power_saver' || mode === 'speed') {
+            this.autoReconnectMode = mode
+            console.log('[Store] 智能重连模式已恢复:', mode)
+          }
+        } catch {}
+      }
+
       // ★ 如果传了 SN 且已针对该 SN 恢复过，跳过
       if (sn && this._restoredForSn === sn) return
 
@@ -439,6 +456,8 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._statusStaleTimer)
         this._statusStaleTimer = null
       }
+      // ★ v3.23: 蓝牙关闭时停止舒适模式轮询
+      this._stopDormantPoll()
       /* ★ v3.16-#22: 清理 Notify 缓冲区（同 _handleDisconnect 的保护逻辑）
        *   蓝牙关闭后缓冲区残留的半截 JSON 可能在恢复后被误解析 */
       if (this._notifyTimer) {
@@ -776,6 +795,131 @@ export const useBleStore = defineStore('ble', {
       this._scheduleReconnect(0)  // 第1次立即尝试
     },
 
+    // ==================== ★ v3.23: 舒适模式后台轮询 ====================
+
+    /**
+     * 启动舒适模式后台轮询（每 2 分钟短扫描一次）
+     *
+     * 调用时机：
+     *   - 10 次重连失败后（autoReconnectMode === 'comfort'）
+     *   - 异常断连后（autoReconnectMode === 'comfort'）
+     *   - 用户主动断开后（autoReconnectMode === 'comfort'）
+     *
+     * 幂等：已在轮询中则忽略
+     */
+    _startDormantPoll() {
+      if (this.autoReconnectMode !== 'comfort') return
+      if (this._dormantPollTimer) return  // 已在轮询中
+      if (!this.deviceId && !this.lastDeviceId) return  // 没有可重连的设备
+
+      // 确保 deviceId 可用
+      if (!this.deviceId && this.lastDeviceId) {
+        this.deviceId = this.lastDeviceId
+      }
+
+      this._dormantPollGuard++
+      const guard = this._dormantPollGuard
+      console.log(`[Store] 🌙 舒适模式轮询启动 (guard=${guard})`)
+
+      // 立即执行第一次扫描
+      this._doDormantScan(guard)
+
+      // 之后每 2 分钟一次
+      this._dormantPollTimer = setInterval(() => {
+        if (this._dormantPollGuard !== guard) {
+          // 会话已过期，停止轮询
+          this._stopDormantPoll()
+          return
+        }
+        if (this.connected || this.btState === 'off') {
+          this._stopDormantPoll()
+          return
+        }
+        this._doDormantScan(guard)
+      }, 120000) // 2 分钟
+    },
+
+    /**
+     * 加速一次轮询扫描（从外部触发，如 onShow）
+     * 不清除现有定时器，额外增加一次立即扫描
+     */
+    _accelerateDormantPoll() {
+      if (this.autoReconnectMode !== 'comfort') return
+      if (this.connected) return
+      if (this.btState === 'off') return
+      if (!this.deviceId && !this.lastDeviceId) return
+
+      if (!this.deviceId && this.lastDeviceId) {
+        this.deviceId = this.lastDeviceId
+      }
+
+      console.log('[Store] ⚡ 加速舒适模式扫描（onShow 触发）')
+      this._doDormantScan(this._dormantPollGuard)
+    },
+
+    /**
+     * 停止舒适模式后台轮询
+     */
+    _stopDormantPoll() {
+      if (this._dormantPollTimer) {
+        clearInterval(this._dormantPollTimer)
+        this._dormantPollTimer = null
+      }
+      this._dormantPollGuard++
+      console.log('[Store] 🌙 舒适模式轮询已停止')
+    },
+
+    /**
+     * 执行一次轮询扫描（5 秒 short scan，发现设备立即连接）
+     * @param {number} guard 会话锁
+     */
+    async _doDormantScan(guard) {
+      if (this._dormantPollGuard !== guard) return
+      if (this.connected) return
+      if (this.btState === 'off') return
+
+      console.log('[Store] 🌙 舒适模式扫描 (5s)...')
+
+      try {
+        const targetId = this.deviceId
+
+        // ★ 使用 startScan 直接扫描（内部已配置 service UUID 硬件过滤）
+        await startScan(
+          (device) => {
+            // ★ 会话检查：已连或锁过期则忽略
+            if (this._dormantPollGuard !== guard || this.connected) return
+
+            // 匹配目标设备
+            if (device.deviceId === targetId) {
+              console.log('[Store] 🌙 舒适模式发现设备:', device.name, 'RSSI:', device.RSSI)
+              // ★ 标记发现 → 停止当前扫描后期会连接
+              this._dormantFound = true
+              this._dormantFoundDevice = device
+            }
+          },
+          5 // 5 秒超时
+        )
+
+        // ★ 扫描结束后检查是否发现了目标设备
+        if (this._dormantPollGuard !== guard || this.connected) return
+
+        if (this._dormantFound && this._dormantFoundDevice) {
+          this._dormantFound = false
+          this._dormantFoundDevice = null
+
+          // ★ 发现设备 → 停止轮询，启动正常重连流程
+          console.log('[Store] 🌙 舒适模式发现设备，切换到自动重连')
+          this._stopDormantPoll()
+          this.reconnectMode = 'idle'
+          this.reconnectAttempt = 0
+          this._startReconnect()
+        }
+      } catch (e) {
+        // 扫描失败（蓝牙关闭等）静默处理，不影响轮询继续
+        console.log('[Store] 🌙 舒适模式扫描失败:', e?.message || e)
+      }
+    },
+
     /** 安排下一次重连 */
     _scheduleReconnect(delayMs) {
       if (this._reconnectTimer) {
@@ -822,11 +966,19 @@ export const useBleStore = defineStore('ble', {
           }
 
           if (this.reconnectAttempt >= 10) {
-            // 放弃：10 次均失败
-            this.reconnectMode = 'idle'
+            // ★ v3.23: 10 次失败后根据模式分支
             this.reconnectAttempt = 0
             this.reconnectNextDelay = 0
-            console.log('[Store] 重连失败，已达最大尝试次数')
+            if (this.autoReconnectMode === 'comfort') {
+              // 舒适模式 → 进入后台轮询
+              this.reconnectMode = 'idle'
+              console.log('[Store] 重连失败达 10 次，切换到舒适模式轮询')
+              this._startDormantPoll()
+            } else {
+              // 省电模式 → 彻底放弃
+              this.reconnectMode = 'idle'
+              console.log('[Store] 重连失败，已达最大尝试次数（省电模式，放弃重连）')
+            }
             return
           }
 
@@ -951,6 +1103,8 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
+      // ★ v3.23: 重连成功 → 停止舒适模式轮询
+      this._stopDormantPoll()
       // ★ v3.17: 连接成功后启动前台服务（Android 保活）
       this._ensureForegroundService()
       this._reconnectGuard = 0   /* ★ v3.16-P1: 连接成功，所有旧重连会话已失效，归零重置
@@ -1364,6 +1518,8 @@ export const useBleStore = defineStore('ble', {
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
+        // ★ v3.23: 连接成功 → 停止舒适模式轮询
+        this._stopDormantPoll()
         // ★ v3.17: 连接成功后启动前台服务（Android 保活）
         this._ensureForegroundService()
 
@@ -1504,6 +1660,16 @@ export const useBleStore = defineStore('ble', {
       this.manualCooldown = false
       if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null }
       setTimeout(() => { this._coolingDown = false }, 500)
+
+      // ★ v3.23: 舒适模式 → 用户断开后启动后台轮询，等待下次靠近自动连接
+      if (this.autoReconnectMode === 'comfort') {
+        // 保存 lastDeviceId 以便轮询时能找到目标
+        this.lastDeviceId = targetId
+        setTimeout(() => {
+          this._startDormantPoll()
+        }, 2000) // 2s 延迟，给系统清理旧连接的时间
+      }
+
       return true
     },
 
@@ -1711,6 +1877,48 @@ export const useBleStore = defineStore('ble', {
       }
 
       return true
+    },
+
+    // ==================== ★ v3.23: 智能重连模式 ====================
+
+    /**
+     * 设置智能重连模式
+     *
+     * @param {'comfort' | 'power_saver' | 'speed'} mode
+     */
+    setAutoReconnectMode(mode) {
+      if (!['comfort', 'power_saver', 'speed'].includes(mode)) {
+        console.warn('[Store] 无效的重连模式:', mode)
+        return
+      }
+      const prev = this.autoReconnectMode
+      this.autoReconnectMode = mode
+
+      // 持久化
+      try {
+        uni.setStorageSync('ble_auto_reconnect_mode', mode)
+      } catch {}
+
+      console.log(`[Store] 智能重连模式: ${prev} → ${mode}`)
+
+      // ★ 模式切换时的行为调整
+      if (mode === 'comfort') {
+        // 切换到舒适模式 → 如果当前未连接，启动轮询
+        if (!this.connected) {
+          this._startDormantPoll()
+        }
+      } else if (mode === 'power_saver') {
+        // 切换到省电模式 → 停止所有轮询
+        this._stopDormantPoll()
+        if (this._reconnectTimer) {
+          clearTimeout(this._reconnectTimer)
+          this._reconnectTimer = null
+        }
+        this.reconnectMode = 'idle'
+        this.reconnectAttempt = 0
+        this.reconnectNextDelay = 0
+      }
+      // speed 模式本次为占位，将在 Phase 3 实现
     },
   }
 })

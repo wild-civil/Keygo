@@ -225,11 +225,19 @@ onShow(async () => {
     return
   }
 
-  // ★ v3.14-bugfix2: 仅在 idle 模式尝试自动重连
-  //   'paused'（蓝牙关闭等待恢复）和 'dormant'（用户主动断开）不触发
-  if (bleStore.reconnectMode === 'idle') {
-    bleStore.tryAutoConnect()
+  // ★ v3.23: 根据智能重连模式决定 onShow 行为
+  if (bleStore.autoReconnectMode === 'comfort') {
+    // 舒适模式 → 加速轮询（立即扫描一次）
+    if (!bleStore.connected && !bleStore.scanning) {
+      bleStore._accelerateDormantPoll()
+    }
+  } else if (bleStore.autoReconnectMode === 'power_saver') {
+    // 省电模式 → 仅 idle 时尝试一次快速重连
+    if (bleStore.reconnectMode === 'idle') {
+      bleStore.tryAutoConnect()
+    }
   }
+  // speed 模式 Phase 3 实现
 })
 
 // ==================== 扫描 & 连接 ====================

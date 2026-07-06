@@ -1,5 +1,47 @@
 <template>
   <view class="page-config" :class="themeClass">
+    <!-- ★ v3.23: 智能重连模式选择（全局设置，无需连接） -->
+    <view class="reconnect-mode-section">
+      <view class="section-title">🔁 智能重连模式</view>
+      <view class="mode-cards">
+        <view class="mode-card"
+          :class="{ active: bleStore.autoReconnectMode === 'comfort' }"
+          @tap="handleModeChange('comfort')">
+          <view class="mode-card-header">
+            <text class="mode-icon">🌙</text>
+            <text class="mode-name">舒适模式</text>
+            <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'comfort'">当前</text>
+          </view>
+          <text class="mode-desc">断连后自动轮询，靠近车辆即可自动连接</text>
+          <text class="mode-power">额外功耗 ≈ 0.1%/天</text>
+        </view>
+
+        <view class="mode-card"
+          :class="{ active: bleStore.autoReconnectMode === 'power_saver' }"
+          @tap="handleModeChange('power_saver')">
+          <view class="mode-card-header">
+            <text class="mode-icon">🔋</text>
+            <text class="mode-name">省电模式</text>
+            <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'power_saver'">当前</text>
+          </view>
+          <text class="mode-desc">仅打开 App 时扫描连接，零后台功耗</text>
+          <text class="mode-power">额外功耗 = 0</text>
+        </view>
+
+        <view class="mode-card mode-card-disabled">
+          <view class="mode-card-header">
+            <text class="mode-icon">⚡</text>
+            <text class="mode-name">极速模式</text>
+            <text class="mode-soon">即将推出</text>
+          </view>
+          <text class="mode-desc">基于地理围栏，走到车边秒连</text>
+          <text class="mode-power">需后台定位权限</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="divider"></view>
+
     <!-- 连接状态提示 -->
     <view class="conn-warning" v-if="!bleStore.connected">
       <text>⚠️ 请先在「连接」页面连接设备</text>
@@ -177,6 +219,12 @@ onShow(() => {
   bleStore._restoreConfig(bleStore.serialNumber || undefined)
   syncFromStore()
 })
+
+// ★ v3.23: 智能重连模式切换
+function handleModeChange(mode) {
+  if (mode === bleStore.autoReconnectMode) return
+  bleStore.setAutoReconnectMode(mode)
+}
 
 // ★ slider 组件属性需要实际颜色值（不能传 CSS 变量）
 const sliderTrackColor = computed(() => themeStore.isDark ? '#2a2a5e' : '#e0e4e8')
@@ -409,5 +457,88 @@ async function handleSubmit() {
   font-size: 22rpx;
   color: var(--text-muted);
   margin-top: 12rpx;
+}
+
+/* ===== ★ v3.23: 智能重连模式选择 ===== */
+.reconnect-mode-section {
+  background: transparent;
+  margin-bottom: 10rpx;
+}
+
+.mode-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+}
+
+.mode-card {
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  padding: 24rpx;
+  border: 2rpx solid var(--border);
+  transition: all 0.25s ease;
+}
+
+.mode-card:active {
+  opacity: 0.7;
+  transform: scale(0.98);
+}
+
+.mode-card.active {
+  border-color: var(--accent);
+  background: var(--alpha-05);
+}
+
+.mode-card-disabled {
+  opacity: 0.5;
+}
+
+.mode-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 8rpx;
+}
+
+.mode-icon {
+  font-size: 36rpx;
+}
+
+.mode-name {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.mode-badge {
+  background: var(--accent);
+  color: #fff;
+  font-size: 20rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 20rpx;
+  font-weight: 500;
+}
+
+.mode-soon {
+  background: var(--border);
+  color: var(--text-muted);
+  font-size: 20rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 20rpx;
+}
+
+.mode-desc {
+  display: block;
+  font-size: 24rpx;
+  color: var(--text-secondary);
+  margin-bottom: 6rpx;
+  line-height: 1.5;
+}
+
+.mode-power {
+  display: block;
+  font-size: 20rpx;
+  color: var(--text-muted);
 }
 </style>
