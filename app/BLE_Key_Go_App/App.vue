@@ -3,32 +3,9 @@
     <router-view />
     <CustomTabBar />
   </view>
-  <!-- ★ v3.22: 电池优化豁免自定义弹窗（3 选项 + 返回后重新检查）
-       ★ v3.23-fix: 提升到 .app-root 外部，避免荣耀 MagicOS WebView 的
-          position:fixed 嵌套 containing-block 异常导致弹窗不可见 -->
-  <view v-if="batteryModalVisible" class="battery-overlay">
-    <view class="battery-modal">
-      <text class="battery-modal-title">{{ batteryModalTitle }}</text>
-      <scroll-view class="battery-modal-body" scroll-y>
-        <text class="battery-modal-text">{{ batteryModalContent }}</text>
-      </scroll-view>
-      <view class="battery-modal-btns">
-        <view class="battery-btn never" hover-class="battery-btn-never-hover" @tap="onBatteryNever">
-          <text>永不提醒</text>
-        </view>
-        <view class="battery-btn later" hover-class="battery-btn-later-hover" @tap="onBatteryLater">
-          <text>稍后提醒</text>
-        </view>
-        <view class="battery-btn go" hover-class="battery-btn-go-hover" @tap="onBatteryGoSettings">
-          <text>去设置</text>
-        </view>
-      </view>
-    </view>
-  </view>
 </template>
 
 <script setup>
-import { ref } from 'vue'
 import { onLaunch, onShow, onHide } from '@dcloudio/uni-app'
 import CustomTabBar from '@/components/CustomTabBar.vue'
 import { useThemeStore } from '@/stores/theme.js'
@@ -48,48 +25,69 @@ import {
 const themeStore = useThemeStore()
 const bleStore = useBleStore()
 
-// ==================== 电池优化豁免弹窗状态 ====================
+// ==================== 电池优化豁免弹窗 ====================
+// ★ v3.23-fix3: 荣耀 MagicOS WebView 不支持自定义 overlay，改为纯原生两步式：
+//   ① showModal（完整说明 +「知道了」）→ ② showActionSheet（三选项）
+//   两步分离，信息展示清晰，操作选择直观
 
-const batteryModalVisible = ref(false)
-const batteryModalTitle = ref('')
-const batteryModalContent = ref('')
 let _batteryModalShown = false  // 防止同一生命周期重复弹窗
 
-/** 显示电池优化引导弹窗 */
+/** 显示电池优化引导弹窗（两步原生交互，所有 ROM 兼容） */
 function showBatteryModal() {
   if (_batteryModalShown) return
   _batteryModalShown = true
 
   const guidance = getRomGuidance()
-  batteryModalTitle.value = guidance.title
-  batteryModalContent.value = guidance.content
-  batteryModalVisible.value = true
-
   console.log('[App] 电池豁免弹窗已显示（ROM=' + guidance.title + '）')
-}
 
-/** 按钮: 永不提醒 */
-function onBatteryNever() {
-  uni.setStorageSync('battery_opt_never_remind', 1)
-  batteryModalVisible.value = false
-  _batteryModalShown = false
-  console.log('[App] 电池豁免: 用户选择永不提醒')
-}
-
-/** 按钮: 稍后提醒（3天后再次弹窗） */
-function onBatteryLater() {
-  uni.setStorageSync('battery_opt_last_reminded', Date.now())
-  batteryModalVisible.value = false
-  _batteryModalShown = false
-  console.log('[App] 电池豁免: 稍后提醒，3天后再次弹窗')
-}
-
-/** 按钮: 去设置 → 跳转系统设置页 */
-function onBatteryGoSettings() {
-  uni.setStorageSync('battery_opt_pending', 1)
-  // 不在这里记录提醒时间——等用户回来确认豁免成功后才算
-  openBatteryOptimizationSettings()
-  console.log('[App] 电池豁免: 用户前往设置页')
+  // 第一步：展示完整说明，用户读完后点「知道了」
+  uni.showModal({
+    title: guidance.title,
+    content: guidance.content,
+    confirmText: '知道了',
+    showCancel: false,
+    success: (res) => {
+      if (!res.confirm) return
+      // 第二步A：选择操作 —「去设置」或「稍后提醒」
+      uni.showModal({
+        title: '选择操作',
+        content: '点击「去设置」前往系统设置页面，\n或「稍后提醒」3天后再次提醒。',
+        confirmText: '去设置',
+        cancelText: '稍后提醒',
+        success: (res2) => {
+          if (res2.confirm) {
+            // → 去设置
+            uni.setStorageSync('battery_opt_pending', 1)
+            openBatteryOptimizationSettings()
+            console.log('[App] 电池豁免: 用户前往设置页')
+            _batteryModalShown = false
+          } else {
+            // → 稍后提醒：追问是否永久不再提醒
+            uni.showModal({
+              title: '确认',
+              content: '是否永久不再提示电池优化？',
+              confirmText: '不再提示',
+              cancelText: '仅稍后',
+              success: (res3) => {
+                _batteryModalShown = false
+                if (res3.confirm) {
+                  uni.setStorageSync('battery_opt_never_remind', 1)
+                  console.log('[App] 电池豁免: 用户选择永不提醒')
+                } else {
+                  uni.setStorageSync('battery_opt_last_reminded', Date.now())
+                  console.log('[App] 电池豁免: 稍后提醒，3天后再次弹窗')
+                }
+              }
+            })
+          }
+        }
+      })
+    },
+    complete: () => {
+      // 如果用户关闭说明了但没选操作，解除锁定下次重新弹
+      if (_batteryModalShown) _batteryModalShown = false
+    }
+  })
 }
 
 /**
@@ -186,10 +184,9 @@ onShow(() => {
   if (uni.getStorageSync('battery_opt_pending')) {
     uni.removeStorageSync('battery_opt_pending')
     if (isIgnoringBatteryOptimizations()) {
-      // ✅ AOSP API 确认已豁免 → 清除所有标记，关闭弹窗
+      // ✅ AOSP API 确认已豁免 → 清除所有标记
       uni.removeStorageSync('battery_opt_last_reminded')
       uni.removeStorageSync('battery_opt_never_remind')
-      batteryModalVisible.value = false
       _batteryModalShown = false
       console.log('[App] ✅ 用户已授权电池豁免')
       uni.showToast({
@@ -214,7 +211,6 @@ onShow(() => {
           } else {
             // 记录提醒时间，3天后再弹
             uni.setStorageSync('battery_opt_last_reminded', Date.now())
-            batteryModalVisible.value = false
             _batteryModalShown = false
             console.log('[App] 电池豁免: 未完成，3天后再次提醒')
           }
@@ -471,87 +467,5 @@ button::after {
   --mgmt-hint:          rgba(204, 102, 0, 0.5);
 }
 
-/* ============================================================
-   ★ v3.22: 电池优化豁免自定义弹窗
-   ============================================================ */
-.battery-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.65);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 9999;
-}
 
-.battery-modal {
-  width: 620rpx;
-  max-height: 75vh;
-  background: var(--bg-card);
-  border-radius: 24rpx;
-  padding: 48rpx 40rpx 36rpx;
-  box-shadow: 0 16rpx 48rpx rgba(0, 0, 0, 0.5);
-  display: flex;
-  flex-direction: column;
-}
-
-.battery-modal-title {
-  font-size: 34rpx;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 24rpx;
-}
-
-.battery-modal-body {
-  max-height: 40vh;
-  margin-bottom: 36rpx;
-}
-
-.battery-modal-text {
-  font-size: 26rpx;
-  color: var(--text-secondary);
-  line-height: 1.7;
-  white-space: pre-wrap;
-}
-
-.battery-modal-btns {
-  display: flex;
-  gap: 16rpx;
-  flex-shrink: 0;
-}
-
-.battery-btn {
-  flex: 1;
-  height: 80rpx;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12rpx;
-  font-size: 26rpx;
-  font-weight: 600;
-  transition: opacity 0.15s;
-}
-
-.battery-btn:active {
-  opacity: 0.7;
-}
-
-.battery-btn.go {
-  background: var(--accent);
-  color: #fff;
-}
-
-.battery-btn.later {
-  background: var(--alpha-10);
-  color: var(--accent);
-}
-
-.battery-btn.never {
-  background: transparent;
-  color: var(--text-tertiary);
-  border: 1rpx solid var(--border);
-}
 </style>
