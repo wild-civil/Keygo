@@ -1,7 +1,13 @@
 /**
- * KeyGo 前台服务 JS 封装层 (v3.20.0)
+ * KeyGo 前台服务 JS 封装层 (v3.20.1)
  *
- * ★ v3.20.0: 完全纯 JS 实现，零原生插件依赖
+ * ★ v3.20.1: 修复通知不显示问题
+ *   修复点:
+ *     1. 渠道 ID 升级为 keygo_fg_v2（绕过系统缓存的旧 IMPORTANCE_LOW 配置）
+ *     2. setSmallIcon 改用 app 自身图标资源，不再依赖系统 drawable
+ *     3. 通知构建后注入 FLAG_FOREGROUND_SERVICE 标志
+ *     4. 创建渠道前先删除旧渠道
+ *     5. 全链路诊断日志
  *
  * 使用 plus.android 直接调用 Android 框架 API：
  *   1. 常驻通知（Notification + NotificationChannel，IMPORTANCE_DEFAULT 确保可见）
@@ -61,7 +67,9 @@ function getMainActivity() {
 
 // ==================== 通知常量 ====================
 
-const CHANNEL_ID = 'keygo_foreground_channel'
+// ★ v3.20.1: 换 ID 强制重建渠道（旧 LOW 级别被系统缓存，同 ID 无法升级）
+const CHANNEL_ID = 'keygo_fg_v2'
+const OLD_CHANNEL_ID = 'keygo_foreground_channel'
 const NOTIFICATION_ID = 1001
 
 // ==================== 通知渠道创建 ====================
@@ -73,24 +81,34 @@ function createNotificationChannel() {
     const NotificationChannel = plus.android.importClass('android.app.NotificationChannel')
     const NotificationManager = plus.android.importClass('android.app.NotificationManager')
 
-    // ★ v3.20: IMPORTANCE_DEFAULT 确保通知在状态栏可见（部分 ROM 上 LOW 不显示图标）
-    const channel = new NotificationChannel(
-      CHANNEL_ID,
-      'KeyGo 后台服务',
-      NotificationManager.IMPORTANCE_DEFAULT  // 状态栏显示图标，不响铃
-    )
-    channel.setDescription('保持蓝牙连接活跃，靠近车辆自动解锁')
-    channel.setShowBadge(false)
-    channel.setSound(null, null)    // 无声
-    channel.enableVibration(false)  // 不振动
-
     const main = getMainActivity()
     if (!main) return false
 
     const manager = main.getSystemService('notification')
-    if (manager) {
-      manager.createNotificationChannel(channel)
+    if (!manager) return false
+
+    // ★ v3.20.1: 先删除旧渠道（绕过系统缓存的 LOW 级别）
+    try {
+      manager.deleteNotificationChannel(OLD_CHANNEL_ID)
+      console.log(`${TAG} ℹ 已删除旧渠道: ${OLD_CHANNEL_ID}`)
+    } catch (e) {
+      // 旧渠道可能不存在，忽略
     }
+
+    // ★ v3.20.1: IMPORTANCE_DEFAULT + 新渠道 ID，确保状态栏图标可见
+    const channel = new NotificationChannel(
+      CHANNEL_ID,
+      'KeyGo 后台服务',
+      NotificationManager.IMPORTANCE_DEFAULT
+    )
+    channel.setDescription('保持蓝牙连接活跃，靠近车辆自动解锁')
+    channel.setShowBadge(true)    // ★ v3.20.1: 状态栏图标可见
+    channel.setSound(null, null)   // 无声
+    channel.enableVibration(false) // 不振动
+    channel.setLockscreenVisibility(0) // Notification.VISIBILITY_PUBLIC
+
+    manager.createNotificationChannel(channel)
+    console.log(`${TAG} ✅ 渠道已创建: ${CHANNEL_ID} (IMPORTANCE_DEFAULT)`)
     return true
   } catch (e) {
     console.error(`${TAG} ❌ createNotificationChannel 失败:`, e?.message || e)
@@ -101,76 +119,121 @@ function createNotificationChannel() {
 // ==================== 通知构建 ====================
 
 /**
- * 手动构建启动 Activity 的 Intent
- * 不用 getLaunchIntentForPackage（plus.android 对其支持不佳）
+ * 获取 app 自身的通知图标资源 ID
+ *
+ * ★ v3.20.1 核心修复：不再使用硬编码的 android.R.drawable.xxx
+ *   部分国产 ROM（Honor/MagicOS）的系统资源 ID 可能不存在或渲染为空白
+ *
+ * 回退链:
+ *   1. app drawable icon → 2. app mipmap ic_launcher → 3. 通用系统图标
  */
-function buildLauncherIntent(main) {
+function getAppIconResId(main, pkgName) {
   try {
-    const Intent = plus.android.importClass('android.content.Intent')
-    const ComponentName = plus.android.importClass('android.content.ComponentName')
+    const resources = plus.android.invoke(main, 'getResources')
+    if (!resources) return 0
 
-    const pkgName = plus.android.invoke(main, 'getPackageName')
-    const className = plus.android.invoke(
-      plus.android.invoke(main, 'getClass'),
-      'getName'
-    )
+    // 尝试 app 自身的 drawable icon
+    const candidates = [
+      { name: 'icon', type: 'drawable' },
+      { name: 'ic_launcher', type: 'mipmap' },
+      { name: 'ic_notification', type: 'drawable' },
+    ]
 
-    const intent = new Intent(Intent.ACTION_MAIN)
-    intent.addCategory(Intent.CATEGORY_LAUNCHER)
-    intent.setComponent(new ComponentName(pkgName, className))
-    // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-    intent.addFlags(0x10000000 | 0x00020000)
+    for (const c of candidates) {
+      try {
+        const id = plus.android.invoke(resources, 'getIdentifier', c.name, c.type, pkgName)
+        if (id !== 0) {
+          console.log(`${TAG} ℹ app 图标资源: ${pkgName}.${c.type}.${c.name} = ${id}`)
+          return id
+        }
+      } catch (_) { /* next */ }
+    }
 
-    return intent
+    // 回退：android.R.drawable.stat_notify_more (17301631) — 最通用的通知图标
+    const fallback = 17301631
+    console.log(`${TAG} ⚠ 未找到 app 图标，使用系统通用图标: ${fallback}`)
+    return fallback
   } catch (e) {
-    console.error(`${TAG} ❌ buildLauncherIntent 失败:`, e?.message || e)
-    // 回退：PACKAGE_NAME 改为获取 pkgName
-    return null
+    console.error(`${TAG} ❌ getAppIconResId 失败:`, e?.message || e)
+    return 17301631 // 最后的回退
   }
 }
 
 function buildNotification() {
   try {
     const main = getMainActivity()
-    if (!main) return null
+    if (!main) {
+      console.error(`${TAG} ❌ buildNotification: getMainActivity() = null`)
+      return null
+    }
 
+    const pkgName = plus.android.invoke(main, 'getPackageName')
+    console.log(`${TAG} ℹ 构建通知... pkg=${pkgName}`)
+
+    // PendingIntent：点击通知打开 App
     const PendingIntent = plus.android.importClass('android.app.PendingIntent')
-
-    // 点击通知 → 打开 App（手动构建 Intent，避免 plus.android 对 getLaunchIntentForPackage 支持不佳）
     const launchIntent = buildLauncherIntent(main)
 
     let pendingIntent = null
     if (launchIntent) {
-      const FLAG_UPDATE_CURRENT = 134217728  // 0x08000000
-      const FLAG_IMMUTABLE = 67108864         // 0x04000000
+      const FLAG_UPDATE_CURRENT = 134217728
+      const FLAG_IMMUTABLE = 67108864
       pendingIntent = PendingIntent.getActivity(
         main, 0, launchIntent,
         FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE
       )
+      console.log(`${TAG} ℹ PendingIntent: ${pendingIntent ? 'OK' : 'FAIL'}`)
+    } else {
+      console.log(`${TAG} ⚠ buildLauncherIntent 返回 null，无点击跳转`)
     }
 
+    // Builder
+    const Nb = plus.android.importClass('android.app.Notification$Builder')
     let builder
     if (getAndroidSdkVersion() >= 26) {
-      const Nb = plus.android.importClass('android.app.Notification$Builder')
       builder = new Nb(main, CHANNEL_ID)
     } else {
-      const Nb = plus.android.importClass('android.app.Notification$Builder')
       builder = new Nb(main)
     }
 
+    // ★ v3.20.1: 用 app 自身图标，不再依赖系统 drawable
+    const smallIconId = getAppIconResId(main, pkgName)
+    builder.setSmallIcon(smallIconId)
+    console.log(`${TAG} ℹ setSmallIcon(${smallIconId})`)
+
     builder.setContentTitle('KeyGo 车钥匙')
     builder.setContentText('后台运行中，靠近车辆自动解锁')
-    builder.setSmallIcon(17301638)  // android.R.drawable.ic_lock_lock
     builder.setOngoing(true)
-    builder.setPriority(0)  // Notification.PRIORITY_DEFAULT
-    // ★ v3.20: 设置为服务类别，部分系统会给更高优先级
-    builder.setCategory('service')  // Notification.CATEGORY_SERVICE
+    builder.setPriority(0)  // PRIORITY_DEFAULT
+    builder.setCategory('service')  // CATEGORY_SERVICE
 
     if (pendingIntent) {
       builder.setContentIntent(pendingIntent)
     }
 
-    return builder.build()
+    // build
+    const notification = builder.build()
+    if (!notification) {
+      console.error(`${TAG} ❌ builder.build() 返回 null`)
+      return null
+    }
+
+    // ★ v3.20.1: 注入 FLAG_FOREGROUND_SERVICE
+    //   在 notification 对象上直接设置 flags 字段
+    const FLAG_FOREGROUND_SERVICE = 0x00000040  // 64
+    const FLAG_NO_CLEAR = 0x00000020            // 32
+    try {
+      const flagsField = notification.getClass().getField('flags')
+      const currentFlags = flagsField.getInt(notification)
+      flagsField.setInt(notification, currentFlags | FLAG_FOREGROUND_SERVICE | FLAG_NO_CLEAR)
+      console.log(`${TAG} ℹ FLAG_FOREGROUND_SERVICE 已设置`)
+    } catch (e) {
+      console.warn(`${TAG} ⚠ 无法设置 FLAG_FOREGROUND_SERVICE:`, e?.message)
+      // 不影响主流程，通知仍然会尝试显示
+    }
+
+    console.log(`${TAG} ✅ 通知对象构建完成`)
+    return notification
   } catch (e) {
     console.error(`${TAG} ❌ buildNotification 失败:`, e?.message || e)
     return null
