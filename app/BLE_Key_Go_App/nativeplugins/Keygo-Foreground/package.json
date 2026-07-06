@@ -9,7 +9,7 @@
       "plugins": [
         {
           "type": "module",
-          "name": "Keygo-Foreground",
+          "name": "Keygo-Foreground-ForegroundModule",
           "class": "com.keygo.foreground.ForegroundPlugin"
         }
       ],

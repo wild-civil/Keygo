@@ -1,13 +1,14 @@
 /**
- * KeyGo 前台服务 JS 封装层 (v3.17.2)
+ * KeyGo 前台服务 JS 封装层 (v3.20.0)
  *
- * ★ 改用 plus.android 直接操作 Service，不依赖 uni.requireNativePlugin
- *   只要 Java 代码被编译进 APK（自定义基座 / 云打包），即可通过标准 Intent 启动
+ * ★ v3.20.0: 完全纯 JS 实现，零原生插件依赖
  *
- * 设计原则：
- *   - Android → plus.android 发 Intent 启动 ForegroundService
- *   - 同时保留 uni.requireNativePlugin 作为备用路径
- *   - iOS / 鸿蒙 / 小程序 → 空操作（静默返回，不抛异常）
+ * 使用 plus.android 直接调用 Android 框架 API：
+ *   1. 常驻通知（Notification + NotificationChannel，IMPORTANCE_DEFAULT 确保可见）
+ *   2. WakeLock（PARTIAL_WAKE_LOCK 防 CPU 休眠）
+ *   3. 通知权限请求（Android 13+）+ 运行时诊断
+ *
+ * iOS / 鸿蒙 / 小程序 → 空操作（静默返回）
  *
  * @module foreground-service
  */
@@ -16,9 +17,7 @@ const TAG = '[ForegroundService]'
 
 // ==================== 平台判断 ====================
 
-/**
- * 是否在 Android App 环境中
- */
+/** 是否在 Android App 环境中 */
 function isAndroidApp() {
   try {
     if (typeof plus === 'undefined') return false
@@ -38,15 +37,13 @@ function getAndroidSdkVersion() {
     if (!isAndroidApp()) { _sdkVersion = 0; return 0 }
     const Build = plus.android.importClass('android.os.Build')
     _sdkVersion = Build.VERSION.SDK_INT
-    console.log(`${TAG} ℹ Android SDK: ${_sdkVersion}`)
   } catch (e) {
     _sdkVersion = 0
-    console.warn(`${TAG} ⚠ 无法获取 SDK 版本:`, e?.message)
   }
   return _sdkVersion
 }
 
-// ==================== 获取 MainActivity ====================
+// ==================== 获取 Context ====================
 
 let _mainActivity = undefined
 let _mainActivityFetched = false
@@ -56,166 +53,298 @@ function getMainActivity() {
   _mainActivityFetched = true
   try {
     _mainActivity = plus.android.runtimeMainActivity()
-    if (!_mainActivity) {
-      console.warn(`${TAG} ⚠ runtimeMainActivity 返回 null`)
-    }
   } catch (e) {
-    console.warn(`${TAG} ⚠ runtimeMainActivity 异常:`, e?.message)
     _mainActivity = null
   }
   return _mainActivity
 }
 
-// ==================== 双模 Service 调用 ====================
+// ==================== 通知常量 ====================
 
-// 模式 1: uni.requireNativePlugin（需插件正确编译）
-let _plugin = null
-let _pluginChecked = false
-let _pluginMode = 'unchecked'   // 'unchecked' | 'nativePlugin' | 'intentOnly'
+const CHANNEL_ID = 'keygo_foreground_channel'
+const NOTIFICATION_ID = 1001
 
-function _checkNativePlugin() {
-  if (_pluginChecked) return _pluginMode
-  _pluginChecked = true
+// ==================== 通知渠道创建 ====================
 
-  // 非 Android 环境
-  if (!isAndroidApp()) {
-    _pluginMode = 'unsupported'
-    return _pluginMode
-  }
-
-  // 尝试加载原生插件
+function createNotificationChannel() {
   try {
-    _plugin = uni.requireNativePlugin('Keygo-Foreground')
-    if (_plugin && typeof _plugin.start === 'function') {
-      _pluginMode = 'nativePlugin'
-      console.log(`${TAG} ✅ uni.requireNativePlugin 可用（原生插件模式）`)
-    } else {
-      _pluginMode = 'intentOnly'
-      _plugin = null
-      console.warn(`${TAG} ⚠ uni.requireNativePlugin 不可用，将使用 Intent 模式`)
-    }
-  } catch (e) {
-    _pluginMode = 'intentOnly'
-    _plugin = null
-    console.warn(`${TAG} ⚠ uni.requireNativePlugin 异常:`, e?.message)
-  }
+    if (getAndroidSdkVersion() < 26) return true  // Android 8 以下不需要
 
-  return _pluginMode
+    const NotificationChannel = plus.android.importClass('android.app.NotificationChannel')
+    const NotificationManager = plus.android.importClass('android.app.NotificationManager')
+
+    // ★ v3.20: IMPORTANCE_DEFAULT 确保通知在状态栏可见（部分 ROM 上 LOW 不显示图标）
+    const channel = new NotificationChannel(
+      CHANNEL_ID,
+      'KeyGo 后台服务',
+      NotificationManager.IMPORTANCE_DEFAULT  // 状态栏显示图标，不响铃
+    )
+    channel.setDescription('保持蓝牙连接活跃，靠近车辆自动解锁')
+    channel.setShowBadge(false)
+    channel.setSound(null, null)    // 无声
+    channel.enableVibration(false)  // 不振动
+
+    const main = getMainActivity()
+    if (!main) return false
+
+    const manager = main.getSystemService('notification')
+    if (manager) {
+      manager.createNotificationChannel(channel)
+    }
+    return true
+  } catch (e) {
+    console.error(`${TAG} ❌ createNotificationChannel 失败:`, e?.message || e)
+    return false
+  }
 }
 
-// 模式 2: plus.android Intent 直接调用
-let _serviceClass = null
-let _serviceClassChecked = false
+// ==================== 通知构建 ====================
 
-function _getServiceClass() {
-  if (_serviceClassChecked) return _serviceClass
-  _serviceClassChecked = true
+/**
+ * 手动构建启动 Activity 的 Intent
+ * 不用 getLaunchIntentForPackage（plus.android 对其支持不佳）
+ */
+function buildLauncherIntent(main) {
   try {
-    _serviceClass = plus.android.importClass('com.keygo.foreground.ForegroundService')
-    console.log(`${TAG} ✅ ForegroundService 类已加载`)
+    const Intent = plus.android.importClass('android.content.Intent')
+    const ComponentName = plus.android.importClass('android.content.ComponentName')
+
+    const pkgName = plus.android.invoke(main, 'getPackageName')
+    const className = plus.android.invoke(
+      plus.android.invoke(main, 'getClass'),
+      'getName'
+    )
+
+    const intent = new Intent(Intent.ACTION_MAIN)
+    intent.addCategory(Intent.CATEGORY_LAUNCHER)
+    intent.setComponent(new ComponentName(pkgName, className))
+    // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+    intent.addFlags(0x10000000 | 0x00020000)
+
+    return intent
   } catch (e) {
-    console.error(`${TAG} ❌ ForegroundService 类未找到（Java 代码未编译进 APK）:`, e?.message)
-    _serviceClass = null
+    console.error(`${TAG} ❌ buildLauncherIntent 失败:`, e?.message || e)
+    // 回退：PACKAGE_NAME 改为获取 pkgName
+    return null
   }
-  return _serviceClass
+}
+
+function buildNotification() {
+  try {
+    const main = getMainActivity()
+    if (!main) return null
+
+    const PendingIntent = plus.android.importClass('android.app.PendingIntent')
+
+    // 点击通知 → 打开 App（手动构建 Intent，避免 plus.android 对 getLaunchIntentForPackage 支持不佳）
+    const launchIntent = buildLauncherIntent(main)
+
+    let pendingIntent = null
+    if (launchIntent) {
+      const FLAG_UPDATE_CURRENT = 134217728  // 0x08000000
+      const FLAG_IMMUTABLE = 67108864         // 0x04000000
+      pendingIntent = PendingIntent.getActivity(
+        main, 0, launchIntent,
+        FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE
+      )
+    }
+
+    let builder
+    if (getAndroidSdkVersion() >= 26) {
+      const Nb = plus.android.importClass('android.app.Notification$Builder')
+      builder = new Nb(main, CHANNEL_ID)
+    } else {
+      const Nb = plus.android.importClass('android.app.Notification$Builder')
+      builder = new Nb(main)
+    }
+
+    builder.setContentTitle('KeyGo 车钥匙')
+    builder.setContentText('后台运行中，靠近车辆自动解锁')
+    builder.setSmallIcon(17301638)  // android.R.drawable.ic_lock_lock
+    builder.setOngoing(true)
+    builder.setPriority(0)  // Notification.PRIORITY_DEFAULT
+    // ★ v3.20: 设置为服务类别，部分系统会给更高优先级
+    builder.setCategory('service')  // Notification.CATEGORY_SERVICE
+
+    if (pendingIntent) {
+      builder.setContentIntent(pendingIntent)
+    }
+
+    return builder.build()
+  } catch (e) {
+    console.error(`${TAG} ❌ buildNotification 失败:`, e?.message || e)
+    return null
+  }
+}
+
+// ==================== 通知显示 / 隐藏 ====================
+
+function checkNotifyPermission() {
+  try {
+    const sdk = getAndroidSdkVersion()
+    if (sdk < 33) return 'not_required'
+    const main = getMainActivity()
+    if (!main) return 'unknown'
+    const result = plus.android.invoke(main, 'checkSelfPermission', 'android.permission.POST_NOTIFICATIONS')
+    return result === 0 ? 'granted' : 'denied'
+  } catch (e) {
+    return 'error'
+  }
+}
+
+function showNotification() {
+  try {
+    // ★ v3.20: 先诊断权限状态
+    const perm = checkNotifyPermission()
+    console.log(`${TAG} ℹ 通知权限状态: ${perm}`)
+
+    const notification = buildNotification()
+    if (!notification) {
+      console.error(`${TAG} ❌ 通知对象构建失败`)
+      return false
+    }
+
+    const main = getMainActivity()
+    if (!main) return false
+    const manager = main.getSystemService('notification')
+    if (!manager) return false
+
+    manager.notify(NOTIFICATION_ID, notification)
+    console.log(`${TAG} ✅ 通知已发送 (id=${NOTIFICATION_ID})`)
+    return true
+  } catch (e) {
+    console.error(`${TAG} ❌ 通知显示失败:`, e?.message || e)
+    return false
+  }
+}
+
+function cancelNotification() {
+  try {
+    const main = getMainActivity()
+    if (!main) return
+    const manager = main.getSystemService('notification')
+    if (manager) {
+      manager.cancel(NOTIFICATION_ID)
+    }
+    console.log(`${TAG} ✅ 通知已取消`)
+  } catch (e) {
+    // 静默
+  }
+}
+
+// ==================== WakeLock ====================
+
+let _wakeLock = null
+let _wakeLockPowerMgr = null
+
+function acquireWakeLock() {
+  if (_wakeLock !== null) return true  // 已持有
+  try {
+    const main = getMainActivity()
+    if (!main) return false
+
+    const PowerManager = plus.android.importClass('android.os.PowerManager')
+    const pm = main.getSystemService('power')
+
+    if (!pm) return false
+    _wakeLockPowerMgr = pm
+
+    const PARTIAL_FLAG = 0x00000001  // PARTIAL_WAKE_LOCK
+    _wakeLock = pm.newWakeLock(PARTIAL_FLAG, 'KeyGo::BleKeepAlive')
+    if (_wakeLock) {
+      _wakeLock.setReferenceCounted(false)
+      _wakeLock.acquire()
+      console.log(`${TAG} ✅ WakeLock 已获取`)
+      return true
+    }
+    return false
+  } catch (e) {
+    console.error(`${TAG} ❌ WakeLock 获取失败:`, e?.message || e)
+    _wakeLock = null
+    return false
+  }
+}
+
+function releaseWakeLock() {
+  if (_wakeLock === null) return
+  try {
+    if (_wakeLock.isHeld && _wakeLock.isHeld()) {
+      _wakeLock.release()
+      console.log(`${TAG} ✅ WakeLock 已释放`)
+    }
+  } catch (e) {
+    // WakeLock 可能已被系统回收
+  }
+  _wakeLock = null
+  _wakeLockPowerMgr = null
+}
+
+function isWakeLockHeld() {
+  if (_wakeLock === null) return false
+  try {
+    return _wakeLock.isHeld()
+  } catch (e) {
+    return false
+  }
 }
 
 // ==================== 公开 API ====================
 
-/**
- * 诊断信息
- */
+let _serviceStarted = false
+
 export function getPluginStatus() {
-  _checkNativePlugin()
-  const svcClass = isAndroidApp() ? _getServiceClass() : null
+  const sdkVersion = getAndroidSdkVersion()
 
   return {
-    mode: _pluginMode,
-    pluginLoaded: _plugin != null,      // ★ 修复: != 同时匹配 null 和 undefined
-    serviceClassFound: svcClass != null,
+    mode: 'jsOnly',
+    pluginLoaded: false,
     isAndroidApp: isAndroidApp(),
-    sdkVersion: getAndroidSdkVersion(),
+    sdkVersion: sdkVersion,
     mainActivity: getMainActivity() != null,
+    wakeLockHeld: isWakeLockHeld(),
+    notificationShown: _serviceStarted
   }
 }
 
 /**
- * 启动前台服务
+ * 启动前台服务（v3.19.0 纯 JS 实现）
  *
- * ★ v3.17.2 双模策略:
- *   1. 优先用 uni.requireNativePlugin（如果插件正确编译）
- *   2. 回退到 plus.android Intent 直接启动（不依赖插件模块系统）
+ * 执行顺序:
+ *   1. 创建通知渠道
+ *   2. 构建并显示常驻通知
+ *   3. 获取 PARTIAL_WAKE_LOCK
  *
  * @returns {Promise<boolean>}
  */
 export function startForegroundService() {
-  // 非 Android → 静默成功
   if (!isAndroidApp()) {
     return Promise.resolve(true)
   }
 
-  const mode = _checkNativePlugin()
-
-  // ====== 路径 1: 原生插件 ======
-  if (mode === 'nativePlugin' && _plugin) {
-    return new Promise((resolve) => {
-      try {
-        _plugin.start({}, (res) => {
-          if (res && res.success) {
-            console.log(`${TAG} ✅ [Plugin] 前台服务已启动`)
-            resolve(true)
-          } else {
-            console.warn(`${TAG} ⚠ [Plugin] 启动失败: ${res?.error || 'unknown'}，回退 Intent 模式`)
-            _startViaIntent().then(resolve)
-          }
-        })
-      } catch (e) {
-        console.warn(`${TAG} ⚠ [Plugin] 调用异常: ${e?.message}，回退 Intent 模式`)
-        _startViaIntent().then(resolve)
-      }
-    })
-  }
-
-  // ====== 路径 2: Intent 直接启动 ======
-  return _startViaIntent()
+  return Promise.resolve(startViaPureJs())
 }
 
 /**
- * 通过 plus.android Intent 直接启动 Service
+ * 纯 JS 实现：通知 + WakeLock
  */
-function _startViaIntent() {
-  return new Promise((resolve) => {
-    try {
-      const main = getMainActivity()
-      if (!main) {
-        console.error(`${TAG} ❌ [Intent] 无法获取 MainActivity`)
-        resolve(false)
-        return
-      }
+function startViaPureJs() {
+  try {
+    const channelOk = createNotificationChannel()
+    console.log(`${TAG} ${channelOk ? '✅' : '⚠'} 通知渠道: ${channelOk ? '已创建' : '失败'}`)
 
-      const svcClass = _getServiceClass()
-      if (!svcClass) {
-        console.error(`${TAG} ❌ [Intent] ForegroundService 类未编译进 APK`)
-        resolve(false)
-        return
-      }
+    const notifyOk = showNotification()
+    console.log(`${TAG} ${notifyOk ? '✅' : '⚠'} 通知显示: ${notifyOk ? '已显示' : '失败'}`)
 
-      const Intent = plus.android.importClass('android.content.Intent')
-      const intent = new Intent(main, svcClass)
+    const wlOk = acquireWakeLock()
+    console.log(`${TAG} ${wlOk ? '✅' : '⚠'} WakeLock: ${wlOk ? '已获取' : '失败'}`)
 
-      if (getAndroidSdkVersion() >= 26) {
-        main.startForegroundService(intent)
-      } else {
-        main.startService(intent)
-      }
-
-      console.log(`${TAG} ✅ [Intent] startForegroundService 已调用`)
-      resolve(true)
-    } catch (e) {
-      console.error(`${TAG} ❌ [Intent] 启动异常:`, e?.message || e)
-      resolve(false)
-    }
-  })
+    _serviceStarted = true
+    console.log(`${TAG} ✅ 前台服务（纯 JS 模式）已启动 | 通知=${notifyOk} WakeLock=${wlOk}`)
+    return true
+  } catch (e) {
+    console.error(`${TAG} ❌ 纯 JS 启动失败:`, e?.message || e)
+    return false
+  }
 }
 
 /**
@@ -227,44 +356,12 @@ export function stopForegroundService() {
     return Promise.resolve(true)
   }
 
-  // 先尝试原生插件
-  if (_pluginMode === 'nativePlugin' && _plugin) {
-    try {
-      _plugin.stop({}, (res) => {
-        console.log(`${TAG} ✅ [Plugin] 前台服务已停止`)
-      })
-    } catch (e) {
-      // 忽略失败，继续 Intent 路径
-    }
-  }
+  cancelNotification()
+  releaseWakeLock()
+  _serviceStarted = false
 
-  // Intent 路径停止
-  return _stopViaIntent()
-}
-
-/**
- * 通过 plus.android Intent 直接停止 Service
- */
-function _stopViaIntent() {
-  return new Promise((resolve) => {
-    try {
-      const main = getMainActivity()
-      if (!main) { resolve(true); return }
-
-      const svcClass = _getServiceClass()
-      if (!svcClass) { resolve(true); return }
-
-      const Intent = plus.android.importClass('android.content.Intent')
-      const intent = new Intent(main, svcClass)
-      main.stopService(intent)
-
-      console.log(`${TAG} ✅ [Intent] stopService 已调用`)
-      resolve(true)
-    } catch (e) {
-      console.warn(`${TAG} ⚠ [Intent] 停止异常:`, e?.message || e)
-      resolve(false)
-    }
-  })
+  console.log(`${TAG} ✅ 前台服务已停止`)
+  return Promise.resolve(true)
 }
 
 /**
@@ -276,61 +373,13 @@ export function isForegroundServiceRunning() {
     return Promise.resolve(false)
   }
 
-  // 先尝试原生插件
-  if (_pluginMode === 'nativePlugin' && _plugin) {
-    return new Promise((resolve) => {
-      try {
-        _plugin.isRunning({}, (res) => {
-          if (res && typeof res.running === 'boolean') {
-            resolve(res.running)
-            return
-          }
-          _checkRunningViaActivityManager().then(resolve)
-        })
-      } catch (e) {
-        _checkRunningViaActivityManager().then(resolve)
-      }
-    })
-  }
-
-  return _checkRunningViaActivityManager()
-}
-
-/**
- * 通过 ActivityManager 检查 Service 运行状态
- */
-function _checkRunningViaActivityManager() {
-  return new Promise((resolve) => {
-    try {
-      const main = getMainActivity()
-      if (!main) { resolve(false); return }
-
-      const ActivityManager = plus.android.importClass('android.app.ActivityManager')
-      const am = main.getSystemService('activity')
-      if (!am) { resolve(false); return }
-
-      const services = am.getRunningServices(Number.MAX_VALUE || 2147483647)
-      if (!services) { resolve(false); return }
-
-      const targetName = 'com.keygo.foreground.ForegroundService'
-      for (let i = 0; i < services.size(); i++) {
-        const s = services.get(i)
-        if (s && s.service && s.service.getClassName() === targetName) {
-          resolve(true)
-          return
-        }
-      }
-      resolve(false)
-    } catch (e) {
-      resolve(false)
-    }
-  })
+  return Promise.resolve(isWakeLockHeld())
 }
 
 // ==================== 通知权限 ====================
 
 /**
- * ★ 请求通知权限（Android 13+ 必须）
+ * 请求通知权限（Android 13+ 必须）
  * @returns {Promise<boolean>}
  */
 export function requestNotificationPermission() {
@@ -373,3 +422,4 @@ export function requestNotificationPermission() {
     }
   })
 }
+
