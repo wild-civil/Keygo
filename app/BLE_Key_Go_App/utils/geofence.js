@@ -69,7 +69,7 @@ export function getCurrentPosition() {
     let done = false
 
     uni.getLocation({
-      type: 'gcj02',   // 国测局坐标（国内地图一致）
+      type: 'wgs84',   // WGS-84 全球通用坐标（部分设备不支持 gcj02）
       geocode: false,
       isHighAccuracy: true,  // 使用 GPS 精确定位
       timeout: GPS_TIMEOUT * 1000,
@@ -100,7 +100,7 @@ export function getCurrentPositionCoarse() {
   return new Promise((resolve) => {
     let done = false
     uni.getLocation({
-      type: 'gcj02',
+      type: 'wgs84',
       geocode: false,
       isHighAccuracy: false, // ★ 低功耗模式
       timeout: 5000,          // 5 秒超时
@@ -299,7 +299,7 @@ export function startGeofenceMonitor(onEnter, onLeave) {
         timeout: 30000,              // 30 秒超时
         maximumAge: 60000,           // 允许 60 秒缓存（减少 GPS 唤醒）
         provider: 'system',          // 系统自动选择（network → gps）
-        coordsType: 'gcj02',         // 国测局坐标
+        coordsType: 'wgs84',         // WGS-84 全球通用（兼容性最好）
       }
     )
 
