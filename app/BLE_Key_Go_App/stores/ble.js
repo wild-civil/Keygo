@@ -45,6 +45,8 @@ import {
   stopHeartbeatAlarm,
   registerScreenOnReceiver,
   unregisterScreenOnReceiver,
+  startNativeBackgroundScan,
+  stopNativeBackgroundScan,
 } from '@/utils/foreground-service.js'
 
 // ★ v3.23 Phase 3: 地理围栏工具
@@ -536,12 +538,29 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
+      const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+
+      // ★ v3.24: 优先原生插件（真正后台重连的核心）
+      //   原生层 KeygoBleScanService 在原生 Android 进程常驻，锁屏/Doze 下仍能 BLE 扫描，
+      //   扫到已知设备即回调唤醒 JS 触发 tryAutoConnect。这是纯 JS 方案做不到的。
+      if (knownId) {
+        const started = startNativeBackgroundScan('', (dev) => this._onNativeDeviceFound(dev))
+        if (started) {
+          this._foregroundServiceActive = true
+          this._foregroundServiceNative = true
+          this._foregroundServiceFailCount = 0
+          console.log('[Store] 🔒 原生前台服务 + 后台扫描已启动（已知设备:', knownId, '）')
+          return
+        }
+      }
+
+      // ★ 回退：纯 JS（无已知设备 或 插件不可用）
       try {
         const result = await startForegroundService()
         if (result === true) {
           this._foregroundServiceActive = true
           this._foregroundServiceFailCount = 0
-          console.log('[Store] 🔒 前台服务已启动（通知栏应可见）')
+          console.log('[Store] 🔒 前台服务已启动（纯 JS 回退，通知栏应可见）')
         } else {
           this._foregroundServiceFailCount++
           // ★ v3.17.1: 打印诊断信息帮助定位失败原因
@@ -568,13 +587,47 @@ export const useBleStore = defineStore('ble', {
     async _stopForegroundService() {
       if (!this._foregroundServiceActive) return
       try {
-        await stopForegroundService()
+        if (this._foregroundServiceNative) {
+          stopNativeBackgroundScan()
+        } else {
+          await stopForegroundService()
+        }
         console.log('[Store] 🔓 前台服务已停止')
       } catch (e) {
         console.warn('[Store] 前台服务停止失败:', e?.message || e)
       } finally {
         this._foregroundServiceActive = false
+        this._foregroundServiceNative = false
       }
+    },
+
+    /**
+     * ★ v3.24: 原生后台扫描发现设备回调
+     *
+     * 由 KeygoBleScanService（原生层）扫到设备后经 UniJSCallback 触发。
+     * 这里只做一件事：若扫到的是「已知设备」(MAC 匹配)，且当前应自动重连、尚未连接，
+     * 则调用已有的 tryAutoConnect() 完成连接（复用成熟逻辑，不在原生层重写 GATT）。
+     *
+     * @param {object} dev { event, mac, name, rssi }
+     */
+    _onNativeDeviceFound(dev) {
+      if (this.connected) return
+      if (!this._shouldAutoReconnect()) return
+      const mac = (dev && dev.mac) || ''
+      if (!mac) return
+      const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+      if (!knownId) return
+      // MAC 比对（统一去冒号 + 大写，兼容大小写/分隔符差异）
+      const a = String(mac).replace(/:/g, '').toUpperCase()
+      const b = String(knownId).replace(/:/g, '').toUpperCase()
+      if (a !== b) return
+      // ★ 节流：原生扫描是持续的，设备持续广播会高频回调（每秒可能数次），
+      //   若直接每次 tryAutoConnect 会狂连。限制 8s 内最多触发一次。
+      const now = Date.now()
+      if (this._lastNativeReconnect && now - this._lastNativeReconnect < 8000) return
+      this._lastNativeReconnect = now
+      console.log('[Store] 🔑 原生后台扫描发现已知设备，触发重连')
+      this.tryAutoConnect()
     },
 
     /**

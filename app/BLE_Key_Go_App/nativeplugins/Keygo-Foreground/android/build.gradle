@@ -1,0 +1,22 @@
+apply plugin: 'com.android.library'
+
+android {
+    compileSdkVersion 30
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 30
+        versionCode 1
+        versionName "1.0"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // uni-app 的 UniModule / UniJSCallback 等类由打包环境注入：
+    //   - 云端打包 / 自定义调试基座：DCloud 编译时自动提供 uniapp sdk，无需手动放置
+    //   - 本地离线打包：请把 uni-app 离线 SDK 里的 uniapp-release.aar 放到 android/libs/ 下
+    compileOnly fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
+}

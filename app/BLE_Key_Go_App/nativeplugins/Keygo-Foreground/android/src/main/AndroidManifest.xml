@@ -1,0 +1,20 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.keygo.foreground">
+
+    <!-- 前台服务及 connectedDevice 类型所需权限（app 级已在 manifest.json 声明，这里补全以保证插件独立可编） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application>
+        <!--
+          ★ foregroundServiceType="connectedDevice" 是 Android 14+ 的硬性要求：
+            不声明则 startForeground() 抛 MissingForegroundServiceTypeException。
+            声明该类型后，系统允许本服务在后台执行蓝牙扫描而不被限流。
+        -->
+        <service
+            android:name=".KeygoBleScanService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+</manifest>

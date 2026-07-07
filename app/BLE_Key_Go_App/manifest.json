@@ -18,6 +18,9 @@
         "modules" : {
             "Bluetooth" : {}
         },
+        "nativePlugins" : {
+            "Keygo-Foreground" : {}
+        },
         "distribute" : {
             "android" : {
                 "permissions" : [

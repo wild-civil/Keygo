@@ -804,3 +804,89 @@ export function unregisterScreenOnReceiver() {
   console.log(`${TAG} 📱 亮屏广播已注销`)
 }
 
+// ==================== ★ v3.24: 原生后台扫描（真正后台重连的核心） ====================
+
+let _nativePlugin = null
+let _nativeScanActive = false
+
+/**
+ * 获取原生插件实例（Keygo-Foreground）。
+ * 仅在自定义基座 / 云端打包 / 离线工程下可用；标准基座返回 null（走纯 JS 回退）。
+ * @returns {object|null}
+ */
+export function getNativePlugin() {
+  if (_nativePlugin === null) {
+    try {
+      _nativePlugin = uni.requireNativePlugin('Keygo-Foreground')
+    } catch (e) {
+      _nativePlugin = false
+    }
+  }
+  return _nativePlugin || null
+}
+
+/**
+ * 启动原生前台服务 + 后台 BLE 扫描。
+ *
+ * 原生层（KeygoBleScanService）在原生 Android 进程内常驻，不受 JS 冻结影响，
+ * 扫到设备后通过 UniJSCallback 把 { event:'devicefound', mac, name, rssi } 推回本回调。
+ *
+ * @param {string} targetName     可选，扫描过滤的设备名（为空则扫描全部，更稳妥）
+ * @param {Function} onDeviceFound 回调 (dev:{event,mac,name,rssi}) => void
+ * @returns {boolean} 是否已成功发起（插件可用且调用成功）
+ */
+export function startNativeBackgroundScan(targetName, onDeviceFound) {
+  const plugin = getNativePlugin()
+  if (!plugin) {
+    console.warn(`${TAG} ⚠ 原生插件不可用，后台扫描回退纯 JS`)
+    return false
+  }
+  if (_nativeScanActive) {
+    console.log(`${TAG} ℹ 原生后台扫描已在运行`)
+    return true
+  }
+  try {
+    _nativeScanActive = true  // 已发起，防止重复调用
+    plugin.startScan({ targetName: targetName || '' }, (res) => {
+      if (!res || typeof res !== 'object') return
+      if (res.event === 'started') {
+        console.log(`${TAG} ✅ 原生前台服务 + 后台扫描已启动`)
+      } else if (res.event === 'devicefound') {
+        if (onDeviceFound) {
+          try { onDeviceFound(res) } catch (e) {
+            console.error(`${TAG} ❌ 原生设备回调异常:`, e?.message || e)
+          }
+        }
+      } else if (res.event === 'error') {
+        console.error(`${TAG} ❌ 原生后台扫描错误:`, res.message)
+        _nativeScanActive = false
+      }
+    })
+    return true
+  } catch (e) {
+    console.error(`${TAG} ❌ 调用原生 startScan 失败:`, e?.message || e)
+    _nativeScanActive = false
+    return false
+  }
+}
+
+/**
+ * 停止原生前台服务 + 后台 BLE 扫描。
+ */
+export function stopNativeBackgroundScan() {
+  const plugin = getNativePlugin()
+  if (plugin) {
+    try { plugin.stopScan() } catch (e) { /* ignore */ }
+  }
+  _nativeScanActive = false
+  console.log(`${TAG} ✅ 原生后台扫描已停止`)
+}
+
+/**
+ * 查询原生后台扫描是否在运行
+ * @returns {boolean}
+ */
+export function isNativeBackgroundScanActive() {
+  return _nativeScanActive
+}
+
