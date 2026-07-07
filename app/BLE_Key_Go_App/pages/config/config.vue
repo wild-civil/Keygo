@@ -12,8 +12,8 @@
             <text class="mode-name">舒适模式</text>
             <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'comfort'">当前</text>
           </view>
-          <text class="mode-desc">断连后自动轮询，靠近车辆即可自动连接</text>
-          <text class="mode-power">额外功耗 ≈ 0.1%/天</text>
+          <text class="mode-desc">解锁手机即可自动连接，零后台功耗</text>
+          <text class="mode-power">仅亮屏时触发扫描，几乎无额外耗电</text>
         </view>
 
         <view class="mode-card"

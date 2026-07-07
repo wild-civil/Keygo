@@ -225,11 +225,11 @@ onShow(async () => {
     return
   }
 
-  // ★ v3.23: 根据智能重连模式决定 onShow 行为
+  // ★ v1.0.1: 根据智能重连模式决定 onShow 行为
   if (bleStore.autoReconnectMode === 'comfort') {
-    // 舒适模式 → 加速轮询（立即扫描一次）
-    if (!bleStore.connected && !bleStore.scanning) {
-      bleStore._accelerateDormantPoll()
+    // 舒适模式（亮屏触发）→ onShow 时直接尝试重连
+    if (bleStore.reconnectMode === 'idle') {
+      bleStore.tryAutoConnect()
     }
   } else if (bleStore.autoReconnectMode === 'power_saver') {
     // 省电模式 → 仅 idle 时尝试一次快速重连

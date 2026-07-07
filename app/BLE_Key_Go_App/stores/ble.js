@@ -42,6 +42,8 @@ import {
   getPluginStatus,
   startHeartbeatAlarm,
   stopHeartbeatAlarm,
+  registerScreenOnReceiver,
+  unregisterScreenOnReceiver,
 } from '@/utils/foreground-service.js'
 
 // ★ v3.23 Phase 3: 地理围栏工具
@@ -55,7 +57,7 @@ import {
   startGeofenceMonitor,
   stopGeofenceMonitor,
   isGeofenceMonitorActive,
-  getGeofenceMonitorStatus,
+  getLastKnownPosition,  // ★ v3.24: watchPosition 缓存坐标（同步，消除竞态）
 } from '@/utils/geofence.js'
 
 export const useBleStore = defineStore('ble', {
@@ -137,6 +139,12 @@ export const useBleStore = defineStore('ble', {
     /* ★ v3.15-#13: Status Notify 看门狗 — 超过 3s 未收到 FF02 推送则标记过期
      *   设备可能静默断开但 App 未感知，UI 可据此提示"连接可能已中断" */
     _statusStaleTimer: null,
+
+    // ★ v1.0.1: 亮屏触发（舒适模式核心）
+    _screenOnReceiverActive: false,
+    _lastScreenOnTrigger: 0,
+    _screenOnScanGuard: 0,
+    _screenOnDebounce: null,
   }),
 
   getters: {
@@ -713,25 +721,55 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
       this._restoredForSn = ''
 
-      // ★ v3.23 Phase 3: 极速模式下断连 → 记录停车位置 + 启动后台 GPS 围栏
+      // ★ v3.24: 极速模式下断连 → 三级后备记录停车位置 + 启动后台 GPS 围栏
       if (this.autoReconnectMode === 'speed') {
         console.log('[Store] ⚡ 极速模式断连，记录停车位置 + 启动围栏监控...')
-        // 1. 异步保存停车位置
+
+        // 1. 确保前台服务存活（GPS 监控需要）
+        this._ensureForegroundService()
+
+        // 2. Priority 1: 尝试使用 watchPosition 缓存的最近坐标（同步，零延迟）
+        const cachedPos = getLastKnownPosition()
+        const MAX_CACHE_AGE = 300000  // 5 分钟
+
+        if (cachedPos && cachedPos.age < MAX_CACHE_AGE) {
+          console.log(`[Store] ⚡ 使用缓存坐标 (${(cachedPos.age / 1000).toFixed(1)}s 前，精度 ±${Math.round(cachedPos.accuracy)}m)`)
+          saveParkingLocation(cachedPos.lat, cachedPos.lng)
+          this._startGeofenceMonitor()
+          this._startHeartbeat()
+
+          // 异步补一次高精度 GPS，静默更新停车位置（不阻塞围栏启动）
+          getCurrentPosition().then(pos => {
+            if (pos) {
+              saveParkingLocation(pos.lat, pos.lng)
+              console.log('[Store] ⚡ 高精度 GPS 已更新停车位置')
+            }
+          })
+          return
+        }
+
+        // 3. Priority 2 & 3: 缓存不可用 → 异步 GPS / 悲观启动
+        console.log(cachedPos
+          ? `[Store] ⚡ 缓存坐标过期 (${(cachedPos.age / 1000).toFixed(0)}s)，降级为异步 GPS`
+          : '[Store] ⚡ 无缓存坐标，异步获取 GPS...')
+
         getCurrentPosition().then(pos => {
           if (pos) {
             saveParkingLocation(pos.lat, pos.lng)
-            // 2. 保存成功后启动后台 GPS 围栏监控
             this._startGeofenceMonitor()
+            this._startHeartbeat()
+            console.log('[Store] ⚡ GPS 停车位置已记录，围栏监控已启动')
           } else {
-            console.warn('[Store] ⚡ GPS 不可用，围栏监控启动失败')
-            // 仍启动前台服务，下次 onShow 时检测
-            this._ensureForegroundService()
+            // Priority 3: GPS 不可用 → 用 localStorage 旧位置悲观启动围栏
+            console.warn('[Store] ⚡ GPS 不可用，使用旧停车位置悲观启动围栏...')
+            this._startGeofenceMonitor()  // 内部读取 localStorage 旧位置
+            this._startHeartbeat()
           }
         }).catch(() => {
-          this._ensureForegroundService()
+          console.warn('[Store] ⚡ GPS 异常，悲观启动围栏...')
+          this._startGeofenceMonitor()
+          this._startHeartbeat()
         })
-        // 3. 确保前台服务存活（GPS 监控需要）
-        this._ensureForegroundService()
         return
       }
 
@@ -993,6 +1031,138 @@ export const useBleStore = defineStore('ble', {
       }
     },
 
+    // ==================== ★ v1.0.1: 舒适模式亮屏触发（替代定时轮询） ====================
+
+    _registerScreenOnListener() {
+      if (this._screenOnReceiverActive) return
+      const ok = registerScreenOnReceiver((action) => {
+        if (this._screenOnDebounce) { clearTimeout(this._screenOnDebounce) }
+        this._screenOnDebounce = setTimeout(() => {
+          this._screenOnDebounce = null
+          this._onScreenOn(action)
+        }, 2000)
+      })
+      if (ok) {
+        this._screenOnReceiverActive = true
+        console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u76d1\u542c\u5668\u5df2\u6ce8\u518c\uff08\u8212\u9002\u6a21\u5f0f\uff09')
+      } else {
+        console.warn('[Store] \ud83d\udcf1 \u4eae\u5c4f\u76d1\u542c\u5668\u6ce8\u518c\u5931\u8d25\uff0c\u8212\u9002\u6a21\u5f0f\u53ef\u80fd\u5931\u6548')
+      }
+    },
+
+    _unregisterScreenOnListener() {
+      if (!this._screenOnReceiverActive) return
+      unregisterScreenOnReceiver()
+      this._screenOnReceiverActive = false
+      if (this._screenOnDebounce) { clearTimeout(this._screenOnDebounce); this._screenOnDebounce = null }
+      console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u76d1\u542c\u5668\u5df2\u6ce8\u9500')
+    },
+
+    _onScreenOn(action) {
+      if (this.autoReconnectMode !== 'comfort') return
+      if (this.connected) return
+      if (this.btState === 'off') return
+      const now = Date.now()
+      if (now - this._lastScreenOnTrigger < 30000) {
+        console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u89e6\u53d1\uff1a30s \u5185\u5df2\u626b\u63cf\u8fc7\uff0c\u8df3\u8fc7')
+        return
+      }
+      if (!this.deviceId && this.lastDeviceId) { this.deviceId = this.lastDeviceId }
+      if (!this.deviceId) {
+        console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u89e6\u53d1\uff1a\u65e0\u53ef\u91cd\u8fde\u8bbe\u5907\uff0c\u8df3\u8fc7')
+        return
+      }
+      this._lastScreenOnTrigger = now
+      const label = action === 'android.intent.action.USER_PRESENT' ? '\u5df2\u89e3\u9501' : '\u5c4f\u5e55\u4eae\u8d77'
+      console.log(`[Store] \ud83d\udcf1 \u4eae\u5c4f\u89e6\u53d1\uff08${label}\uff09\u2192 \u542f\u52a8\u626b\u63cf`)
+      this._doScreenOnScan()
+    },
+
+    async _doScreenOnScan() {
+      this._screenOnScanGuard++
+      const guard = this._screenOnScanGuard
+      if (this.connected || this.btState === 'off') return
+      const targetId = this.deviceId
+      if (!targetId) return
+      console.log(`[Store] \ud83d\udcf1 \u4eae\u5c4f\u626b\u63cf\u542f\u52a8 (8s, guard=${guard})`)
+
+      let phase2Attempts = 0
+      const doScanWithConnect = async () => {
+        if (this._screenOnScanGuard !== guard || this.connected) return
+        let connectRetries = 0
+        let connecting = false
+
+        const onDeviceFound = (device) => {
+          if (this._screenOnScanGuard !== guard || this.connected || connecting) return
+          if (device.deviceId === targetId) {
+            console.log(`[Store] \ud83d\udcf1 \u4eae\u5c4f\u626b\u63cf\u53d1\u73b0: ${device.name}, RSSI: ${device.RSSI}`)
+            connecting = true
+            this._connectWithResetFallback(targetId).then(() => {
+              if (this._screenOnScanGuard !== guard || this.connected) return
+              console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u8fde\u63a5\u6210\u529f\uff0c\u521d\u59cb\u5316...')
+              this.connected = true
+              this.lastDeviceId = targetId
+              if (!this.deviceName) {
+                const macClean = targetId.replace(/:/g, '')
+                this.deviceName = 'KeyGo-' + macClean.slice(-6).toUpperCase()
+              }
+              stopScan().catch(() => {})
+              this.scanning = false
+              this.reconnectMode = 'idle'
+              this.reconnectAttempt = 0
+              this.reconnectNextDelay = 0
+              this._stopDormantPoll()
+              this._unregisterScreenOnListener()
+              this._stopGeofenceMonitor()
+              this._stopHeartbeat()
+              this._ensureForegroundService()
+              this._reconnectGuard = 0
+              uni.showToast({ title: '\u5df2\u81ea\u52a8\u8fde\u63a5', icon: 'success', duration: 1500 })
+              readSerialNumber(targetId, 5000).then(sn => {
+                if (this.deviceId !== targetId || !this.connected) return
+                this.serialNumber = sn
+                this._resolveDeviceName(sn)
+                this._loadConfigForDevice(sn)
+                this._syncConfigToDevice()
+              }).catch(() => {})
+              setTimeout(async () => {
+                if (this.deviceId !== targetId || !this.connected) return
+                try {
+                  await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
+                  notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
+                  this._fetchBatteryLevel(targetId).catch(() => {})
+                } catch (_) {}
+              }, 800)
+            }).catch((err) => {
+              if (this._screenOnScanGuard !== guard || this.connected) return
+              connectRetries++
+              connecting = false
+              console.log(`[Store] \ud83d\udcf1 \u8fde\u63a5\u5931\u8d25 (${connectRetries}/2):`, err?.message || err)
+            })
+          }
+        }
+
+        try { await startScan(onDeviceFound, 8) } catch (e) {
+          console.log('[Store] \ud83d\udcf1 \u626b\u63cf\u5f02\u5e38:', e?.message || e)
+        }
+        if (this._screenOnScanGuard !== guard) return
+        this.scanning = false
+        if (this.connected) { console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u626b\u63cf\u5b8c\u6210\uff1a\u5df2\u8fde\u63a5 \u2705'); return }
+
+        if (phase2Attempts < 3) {
+          phase2Attempts++
+          console.log(`[Store] \ud83d\udcf1 30s \u540e\u4e8c\u9636\u6bb5\u91cd\u8bd5 (${phase2Attempts}/3)`)
+          await new Promise(r => setTimeout(r, 30000))
+          if (this._screenOnScanGuard === guard && !this.connected && this.btState !== 'off') {
+            await doScanWithConnect()
+          }
+        } else {
+          console.log('[Store] \ud83d\udcf1 3 \u6b21\u91cd\u8bd5\u5747\u5931\u8d25\uff0c\u7b49\u4e0b\u6b21\u4eae\u5c4f')
+        }
+      }
+      doScanWithConnect()
+    },
+
     /** 安排下一次重连 */
     _scheduleReconnect(delayMs) {
       if (this._reconnectTimer) {
@@ -1043,10 +1213,10 @@ export const useBleStore = defineStore('ble', {
             this.reconnectAttempt = 0
             this.reconnectNextDelay = 0
             if (this.autoReconnectMode === 'comfort') {
-              // 舒适模式 → 进入后台轮询
+              // ★ v1.0.1: 舒适模式 → 注册亮屏监听器（零后台功耗）
               this.reconnectMode = 'idle'
-              console.log('[Store] 重连失败达 10 次，切换到舒适模式轮询')
-              this._startDormantPoll()
+              console.log('[Store] 重连失败达 10 次，注册亮屏监听器（零后台功耗）')
+              this._registerScreenOnListener()
             } else {
               // 省电模式 → 彻底放弃
               this.reconnectMode = 'idle'
@@ -1176,8 +1346,9 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
-      // ★ v3.23: 重连成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳
+      // ★ v3.23: 重连成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳 + 亮屏监听器
       this._stopDormantPoll()
+      this._unregisterScreenOnListener()
       this._stopGeofenceMonitor()
       this._stopHeartbeat()
       // ★ v3.17: 连接成功后启动前台服务（Android 保活）
@@ -1593,8 +1764,9 @@ export const useBleStore = defineStore('ble', {
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
-        // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳
+        // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳 + 亮屏监听器
         this._stopDormantPoll()
+        this._unregisterScreenOnListener()
         this._stopGeofenceMonitor()
         this._stopHeartbeat()
         // ★ v3.17: 连接成功后启动前台服务（Android 保活）
@@ -1738,12 +1910,11 @@ export const useBleStore = defineStore('ble', {
       if (this._cooldownTimer) { clearTimeout(this._cooldownTimer); this._cooldownTimer = null }
       setTimeout(() => { this._coolingDown = false }, 500)
 
-      // ★ v3.23: 舒适模式 → 用户断开后启动后台轮询，等待下次靠近自动连接
+      // ★ v1.0.1: 舒适模式 → 注册亮屏监听器（零后台功耗）
       if (this.autoReconnectMode === 'comfort') {
-        // 保存 lastDeviceId 以便轮询时能找到目标
         this.lastDeviceId = targetId
         setTimeout(() => {
-          this._startDormantPoll()
+          this._registerScreenOnListener()
         }, 2000) // 2s 延迟，给系统清理旧连接的时间
       }
 
@@ -1982,15 +2153,17 @@ export const useBleStore = defineStore('ble', {
       if (mode === 'comfort') {
         // 退出 speed 模式 → 清理围栏相关
         if (prev === 'speed') this._onSpeedModeExit()
-        // 切换到舒适模式 → 如果当前未连接，启动轮询
+        // ★ v1.0.1: 亮屏监听器接管，停止旧轮询
+        this._stopDormantPoll()
         if (!this.connected) {
-          this._startDormantPoll()
+          this._registerScreenOnListener()
         }
       } else if (mode === 'power_saver') {
         // 退出 speed 模式 → 清理围栏相关
         if (prev === 'speed') this._onSpeedModeExit()
-        // 切换到省电模式 → 停止所有轮询
+        // 切换到省电模式 → 停止所有轮询 + 亮屏监听器
         this._stopDormantPoll()
+        this._unregisterScreenOnListener()
         if (this._reconnectTimer) {
           clearTimeout(this._reconnectTimer)
           this._reconnectTimer = null
@@ -2192,12 +2365,49 @@ export const useBleStore = defineStore('ble', {
           this._doDormantScan(this._dormantPollGuard)
         }
       } else if (this.autoReconnectMode === 'speed') {
-        // ★ 极速模式：仅确认 JS 存活即可（watchPosition 回调依赖 JS 上下文）
-        // 不需要额外操作，GPS 围栏回调会在位置更新时自动触发
-        const status = getGeofenceMonitorStatus ? getGeofenceMonitorStatus() : { active: false, lastPositionAge: -1 }
-        if (status.lastPositionAge > 120000) {
-          console.log(`[Store] ⏰ GPS 位置已过时 ${Math.round(status.lastPositionAge/1000)}s (可能被 Doze 抑制)`)
-        }
+        // ★ v3.24: 极速模式心跳 → 主动围栏检测 + 自动 BLE 扫描
+        //   watchPosition 回调可能被 Doze 抑制，心跳是兜底保障。
+        //   每次唤醒时主动读取 GPS，若在围栏内则立刻启动 BLE 扫描。
+        this._heartbeatGeofenceCheck()
+      }
+    },
+
+    /**
+     * ★ v3.24: 心跳触发的主动围栏检测（极速模式）
+     *
+     * watchPosition 回调在 Doze 深度休眠期间可能被抑制，无法实时响应位置变化。
+     * 此方法借用心跳唤醒窗口主动读取 GPS，补上 watchPosition 的空白期。
+     *
+     * 与 checkGeofenceApproach 的区别：
+     *   - checkGeofenceApproach: onShow 触发，有 _geofenceApproachChecked 单次锁
+     *   - _heartbeatGeofenceCheck: 心跳触发，不设单次锁（每次唤醒都是新机会）
+     *
+     * 无重复扫描风险：_geofenceBleTriggered 全局防重复（watchPosition 和心跳共用）
+     */
+    async _heartbeatGeofenceCheck() {
+      if (this.connected) return           // 已连接，无需检测
+      if (this._geofenceBleTriggered) return  // BLE 已触发（可能由 watchPosition 触发）
+      if (!isGeofenceMonitorActive || !isGeofenceMonitorActive()) return  // 围栏未运行
+
+      const parking = getParkingLocation()
+      if (!parking) return
+
+      // 使用粗精度 GPS（快速，低功耗），在 Doze 维护窗口中争取快速返回
+      const pos = await getCurrentPositionCoarse()
+      if (!pos) {
+        console.log('[Store] ⏰ 心跳围栏检测：GPS 不可用（可能室内/地下），下次心跳重试')
+        return
+      }
+
+      const distance = calculateDistance(pos.lat, pos.lng, parking.lat, parking.lng)
+      console.log(`[Store] ⏰ 心跳围栏检测：距停车点 ${distance}m (半径 ${GEOFENCE_RADIUS}m)`)
+
+      if (distance <= GEOFENCE_RADIUS) {
+        console.log('[Store] ⏰ 心跳检测到进入围栏！启动 BLE 扫描...')
+        this._geofenceBleTriggered = true
+        this.reconnectMode = 'idle'
+        this.reconnectAttempt = 0
+        this._startReconnect()
       }
     },
 

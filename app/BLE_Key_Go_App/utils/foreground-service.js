@@ -702,3 +702,105 @@ export function isHeartbeatAlarmActive() {
   return _alarmActive
 }
 
+// ==================== ★ v3.23.1: 亮屏广播接收器（舒适模式驱动） ====================
+
+/**
+ * 亮屏 BroadcastReceiver
+ *
+ * 舒适模式的核心触发器：用户亮屏/解锁的瞬间 → 回调通知 bleStore 执行一次 BLE 扫描。
+ * 零后台额外功耗、零额外权限，系统管家找不到标记"高耗电应用"的理由。
+ *
+ * 注册两个 Intent Action：
+ *   - ACTION_SCREEN_ON: 屏幕亮了（含仅看时间、未解锁）
+ *   - ACTION_USER_PRESENT: 用户已解锁（有锁屏密码时更精准）
+ * 两者都注册，由回调方做 2s 内去重（防止同一次亮屏触发两次扫描）。
+ */
+
+let _screenReceiver = null
+let _screenCallback = null
+
+/**
+ * 注册亮屏广播接收器
+ *
+ * @param {Function} callback 亮屏时的回调 (action: string) => void
+ * @returns {boolean} 是否成功注册
+ */
+export function registerScreenOnReceiver(callback) {
+  if (!isAndroidApp()) {
+    console.log(`${TAG} 📱 非 Android 环境，跳过亮屏广播`)
+    return false
+  }
+
+  if (_screenReceiver) {
+    // 已注册，仅更新回调
+    _screenCallback = callback
+    console.log(`${TAG} 📱 亮屏广播已注册，仅更新回调`)
+    return true
+  }
+
+  _screenCallback = callback
+
+  try {
+    const main = getMainActivity()
+    if (!main) {
+      console.warn(`${TAG} 📱 无法获取 Activity，亮屏广播注册失败`)
+      return false
+    }
+
+    const Intent = plus.android.importClass('android.content.Intent')
+    const IntentFilter = plus.android.importClass('android.content.IntentFilter')
+
+    const ReceiverImpl = plus.android.implements(
+      'io.dcloud.feature.internal.reflect.BroadcastReceiver',
+      {
+        onReceive: function(ctx, intent) {
+          const action = intent.getAction()
+          if (action === Intent.ACTION_SCREEN_ON || action === Intent.ACTION_USER_PRESENT) {
+            const label = action === Intent.ACTION_USER_PRESENT ? 'USER_PRESENT(已解锁)' : 'SCREEN_ON'
+            console.log(`${TAG} 📱 亮屏事件: ${label}`)
+            if (_screenCallback) {
+              try {
+                _screenCallback(action)
+              } catch (e) {
+                console.error(`${TAG} 📱 亮屏回调异常:`, e?.message || e)
+              }
+            }
+          }
+        }
+      }
+    )
+
+    _screenReceiver = ReceiverImpl
+    const filter = new IntentFilter()
+    filter.addAction(Intent.ACTION_SCREEN_ON)
+    filter.addAction(Intent.ACTION_USER_PRESENT)
+    main.registerReceiver(_screenReceiver, filter)
+
+    console.log(`${TAG} 📱 亮屏广播已注册 (SCREEN_ON + USER_PRESENT)`)
+    return true
+  } catch (e) {
+    console.error(`${TAG} 📱 亮屏广播注册失败:`, e?.message || e)
+    _screenReceiver = null
+    _screenCallback = null
+    return false
+  }
+}
+
+/**
+ * 注销亮屏广播接收器
+ */
+export function unregisterScreenOnReceiver() {
+  if (!_screenReceiver) return
+  try {
+    const main = getMainActivity()
+    if (main) {
+      main.unregisterReceiver(_screenReceiver)
+    }
+  } catch (e) {
+    // 可能已被系统注销
+  }
+  _screenReceiver = null
+  _screenCallback = null
+  console.log(`${TAG} 📱 亮屏广播已注销`)
+}
+

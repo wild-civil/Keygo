@@ -363,4 +363,28 @@ export function getGeofenceMonitorStatus() {
   }
 }
 
+/**
+ * ★ v3.24: 获取 watchPosition 缓存的最近一次有效坐标（同步，零延迟）
+ *
+ * 用于断连时立刻读取最近 GPS 位置，无需等待异步 GPS 请求。
+ * 
+ * 优先级链：
+ *   Priority 1: 此缓存（watchPosition 回调中持续更新，通常 <60s 内）
+ *   Priority 2: uni.getLocation({ maximumAge: INFINITY })（系统级缓存）
+ *   Priority 3: localStorage 旧停车位置（兜底）
+ *
+ * @returns {{ lat: number, lng: number, accuracy: number, time: number, age: number } | null}
+ *   age: 该位置距今多少毫秒，方便调用方判断新鲜度
+ */
+export function getLastKnownPosition() {
+  if (!_lastKnownPosition) return null
+  return {
+    lat: _lastKnownPosition.lat,
+    lng: _lastKnownPosition.lng,
+    accuracy: _lastKnownPosition.accuracy,
+    time: _lastKnownPosition.time,
+    age: Date.now() - _lastKnownPosition.time,
+  }
+}
+
 // #endif
