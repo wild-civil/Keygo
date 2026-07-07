@@ -13,6 +13,7 @@ import {
   BATT_SERVICE,                   // ★ v3.14: 电池服务 UUID
   initBluetooth,
   getBluetoothAdapterState,
+  openBluetoothAdapterOnly,       // ★ 冷启动修复：仅打开适配器（不申请权限）
   getBLEDeviceServices,          // ★ used by _verifyConnection
   onBluetoothAdapterStateChange,
   startScan,
@@ -102,6 +103,7 @@ export const useBleStore = defineStore('ble', {
 
     // ★ v3.11: 蓝牙适配器 & 重连状态（原生广播驱动）
     btState: 'unknown',           // 'on' | 'off' | 'just_enabled' | 'unknown'
+    _adapterReady: false,         // ★ 冷启动修复：本会话是否已 openBluetoothAdapter（避免 "not init" 误判）
     reconnectMode: 'idle',        // 'idle' | 'active' | 'paused' | 'dormant'
     reconnectAttempt: 0,          // 当前重连次数
     reconnectNextDelay: 0,        // 下次重连等待秒数（UI 显示用）
@@ -420,17 +422,23 @@ export const useBleStore = defineStore('ble', {
       } else if (state === 12) {
         // ★ STATE_ON: 蓝牙完全开启 → 无 banner，尝试重连
         this.btState = 'on'
-        if (!this.connected && this.deviceId && this.reconnectMode === 'paused') {
-          console.log('[Store] 蓝牙恢复（原生广播），重启重连流程')
-          if (this._reconnectTimer) {
-            clearTimeout(this._reconnectTimer)
-            this._reconnectTimer = null
+        // ★ 冷启动修复：蓝牙开启（含 App 启动时 BT 才打开 / 手动开启）即尝试自动连，
+        //   不再限定 reconnectMode==='paused'。dormant(用户主动断开)/已连接/BT 关 由闸门拦截。
+        if (!this.connected && this._shouldAutoReconnect()) {
+          const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+          if (knownId) {
+            this.deviceId = knownId
+            if (this._reconnectTimer) {
+              clearTimeout(this._reconnectTimer)
+              this._reconnectTimer = null
+            }
+            this.reconnectMode = 'idle'
+            this.reconnectAttempt = 0
+            this.reconnectNextDelay = 0
+            this._reconnectGuard++
+            console.log('[Store] 蓝牙恢复（原生广播），启动自动重连')
+            this._startReconnect()
           }
-          this.reconnectMode = 'idle'
-          this.reconnectAttempt = 0
-          this.reconnectNextDelay = 0
-          this._reconnectGuard++
-          this._startReconnect()
         }
       } else if (state === 10 || state === 13) {
         // ★ STATE_OFF / STATE_TURNING_OFF: 蓝牙关闭 → 红色 banner
@@ -456,17 +464,22 @@ export const useBleStore = defineStore('ble', {
       console.log(`[Store] Uni-APP 适配器变化: available=${available} → btState=${next}`)
       this.btState = next
 
-      if (available && !this.connected && this.deviceId && this.reconnectMode === 'paused') {
-        console.log('[Store] 蓝牙恢复（Uni-APP），重启重连流程')
-        if (this._reconnectTimer) {
-          clearTimeout(this._reconnectTimer)
-          this._reconnectTimer = null
+      // ★ 冷启动修复：适配器可用即尝试自动连（不限定 paused），dormant/已连接/BT 关由闸门拦截
+      if (available && !this.connected && this._shouldAutoReconnect()) {
+        const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+        if (knownId) {
+          this.deviceId = knownId
+          if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer)
+            this._reconnectTimer = null
+          }
+          this.reconnectMode = 'idle'
+          this.reconnectAttempt = 0
+          this.reconnectNextDelay = 0
+          this._reconnectGuard++
+          console.log('[Store] 蓝牙恢复（Uni-APP），启动自动重连')
+          this._startReconnect()
         }
-        this.reconnectMode = 'idle'
-        this.reconnectAttempt = 0
-        this.reconnectNextDelay = 0
-        this._reconnectGuard++
-        this._startReconnect()
       } else if (!available) {
         this._handleBtOff()
       }
@@ -561,6 +574,29 @@ export const useBleStore = defineStore('ble', {
         console.warn('[Store] 前台服务停止失败:', e?.message || e)
       } finally {
         this._foregroundServiceActive = false
+      }
+    },
+
+    /**
+     * ★ 冷启动修复：以实时适配器状态校正 btState
+     *
+     * 仅当适配器确实可用 available=true 时置 'on'（让后续自动连/扫描正常走通）；
+     * 不可用且不在 "正在开启中"(just_enabled) 时回落 'off'。
+     * 用于 initBluetooth 成功后，避免 "just_enabled 绿 banner 永不流转" 等卡死问题。
+     */
+    async _reconcileBtState() {
+      try {
+        const state = await getBluetoothAdapterState()
+        if (state.available) {
+          if (this.btState !== 'on' && this.btState !== 'just_enabled') {
+            this.btState = 'on'
+          }
+        } else if (this.btState !== 'just_enabled') {
+          this.btState = 'off'
+        }
+      } catch (e) {
+        // 查询失败：保持当前状态，交由监听器/重试纠正
+        console.warn('[Store] _reconcileBtState 异常，保持现状:', e?.message || e)
       }
     },
 
@@ -666,12 +702,12 @@ export const useBleStore = defineStore('ble', {
             console.log('[Store] ⚡ onAllowing → 绿 banner（与系统弹窗同步）')
           }
         })
-        // initBluetooth 轮询完成 → 此时蓝牙已完全开启
-        // 兜底：如果绿 banner 还没亮过（btState 仍是 off/unknown），手动设
-        if (this.btState === 'off' || this.btState === 'unknown') {
-          this.btState = 'just_enabled'
-          console.log('[Store] ⚡ 兜底设 just_enabled')
-        }
+        this._adapterReady = true
+        // ★ 冷启动修复：initBluetooth 成功 = 适配器已打开。
+        //   若此时蓝牙实际可用(available=true)，直接校正为 'on'，
+        //   避免「BT 早已开启、点击红banner开启时 openBluetoothAdapter 立即成功、
+        //   不触发 STATE_ON 变化事件 → just_enabled 绿 banner 永远不流转」的卡死。
+        await this._reconcileBtState()
         console.log('[Store] initBluetooth 完成 → btState=' + this.btState)
 
         // 蓝牙已开，尝试重连。connected=true 时 banner 自然消失
@@ -1935,8 +1971,72 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ 冷启动修复：仅打开蓝牙适配器（申请权限前），用于 onShow 状态校正
+     *
+     * 冷启动时本会话尚未 openBluetoothAdapter，getBluetoothAdapterState 会返回
+     * not-init → available=false，被 _forceRefreshBluetoothState / _checkBluetoothState
+     * 误判成「蓝牙关闭」→ 误亮红 banner。这里只调 openBluetoothAdapter（不申请运行时权限，
+     * 避免新用户一打开就弹权限框），打开后查询即返回真实 available。BT 已开则无弹窗/无提示；
+     * BT 关则 openBluetoothAdapter 失败（不弹系统框），真实状态即 available=false → 正确红 banner。
+     *
+     * ★ 无论打开成功与否都标记 _adapterReady=true：后续查询返回真实状态而非 not-init，
+     *   既避免重复弹窗，也保证误判不再发生。
+     *
+     * @returns {Promise<boolean>} true=当前蓝牙可用
+     */
+    async ensureAdapterReady() {
+      if (this._adapterReady) return this.btState === 'on'
+      try {
+        await openBluetoothAdapterOnly()
+      } catch (e) {
+        console.warn('[Store] ensureAdapterReady: 打开适配器异常:', e?.message || e)
+      }
+      // ★ 标记本会话已触碰适配器：后续 getBluetoothAdapterState 返回真实状态（而非 not-init）
+      this._adapterReady = true
+      await this._reconcileBtState()
+      return this.btState === 'on'
+    },
+
+    /**
+     * ★ 冷启动/切回自动连准备：确保蓝牙子系统就绪
+     *
+     * 问题背景：手动清理 App 再打开（冷启动）时，全局监听器（原生广播/Uni 适配器监听）
+     * 尚未注册，且本会话从未 openBluetoothAdapter，导致 onShow 里 getBluetoothAdapterState
+     * 偶发返回 available=false → 提前 return，永不自动连（见 _forceRefreshBluetoothState）。
+     *
+     * 本方法：仅当存在已知设备（缓存 ble_device_id）时，注册全局监听器并打开蓝牙适配器
+     * （含运行时权限申请）。打开成功后 getBluetoothAdapterState 才能可靠返回 true，
+     * 后续 onShow 的状态判断与 tryAutoConnect 才能正常执行；同时启动前台服务与心跳，
+     * 让「App 在后台、屏幕熄灭」时也能被心跳驱动自动连。
+     *
+     * @returns {Promise<boolean>} true=适配器就绪（蓝牙可扫描/连接）
+     */
+    async prepareForAutoConnect() {
+      const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+      if (!knownId) return false
+      // 注册全局监听器：让后续原生广播 STATE_ON 也能驱动自动重连
+      this._ensureGlobalListeners()
+      // 确保前台服务存活（后台自动连需要，且已在后台时不被系统查杀）
+      this._ensureForegroundService()
+      try {
+        await initBluetooth()   // 打开适配器 + 申请权限（仅 BT 关闭时才弹系统框）
+        this._adapterReady = true
+        // ★ 冷启动修复：适配器已开，用实时状态校正 btState（BT 已开→'on'，否则回落），
+        //   避免 onShow 里 _forceRefreshBluetoothState 读到过期的 "not init" 误判为 off。
+        await this._reconcileBtState()
+        // 适配器已开 → 启动 AlarmManager 心跳，作为后台自动连的驱动（Doze 下仍能唤醒）
+        this._startHeartbeat()
+        return true
+      } catch (e) {
+        // BT 关闭/用户拒绝 → initBluetooth reject；由原生广播/状态判断处理，不强行连
+        console.log('[Store] prepareForAutoConnect: 初始化失败（蓝牙未开或拒绝）:', e?.message || e)
+        return false
+      }
+    },
+
+    /**
      * 尝试自动连接（兼容旧版接口）
-     * 内部委托给 tryReconnect()
+     * 内部优先直连缓存设备，失败再扫描「已知设备」里信号最强者（方案B）。
      */
     async tryAutoConnect() {
       // ★ v3.6: 蓝牙未开时不尝试，等适配器状态变化事件触发重连
@@ -1947,6 +2047,22 @@ export const useBleStore = defineStore('ble', {
       // ★ 方案B: 统一闸门（用户主动断开/已连接/蓝牙关 → 不自动连）
       if (!this._shouldAutoReconnect()) return false
       this._ensureGlobalListeners()
+
+      // ★ 冷启动修复：本会话尚未 openBluetoothAdapter 时，getBluetoothAdapterState
+      //   会 "not init" 误报 false → _doReconnect 抛 "蓝牙未开启"。
+      //   这里先确保适配器已打开（权限已授予则不会弹窗；BT 已开则立即成功）。
+      //   btState==='off' 已在上一步拦截（不会在此弹系统框）。
+      if (!this._adapterReady) {
+        try {
+          await initBluetooth()
+          this._adapterReady = true
+          await this._reconcileBtState()
+        } catch (e) {
+          // BT 关闭/用户拒绝 → 不抛异常，等适配器状态事件恢复后重试
+          console.log('[Store] tryAutoConnect: 适配器初始化失败，等待恢复:', e?.message || e)
+          return false
+        }
+      }
 
       // 优先用缓存直连已知设备（最快，无需扫描）
       const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
@@ -2444,15 +2560,27 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
-      if (this.autoReconnectMode === 'comfort') {
-        // ★ 舒适模式：如果 setInterval 漂移过大（超过 3 分钟没有扫描），补一次扫描
-        const lastScanTime = this._dormantPollStartTime
-          ? this._dormantPollStartTime + (this._dormantPollCount * 120000)
-          : 0
-        const scanDrift = now - lastScanTime
-        if (scanDrift > 180000) { // 3 分钟
-          console.log(`[Store] ⏰ 心跳检测到扫描漂移 ${Math.round(scanDrift/1000)}s → 补一次 BLE 扫描`)
-          this._doDormantScan(this._dormantPollGuard)
+      if (this.autoReconnectMode === 'comfort' || this.autoReconnectMode === 'power_saver') {
+        // ★ 后台自动连（屏幕熄灭 / App 在后台）：每次心跳尝试连已知设备。
+        //   AlarmManager 心跳在 Doze 深睡下仍能唤醒，配合前台服务即可实现真正的后台自动连。
+        //   tryAutoConnect 内部先直连缓存设备（快、不扫描），失败才扫描已知设备集合。
+        if (!this.connected && this._shouldAutoReconnect()) {
+          const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+          if (knownId) {
+            console.log(`[Store] ⏰ 心跳触发后台自动连（${this.autoReconnectMode}）`)
+            this.tryAutoConnect()
+          }
+        }
+        // ★ 舒适模式兜底：setInterval 漂移过大（>3min 没扫）再补一次扫描
+        if (this.autoReconnectMode === 'comfort' && !this.connected) {
+          const lastScanTime = this._dormantPollStartTime
+            ? this._dormantPollStartTime + (this._dormantPollCount * 120000)
+            : 0
+          const scanDrift = now - lastScanTime
+          if (scanDrift > 180000) { // 3 分钟
+            console.log(`[Store] ⏰ 心跳检测到扫描漂移 ${Math.round(scanDrift/1000)}s → 补一次 BLE 扫描`)
+            this._doDormantScan(this._dormantPollGuard)
+          }
         }
       } else if (this.autoReconnectMode === 'speed') {
         // ★ v3.24: 极速模式心跳 → 主动围栏检测 + 自动 BLE 扫描

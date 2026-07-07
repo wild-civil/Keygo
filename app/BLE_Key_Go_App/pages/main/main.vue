@@ -85,20 +85,37 @@ onShow(async () => {
   if (_autoScanDone) return
   _autoScanDone = true
 
+  // ★ 冷启动修复：先仅打开适配器（不申请权限、BT 已开无弹窗），
+  //   否则 startScanDevices 内 _checkBluetoothState 读到 not-init→false 抛 "蓝牙未开启"。
+  try {
+    await bleStore.ensureAdapterReady()
+  } catch (e) {
+    console.warn('[Main] ensureAdapterReady 失败:', e?.message || e)
+  }
+
   const savedId = uni.getStorageSync('ble_device_id')
   if (savedId) {
-    bleStore.tryAutoConnect().then(async connected => {
+    // ★ 冷启动修复：先确保蓝牙适配器已打开（含权限/打开），
+    //   否则 cold start 下 getBluetoothAdapterState "not init" → tryAutoConnect 误抛 "蓝牙未开启"
+    //   → 红 banner + 未捕获异常。有已知设备才初始化，避免新用户一打开就弹权限框。
+    try {
+      await bleStore.prepareForAutoConnect()
+      const connected = await bleStore.tryAutoConnect()
       if (!connected) {
         tabIndex.value = 0
         await bleStore.startScanDevices(12)
       }
-    }).catch(err => {
+    } catch (err) {
       /* ★ v3.15: 兜底捕获 tryAutoConnect/startScanDevices 中的未处理 rejection
        *   防止蓝牙关闭、权限不足等场景下产生 unhandled rejection 崩溃 */
       console.error('[Main] 自动连接/扫描失败:', err?.message || err)
-    })
+    }
   } else {
-    await bleStore.startScanDevices(12)
+    try {
+      await bleStore.startScanDevices(12)
+    } catch (err) {
+      console.error('[Main] 扫描失败:', err?.message || err)
+    }
   }
 })
 </script>

@@ -192,6 +192,15 @@ const pwModal = reactive({
 onShow(async () => {
   themeStore.applyNavBar()
 
+  // ★ 冷启动修复：先确保蓝牙适配器已打开（仅 openBluetoothAdapter，不申请权限、BT 已开无弹窗），
+  //   否则 getBluetoothAdapterState 返回 not-init→available=false，会误亮红 banner。
+  //   有已知设备时再走 prepareForAutoConnect 注册监听器/前台服务/心跳（含权限，已授权不弹窗）。
+  await bleStore.ensureAdapterReady()
+  const _knownForColdStart = bleStore.deviceId || uni.getStorageSync('ble_device_id')
+  if (_knownForColdStart) {
+    await bleStore.prepareForAutoConnect()
+  }
+
   // ★ v3.14-bugfix2: btState='off' 是原生广播在后台确认的状态，直接信任。
   //   _forceRefreshBluetoothState 内部调用 getBluetoothAdapterState(),
   //   在 Android 上可能误报 available=true（系统蓝牙已关但 BLE 适配器

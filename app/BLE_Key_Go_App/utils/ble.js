@@ -47,6 +47,34 @@ export function getBluetoothAdapterState() {
   })
 }
 
+/**
+ * ★ 冷启动修复：仅打开蓝牙适配器（不申请运行时权限）
+ *
+ * 用于 onShow 状态校正：适配器打开后 getBluetoothAdapterState 才能返回真实 available，
+ * 避免 not-init → available=false 被误判为「蓝牙已关闭」。
+ * 与 initBluetooth 的区别：不申请定位/蓝牙权限，因此新用户冷启动不会弹权限框；
+ * BT 已开时静默成功，BT 关时 openBluetoothAdapter 失败（不会弹系统开启框），
+ * 由调用方以真实 available=false 驱动正确状态。
+ *
+ * @returns {Promise<boolean>} true=打开成功（适配器已 initialized，无论 BT 实际是否可用）
+ */
+export function openBluetoothAdapterOnly() {
+  return new Promise((resolve) => {
+    uni.openBluetoothAdapter({
+      success: () => resolve(true),
+      fail: (err) => {
+        const msg = String(err?.errMsg || err || '')
+        // "already open" 视为成功；其余（含 code=10001 BT 未开）视为本次未完成
+        if (msg.includes('already open')) resolve(true)
+        else {
+          console.warn('[BLE] 仅打开适配器失败（BT 可能未开）:', msg)
+          resolve(false)
+        }
+      }
+    })
+  })
+}
+
 // ==================== Android 运行时权限 ====================
 
 /**
