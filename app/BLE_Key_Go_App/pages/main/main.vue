@@ -20,7 +20,7 @@
       </swiper-item>
       <swiper-item>
         <scroll-view scroll-y class="swiper-scroll">
-          <ConfigPage />
+          <ConfigPage :active="tabIndex === 2" />
         </scroll-view>
       </swiper-item>
       <swiper-item>

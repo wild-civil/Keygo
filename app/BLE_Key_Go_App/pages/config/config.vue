@@ -224,7 +224,7 @@
 
 <script setup>
 import { reactive, ref, computed, watch } from 'vue'
-import { onShow, onLoad, onUnload } from '@dcloudio/uni-app'
+import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
@@ -261,34 +261,16 @@ const isDirty = computed(() => {
     || localConfig.kr !== (bleStore.kalmanR || 15)
 })
 
-// ★ v3.25: 标记「APP 是否进入过后台」（锁屏 / 切到别的 App）。
-//   uni-app 的 onShow 在「tab 切换回来」和「锁屏再解锁」时都会触发，
-//   但只有前者属于「真实离开本页」，应丢弃草稿；后者应保留草稿。
-//   关键区别：tab 切换不会触发 uni.onAppHide，只有真正进后台才会。
-let appBackgrounded = false
-let appHideHandler = null
-
-onLoad(() => {
-  // 注册全局前后台监听：进后台即标记，onShow 据此区分「导航离开」与「后台恢复」
-  appHideHandler = () => { appBackgrounded = true }
-  uni.onAppHide(appHideHandler)
+// ★ v3.25: 配置页以 swiper 组件形式嵌入 main.vue，切 tab 只改 tabIndex、不触发页面生命周期，
+//   故由 main 传入 active(是否为当前配置 tab) 来感知「进入/离开配置 tab」。
+const props = defineProps({
+  active: { type: Boolean, default: true },
 })
 
-onUnload(() => {
-  if (appHideHandler) uni.offAppHide(appHideHandler)
-})
-
-onShow(() => {
-  themeStore.applyNavBar()
-  // ★ BugFix: 传入 SN 才能读设备专属配置 ble_config_v1_{SN}
-  //   不传 SN 只会读旧版全局 ble_config_v1，切后台再切回时找不到设备专属配置导致重置为默认值
-  bleStore._restoreConfig(bleStore.serialNumber || undefined)
-  // ★ v3.25: 仅当「真实导航离开后返回」才丢弃草稿并提示；
-  //   锁屏/切后台再回来(appBackgrounded=true)保留草稿，也不弹「已撤销」
-  if (!appBackgrounded) {
-    const hadDraft = isDirty.value
-  // ★ 用已保存值重建编辑态：Object.assign 保证响应式覆盖；
-  //   configReloadKey++ 强制 slider 重渲染到正确 value（uni-app slider 非受控，仅靠 :value 不回弹）
+// ★ v3.25: 用 store 已保存值重建编辑态（即丢弃草稿）。
+//   Object.assign 保证响应式覆盖；configReloadKey++ 强制 slider 重渲染到正确 value
+//   （uni-app slider 非受控，仅靠 :value 不回弹）
+function resetToSaved() {
   Object.assign(localConfig, {
     unlock: bleStore.unlockThreshold,
     lock: bleStore.lockThreshold,
@@ -299,10 +281,30 @@ onShow(() => {
     kr: bleStore.kalmanR || 15,
   })
   configReloadKey.value++
-    if (hadDraft) toast.info('已撤销未保存的修改')
+}
+
+// ★ v3.25: 离开配置 tab(active true→false) 即丢弃草稿并提示；
+//   进入/回到配置 tab(false→true) 静默重置为已保存值；
+//   锁屏/切后台(active 不变) 保留草稿。immediate 处理首次挂载同步。
+watch(() => props.active, (now, was) => {
+  if (now === was) return
+  // ★ BugFix: 传入 SN 才能读设备专属配置 ble_config_v1_{SN}
+  bleStore._restoreConfig(bleStore.serialNumber || undefined)
+  if (!now) {
+    if (was === true && isDirty.value) toast.info('已撤销未保存的修改')
+    resetToSaved()
+  } else {
+    resetToSaved()
   }
-  // 重置标记，供下次 onShow 判断（无论本次是否后台回来）
-  appBackgrounded = false
+}, { immediate: true })
+
+onShow(() => {
+  themeStore.applyNavBar()
+  // ★ BugFix: 传入 SN 才能读设备专属配置 ble_config_v1_{SN}
+  //   不传 SN 只会读旧版全局 ble_config_v1，切后台再切回时找不到设备专属配置导致重置为默认值
+  bleStore._restoreConfig(bleStore.serialNumber || undefined)
+  // ★ v3.25: 切后台再回来(active 仍为 true)不重置 localConfig，保留草稿；
+  //   切 tab 的草稿管理由 props.active watch 负责
 })
 
 // ★ v3.23: 智能重连模式切换
