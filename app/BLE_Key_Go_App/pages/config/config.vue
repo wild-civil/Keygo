@@ -205,9 +205,15 @@
         </view>
       </view>
 
+      <!-- ★ v3.25: 未保存修改提示（草稿态） -->
+      <view class="unsaved-tip" v-if="isDirty">
+        <text class="unsaved-icon">⚠️</text>
+        <text class="unsaved-text">有未下发的修改，设备不会生效。点击「下发配置到设备」保存，或离开本页将自动丢弃。</text>
+      </view>
+
       <!-- 下发配置按钮 -->
       <view class="submit-section">
-        <button class="btn-submit" @tap="handleSubmit" :disabled="!bleStore.connected">
+        <button class="btn-submit" :class="{ dirty: isDirty }" @tap="handleSubmit" :disabled="!bleStore.connected">
           下发配置到设备
         </button>
         <text class="submit-hint">阈值/确认次数/间隔/断连续锁 → 保存到手机本地（每台 KeyGo 设备独立配置）</text>
@@ -217,8 +223,8 @@
 </template>
 
 <script setup>
-import { reactive, computed, watch } from 'vue'
-import { onShow } from '@dcloudio/uni-app'
+import { reactive, ref, computed, watch } from 'vue'
+import { onShow, onLoad, onUnload } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
@@ -241,22 +247,62 @@ const localConfig = reactive({
   kr: 15,   // ★ 与 CH582M / ESP32C3 默认 kf_r=15.0 一致
 })
 
-function syncFromStore() {
-  localConfig.unlock = bleStore.unlockThreshold
-  localConfig.lock = bleStore.lockThreshold
-  localConfig.uc = bleStore.unlockCountRequired
-  localConfig.lc = bleStore.lockCountRequired
-  localConfig.interval = bleStore.rssiReadPeriodMs || 500
-  localConfig.dlock = bleStore.disconnectLockDelayMs
-  localConfig.kr = bleStore.kalmanR || 15
-}
+// ★ v3.25: 切回页面时用于强制 slider 重渲染的计数（解决 uni-app slider 非受控不回弹）
+const configReloadKey = ref(0)
+
+// ★ v3.25: 草稿态检测 —— localConfig(编辑草稿) 是否偏离 store(已下发/已保存) 的值
+const isDirty = computed(() => {
+  return localConfig.unlock !== bleStore.unlockThreshold
+    || localConfig.lock !== bleStore.lockThreshold
+    || localConfig.uc !== bleStore.unlockCountRequired
+    || localConfig.lc !== bleStore.lockCountRequired
+    || localConfig.interval !== (bleStore.rssiReadPeriodMs || 500)
+    || localConfig.dlock !== bleStore.disconnectLockDelayMs
+    || localConfig.kr !== (bleStore.kalmanR || 15)
+})
+
+// ★ v3.25: 标记「APP 是否进入过后台」（锁屏 / 切到别的 App）。
+//   uni-app 的 onShow 在「tab 切换回来」和「锁屏再解锁」时都会触发，
+//   但只有前者属于「真实离开本页」，应丢弃草稿；后者应保留草稿。
+//   关键区别：tab 切换不会触发 uni.onAppHide，只有真正进后台才会。
+let appBackgrounded = false
+let appHideHandler = null
+
+onLoad(() => {
+  // 注册全局前后台监听：进后台即标记，onShow 据此区分「导航离开」与「后台恢复」
+  appHideHandler = () => { appBackgrounded = true }
+  uni.onAppHide(appHideHandler)
+})
+
+onUnload(() => {
+  if (appHideHandler) uni.offAppHide(appHideHandler)
+})
 
 onShow(() => {
   themeStore.applyNavBar()
   // ★ BugFix: 传入 SN 才能读设备专属配置 ble_config_v1_{SN}
   //   不传 SN 只会读旧版全局 ble_config_v1，切后台再切回时找不到设备专属配置导致重置为默认值
   bleStore._restoreConfig(bleStore.serialNumber || undefined)
-  syncFromStore()
+  // ★ v3.25: 仅当「真实导航离开后返回」才丢弃草稿并提示；
+  //   锁屏/切后台再回来(appBackgrounded=true)保留草稿，也不弹「已撤销」
+  if (!appBackgrounded) {
+    const hadDraft = isDirty.value
+  // ★ 用已保存值重建编辑态：Object.assign 保证响应式覆盖；
+  //   configReloadKey++ 强制 slider 重渲染到正确 value（uni-app slider 非受控，仅靠 :value 不回弹）
+  Object.assign(localConfig, {
+    unlock: bleStore.unlockThreshold,
+    lock: bleStore.lockThreshold,
+    uc: bleStore.unlockCountRequired,
+    lc: bleStore.lockCountRequired,
+    interval: bleStore.rssiReadPeriodMs || 500,
+    dlock: bleStore.disconnectLockDelayMs,
+    kr: bleStore.kalmanR || 15,
+  })
+  configReloadKey.value++
+    if (hadDraft) toast.info('已撤销未保存的修改')
+  }
+  // 重置标记，供下次 onShow 判断（无论本次是否后台回来）
+  appBackgrounded = false
 })
 
 // ★ v3.23: 智能重连模式切换
@@ -504,6 +550,35 @@ async function handleSubmit() {
 
 .btn-submit:active { opacity: 0.8; }
 .btn-submit[disabled] { opacity: 0.3; }
+
+/* ★ v3.25: 有未保存修改时，按钮高亮提示待下发 */
+.btn-submit.dirty {
+  box-shadow: 0 0 0 4rpx rgba(255, 68, 136, 0.3);
+}
+
+/* ★ v3.25: 未保存修改提示条 */
+.unsaved-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10rpx;
+  background: rgba(230, 126, 34, 0.12);
+  border: 1rpx solid rgba(230, 126, 34, 0.4);
+  border-radius: 12rpx;
+  padding: 16rpx 20rpx;
+  margin-bottom: 24rpx;
+}
+
+.unsaved-icon {
+  font-size: 26rpx;
+  line-height: 1.5;
+}
+
+.unsaved-text {
+  flex: 1;
+  font-size: 22rpx;
+  color: #e67e22;
+  line-height: 1.5;
+}
 
 /* ===== 卡尔曼 R 档位 ===== */
 .kr-presets {
