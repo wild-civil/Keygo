@@ -1,5 +1,18 @@
 /*
- * BLE-Key-Go v3.13 — APP 协议与 CH582M 对齐 + Kalman R 配置 + cooldown_ms
+ * BLE-Key-Go v3.6 — 解除应用层 PIN 门禁（适配当前未实现 VERIFY 的 APP）
+ *
+ * ── v3.6 核心变更 ──────────────────────────────────────
+ *   ● 解除 v3.5.10 引入的「应用层 PIN 验证（VERIFY）」强制门禁
+ *     当前 APP（uni-app）未实现 VERIFY:<pin> 握手，导致：
+ *       - 手动 UNLOCK/LOCK/TRUNK 被静默拒绝（CommandCallbacks）
+ *       - RSSI 自动解锁/落锁被拦截（maybeAutoStateChange）
+ *       - 加密后 30s 内未 VERIFY 被主动断开手机（loop 截止逻辑）
+ *     故 v3.6 将「已绑定/加密连接建立」直接视为已授权（回归 v3.2 设计），
+ *     不再要求应用层 PIN。PIN 验证后续由 APP 实现 VERIFY 后再启用。
+ *   ● ★ LED 引脚修正（匹配 ESP32-C3 实际硬件原理图）
+ *     原 PIN_LED=8 → 该引脚无 LED 器件，所有指示灯操作无效
+ *     D4/GPIO12 = PIN_LED_STATUS （状态灯：连接常亮/配对快闪/待连慢闪）
+ *     D5/GPIO13 = PIN_LED_EVENT  （事件灯：启动闪烁/配对双闪/重置确认）
  *
  * ── v3.5 核心变更 ──────────────────────────────────────
  *   ● 根因修复：v3.0-v3.4 所有特征值均无加密权限保护！
@@ -90,8 +103,8 @@
 #define PIN_LOCK        3
 #define PIN_TRUNK       4
 #define PIN_KEY_POWER   5
-#define PIN_LED_STATUS  12      // ★ v3.13: D4 状态灯（GPIO12 / SPIHD），反映锁状态（与 CH582M 一致）
-#define PIN_LED_EVENT   13      // ★ v3.13: D5 事件灯（GPIO13 / SPIWP），后备箱/配对事件（两个 LED 一起）
+#define PIN_LED_STATUS   12      // ★ v3.6: D4 状态灯（GPIO12/SPIHD）— 连接/锁定/配对状态指示
+#define PIN_LED_EVENT    13      // ★ v3.6: D5 事件灯（GPIO13/SPIWP）— 启动/配对/动作闪烁确认
 #define PIN_BIND        9       // 物理按键（低电平触发，需外部上拉）
 
 #define NMOS_ON    HIGH
@@ -112,7 +125,7 @@
 // ---------------- Tunable parameters ----------------
 int rssiUnlockThreshold = -45;
 int rssiLockThreshold = -65;
-int rssiHysteresisDb = 0;           // ★ v3.13: 默认 0，与 CH582M 行为一致（无额外迟滞）
+int rssiHysteresisDb = 5;
 int rssiSpikeRejectDb = 25;
 int unlockCountRequired = 3;
 int lockCountRequired = 5;
@@ -124,8 +137,8 @@ int keyPressDurationMs = 300;
 int keyReleaseDelayMs = 500;
 
 // ---------------- 1D Kalman filter ----------------
-float kf_q = 1.0f;                  // ★ v3.13: 默认 1.0，与 CH582M 一致
-float kf_r = 15.0f;                 // ★ v3.13: 默认 15，匹配 App "标准"档
+float kf_q = 4.0f;
+float kf_r = 16.0f;
 float kf_x = -999;
 float kf_p = 1.0f;
 bool  kf_initialized = false;
@@ -191,8 +204,7 @@ unsigned long lastStatusNotifyMs = 0;
 unsigned long disconnectTimestampMs = 0;
 unsigned long manualCommandTimestampMs = 0;
 bool manualCommandCooldown = false;
-int  manualCooldownMs = 8000;       // ★ v3.13: 设备级可配置冷却时间，与 CH582M g_cfgManualCooldownMs 等价
-bool newRssiSample = false;         // ★ v3.13: 标记新 RSSI 样本已产出，状态机仅在此时运行一次
+#define MANUAL_COMMAND_COOLDOWN_MS 8000
 
 // ★ v3.5.10: 应用层 PIN 验证（NimBLE Just Works 配对后，App 发送 VERIFY:<pin> 验证）
 bool pinVerified = false;                      // 当前连接是否已通过应用层 PIN 验证
@@ -230,7 +242,6 @@ void executeLockSequence();
 void executeTrunkSequence();
 void processStateMachine();
 void updateLED();
-static void startTrunkBlink();   // ★ v3.13: 后备箱闪烁（LED 逻辑与 CH582M 对齐）
 void handleSerialCommand();
 void handleBindButton();
 void readConnectionRssi();
@@ -300,7 +311,6 @@ static void gapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t
                           latestRSSI, (int)filteredRSSI, stateToString().c_str(),
                           spikeRejected ? " (spike)" : "");
         }
-        newRssiSample = true;  // ★ v3.13: 标记新样本，驱动状态机运行一次
     } else {
         Serial.printf("[RSSI] read failed, status=%d\n", param->read_rssi_cmpl.status);
     }
@@ -559,9 +569,9 @@ class ConfigCallbacks : public BLECharacteristicCallbacks {
         String value = characteristic->getValue().c_str();
         value.trim();
         if (parseConfigLine(value)) {
-            // ★ v3.12/v3.13: 除 cooldown_ms 外，其他配置仅存 RAM，手机每次连接下发覆盖
-            //   cooldown_ms 为设备级参数，由 parseConfigLine() 内部持久化
-            Serial.printf("[CONFIG] updated by BLE: %s\n", value.c_str());
+            // ★ v3.12: 不自动 saveConfig() — 配置仅存 RAM，手机每次连接下发覆盖
+            //   ESP32 NVS Flash 也有擦写寿命限制，避免每次连接都写
+            Serial.printf("[CONFIG] updated by BLE (RAM-only): %s\n", value.c_str());
             notifyStatus();
         } else {
             Serial.printf("[CONFIG] invalid BLE config: %s\n", value.c_str());
@@ -583,12 +593,9 @@ public:
             return;
         }
 
-        // ★ v3.13: 授权边界 = 已加密/已配对连接（与 CH582M 一致，App 未实现 VERIFY 握手）
-        //   移除 v3.5.10 的 !pinVerified 门禁，否则命令被静默丢弃
-        if (!encryptionEstablished) {
-            Serial.printf("[SEC] Command rejected (not encrypted): %s\n", cmd.c_str());
-            return;
-        }
+        // ★ v3.6: 移除应用层 PIN 门禁（PIN 验证延后）
+        //   授权 = BLE 加密连接已建立（encryptionEstablished）。
+        //   当前 APP 未实现 VERIFY:<pin> 握手，故不再强制 pinVerified。
 
         // ★ v3.2: 设置设备名称
         if (upper.startsWith("NAME:")) {
@@ -607,20 +614,16 @@ public:
             executeUnlockSequence();
             currentState = STATE_UNLOCKED;
             resetKalmanFilter();
-            unlockCounter = 0;  // ★ v3.13: 与 CH582M 一致，清零计数器
-            lockCounter = 0;
             manualCommandTimestampMs = millis();
             manualCommandCooldown = true;
-            Serial.printf("[STATE] BLE manual unlock, RSSI state machine paused %dms\n", manualCooldownMs);
+            Serial.println("[STATE] BLE manual unlock, RSSI state machine paused 8s");
         } else if (upper == "LOCK") {
             executeLockSequence();
             currentState = STATE_LOCKED;
             resetKalmanFilter();
-            unlockCounter = 0;  // ★ v3.13: 与 CH582M 一致，清零计数器
-            lockCounter = 0;
             manualCommandTimestampMs = millis();
             manualCommandCooldown = true;
-            Serial.printf("[STATE] BLE manual lock, RSSI state machine paused %dms\n", manualCooldownMs);
+            Serial.println("[STATE] BLE manual lock, RSSI state machine paused 8s");
         } else if (upper == "TRUNK") {
             executeTrunkSequence();
         } else if (upper == "STATUS") {
@@ -740,15 +743,12 @@ CommandCallbacks* g_commandCallbacks = nullptr;
 // ====================== setup ======================
 
 void setup() {
-    // ---- Early LED blink（两个 LED 一起）----
-    pinMode(PIN_LED_STATUS, OUTPUT);
-    pinMode(PIN_LED_EVENT,  OUTPUT);
+    // ---- Early LED blink (event灯: D5/GPIO13) ----
+    pinMode(PIN_LED_EVENT, OUTPUT);
     for (int i = 0; i < 3; i++) {
-        digitalWrite(PIN_LED_STATUS, HIGH);
-        digitalWrite(PIN_LED_EVENT,  HIGH);
+        digitalWrite(PIN_LED_EVENT, HIGH);
         delay(150);
-        digitalWrite(PIN_LED_STATUS, LOW);
-        digitalWrite(PIN_LED_EVENT,  LOW);
+        digitalWrite(PIN_LED_EVENT, LOW);
         delay(150);
     }
 
@@ -780,15 +780,15 @@ void setup() {
     digitalWrite(PIN_LOCK, NMOS_OFF);
     digitalWrite(PIN_TRUNK, NMOS_OFF);
     digitalWrite(PIN_KEY_POWER, PMOS_OFF);
-    digitalWrite(PIN_LED_STATUS, LOW);
-    digitalWrite(PIN_LED_EVENT,  LOW);
+    digitalWrite(PIN_LED_STATUS, LOW);     // ★ v3.6: 状态灯初始化熄灭
+    digitalWrite(PIN_LED_EVENT, LOW);      // ★ v3.6: 事件灯初始化熄灭
 
     resetKalmanFilter();
     loadConfig();
     loadSecurity();           // ★ v3.2: 加载 PIN + 自定义名称
 
     Serial.println();
-    Serial.printf("==== BLE-Key-Go v3.13 | Device: %s ====\n", deviceName);
+    Serial.printf("==== BLE-Key-Go v3.5 | Device: %s ====\n", deviceName);
 #if BLE_KEY_GO_STACK_BLUEDROID
     Serial.println("[BUILD] Stack: Bluedroid, Native RSSI: enabled (async)");
 #elif BLE_KEY_GO_STACK_NIMBLE
@@ -919,11 +919,6 @@ void loop() {
     //     3. onAuthenticationComplete(fail) + hasBondedDevices → 加密失败（主动清除）
     if (deviceConnected) {
         static bool timeoutWarned = false;
-        static unsigned long warnedConnectStart = 0;
-        if (warnedConnectStart != connectStartMs) {   // ★ v3.13: 每次新连接重置超时哨兵（修复死代码）
-            timeoutWarned = false;
-            warnedConnectStart = connectStartMs;
-        }
         unsigned long elapsed = millis() - connectStartMs;
         if (elapsed > BONDING_TIMEOUT_MS && !timeoutWarned) {
             if (!encryptionEstablished) {
@@ -938,12 +933,21 @@ void loop() {
             }
             timeoutWarned = true;
         }
+        if (!deviceConnected) {
+            timeoutWarned = false;
+        }
 
-        // ★ v3.13: 移除 v3.5.16 的 30s PIN 验证截止断连
-        //   根因：App 未实现 VERIFY 握手，pinVerified 恒为 false，
-        //   会导致已绑定手机在连接 30s 后被强制断开（"连上又掉"）。
-        //   授权边界改为"已加密/已配对连接"，与 CH582M 一致。
-        //   （encryptionEstablishedAtMs 保留赋值，仅作状态记录，不再用于断开）
+        // ★ v3.6: 禁用「未 VERIFY 即断开」逻辑（PIN 验证延后）
+        //   原 v3.5.16: 加密后 30s 内未收到 VERIFY 则主动断开手机。
+        //   因当前 APP 未实现 VERIFY，保留会反复踢掉合法已绑定设备，故关闭。
+        //   若未来 APP 实现 VERIFY，可恢复下方代码：
+        // if (encryptionEstablished && !pinVerified && encryptionEstablishedAtMs > 0) {
+        //     unsigned long unpinElapsed = millis() - encryptionEstablishedAtMs;
+        //     if (unpinElapsed >= PIN_VERIFY_DEADLINE_MS) {
+        //         if (pServer && deviceConnected) pServer->disconnect(connectionId);
+        //         encryptionEstablishedAtMs = 0;
+        //     }
+        // }
     }
 
     // ★ 配对模式超时
@@ -1079,22 +1083,21 @@ void handleBindButton() {
             // 重置调参
             rssiUnlockThreshold = -45;
             rssiLockThreshold = -65;
-            rssiHysteresisDb = 0;           // ★ v3.13: 与 CH582M 一致
+            rssiHysteresisDb = 5;
             rssiSpikeRejectDb = 25;
             unlockCountRequired = 3;
             lockCountRequired = 5;
             rssiSampleIntervalMs = 500;
             disconnectLockDelayMs = 5000;
-            manualCooldownMs = 8000;        // ★ v3.13: 恢复默认冷却时间
-            kf_q = 1.0f;                    // ★ v3.13: 与 CH582M 一致
-            kf_r = 15.0f;                   // ★ v3.13: 匹配 App "标准"档 R=15
+            kf_q = 4.0f;
+            kf_r = 16.0f;
 
             pairingModeActive = false;
 
-            // LED 快闪 3 次确认（两个 LED 一起）
+            // LED 事件灯快闪 3 次确认
             for (int i = 0; i < 3; i++) {
-                digitalWrite(PIN_LED_STATUS, HIGH); digitalWrite(PIN_LED_EVENT, HIGH); delay(100);
-                digitalWrite(PIN_LED_STATUS, LOW);  digitalWrite(PIN_LED_EVENT, LOW);  delay(200);
+                digitalWrite(PIN_LED_EVENT, HIGH); delay(100);
+                digitalWrite(PIN_LED_EVENT, LOW);  delay(200);
             }
             Serial.println("[FACTORY] Reset complete. Restarting in 1s...");
             delay(1000);
@@ -1108,11 +1111,11 @@ void handleBindButton() {
                           PAIRING_MODE_TIMEOUT_MS / 1000);
             Serial.println("[SEC] Any phone may now pair with PIN: " + pairingPIN);
 
-            // LED 双闪确认（两个 LED 一起）
-            digitalWrite(PIN_LED_STATUS, HIGH); digitalWrite(PIN_LED_EVENT, HIGH); delay(100);
-            digitalWrite(PIN_LED_STATUS, LOW);  digitalWrite(PIN_LED_EVENT, LOW);  delay(100);
-            digitalWrite(PIN_LED_STATUS, HIGH); digitalWrite(PIN_LED_EVENT, HIGH); delay(100);
-            digitalWrite(PIN_LED_STATUS, LOW);  digitalWrite(PIN_LED_EVENT, LOW);
+            // LED 事件灯双闪确认（进入配对模式）
+            digitalWrite(PIN_LED_EVENT, HIGH); delay(100);
+            digitalWrite(PIN_LED_EVENT, LOW);  delay(100);
+            digitalWrite(PIN_LED_EVENT, HIGH); delay(100);
+            digitalWrite(PIN_LED_EVENT, LOW);
             notifyStatus();
         }
     }
@@ -1190,7 +1193,6 @@ void readConnectionRssi() {
                           latestRSSI, (int)filteredRSSI, stateToString().c_str(),
                           spikeRejected ? " (spike)" : "");
         }
-        newRssiSample = true;  // ★ v3.13: 标记新样本，驱动状态机运行一次
     }
 #elif BLE_KEY_GO_STACK_BLUEDROID
     esp_err_t err = esp_ble_gap_read_rssi(connectedRemoteAddress);
@@ -1212,7 +1214,7 @@ void readConnectionRssi() {
 void updateKalmanFilter(int measurement) {
     if (!kf_initialized) {
         kf_x = (float)measurement;
-        // ★ v3.13: 移除 kf_p = kf_r（错误），kf_p 已由 resetKalmanFilter() 初始化为 1.0f
+        kf_p = kf_r;
         kf_initialized = true;
         filteredRSSI = measurement;
         return;
@@ -1233,12 +1235,8 @@ void resetKalmanFilter() {
 }
 
 void processStateMachine() {
-    // ★ v3.13: 仅在每个新 RSSI 样本到达时运行一次，与 CH582M 行为一致
-    if (!newRssiSample) return;
-    newRssiSample = false;
-
     if (manualCommandCooldown) {
-        if (millis() - manualCommandTimestampMs >= (unsigned long)manualCooldownMs) {
+        if (millis() - manualCommandTimestampMs >= MANUAL_COMMAND_COOLDOWN_MS) {
             manualCommandCooldown = false;
             Serial.println("[STATE] manual command cooldown ended, RSSI state machine resumed");
         } else {
@@ -1250,7 +1248,7 @@ void processStateMachine() {
     //   根因：executeUnlockSequence 中的 delay() 会阻塞 NimBLE 事件队列，
     //   在加密协商期间调用会导致 BLE 连接断开。
     //   同时也确保只有已授权的设备才能触发自动控制。
-    if (!encryptionEstablished) return;   // ★ v3.13: 移除 !pinVerified（App 未实现 VERIFY，否则自动状态机失效）
+    if (!encryptionEstablished) return;   // ★ v3.6: 移除 !pinVerified 门禁（PIN 延后）
 
     if (filteredRSSI == -999 || currentState == STATE_ACTION) return;
 
@@ -1322,74 +1320,49 @@ void executeTrunkSequence() {
     digitalWrite(PIN_TRUNK, NMOS_OFF);
     delay(keyReleaseDelayMs);
     digitalWrite(PIN_KEY_POWER, PMOS_OFF);
-    startTrunkBlink();   // ★ v3.13: 触发后备箱闪烁（与 CH582M 一致，两个 LED 一起）
 }
 
 // ====================== LED ======================
-// ★ v3.13: LED 逻辑与 CH582M 对齐
-//   - 双 LED（D4=GPIO12 状态灯, D5=GPIO13 事件灯）一起工作（用户要求）
-//   - 平时反映【锁状态】：解锁=亮，落锁=灭（与 CH582M 完全一致，不再反映连接状态）
-//   - 后备箱触发：5 秒闪烁（500ms × 10 次切换），期间禁止锁状态覆盖
-//   - 配对模式 / 无绑定设备：保留快闪提示（CH582M 无对应场景，ESP32 辅助信息）
-
-static bool         g_ledSlowState    = false;
-static unsigned long g_ledBlinkMs     = 0;
-static bool         g_ledBlinkLocked  = false;  // 后备箱闪烁进行中，禁止锁状态覆盖
-static uint8_t      g_ledTrunkToggles = 0;      // 后备箱剩余切换次数（10 = 5 秒）
-static unsigned long g_ledTrunkMs     = 0;
-
-// 用户要求两个 LED 一起亮灭
-static void setBothLEDs(bool on) {
-    digitalWrite(PIN_LED_STATUS, on ? HIGH : LOW);
-    digitalWrite(PIN_LED_EVENT,  on ? HIGH : LOW);
-}
-
-// 后备箱闪烁：非阻塞状态机（500ms × 10 切换 = 5s），结束后恢复锁状态
-static void startTrunkBlink() {
-    g_ledBlinkLocked = true;
-    g_ledTrunkToggles = 10;
-    g_ledTrunkMs = millis();
-    setBothLEDs(true);   // 起始点亮
-}
+// ★ v3.6: 双 LED 分工
+//   D4/PIN_LED_STATUS(GPIO12) — 状态灯：连接/锁定/配对常驻指示
+//   D5/PIN_LED_EVENT(GPIO13)  — 事件灯：启动/配对/动作瞬时闪烁
 
 void updateLED() {
-    // ---- 后备箱闪烁优先（与 CH582M 一致，5s × 500ms 闪烁）----
-    if (g_ledBlinkLocked) {
-        if (millis() - g_ledTrunkMs >= 500) {
-            g_ledTrunkMs = millis();
-            g_ledTrunkToggles--;
-            if (g_ledTrunkToggles == 0) {
-                g_ledBlinkLocked = false;
-                setBothLEDs(currentState == STATE_UNLOCKED);  // 恢复为当前锁状态
-            } else {
-                setBothLEDs((g_ledTrunkToggles % 2) == 0);    // 翻转亮灭
-            }
-        }
+    static unsigned long lastBlinkMs = 0;
+    static bool ledState = false;
+
+    // ★ v3.2/v3.6: 已连接 → 状态灯常亮（BLE 栈保证加密）
+    if (deviceConnected) {
+        digitalWrite(PIN_LED_STATUS, HIGH);
         return;
     }
 
-    // ---- 配对模式 → 200ms 快闪（提示可配对；CH582M 无此场景，ESP32 辅助）----
+    // 配对模式 → 状态灯 200ms 快闪
     if (pairingModeActive) {
-        if (millis() - g_ledBlinkMs >= 200) {
-            g_ledBlinkMs = millis();
-            g_ledSlowState = !g_ledSlowState;
-            setBothLEDs(g_ledSlowState);
+        if (millis() - lastBlinkMs >= 200) {
+            lastBlinkMs = millis();
+            ledState = !ledState;
+            digitalWrite(PIN_LED_STATUS, ledState);
         }
         return;
     }
 
-    // ---- 无绑定设备 → 1s 慢闪（提示首次配对）----
+    // ★ v3.2: 无绑定设备 → 状态灯每秒慢闪（提示用户首次配对）
     if (!hasBondedDevices) {
-        if (millis() - g_ledBlinkMs >= 1000) {
-            g_ledBlinkMs = millis();
-            g_ledSlowState = !g_ledSlowState;
-            setBothLEDs(g_ledSlowState);
+        if (millis() - lastBlinkMs >= 1000) {
+            lastBlinkMs = millis();
+            ledState = !ledState;
+            digitalWrite(PIN_LED_STATUS, ledState);
         }
         return;
     }
 
-    // ---- 已绑定：直接反映【锁状态】（与 CH582M 完全一致：解锁亮 / 落锁灭）----
-    setBothLEDs(currentState == STATE_UNLOCKED);
+    // 已绑定待连接 → 状态灯 2秒闪烁
+    if (millis() - lastBlinkMs >= 2000) {
+        lastBlinkMs = millis();
+        ledState = !ledState;
+        digitalWrite(PIN_LED_STATUS, ledState);
+    }
 }
 
 // ====================== Status Notify ======================
@@ -1416,9 +1389,7 @@ void notifyStatus() {
     p += ",\"hy\":" + String(rssiHysteresisDb);
     p += ",\"uc\":" + String(unlockCountRequired);
     p += ",\"lc\":" + String(lockCountRequired);
-    p += ",\"kr\":" + String(kf_r);  // ★ v3.13: 上报 kf_r，App 同步 kalmanR（解决 localStorage 残留值问题）
     p += ",\"mc\":" + String(manualCommandCooldown ? 1 : 0);
-    p += ",\"cd\":" + String(manualCooldownMs);  // ★ v3.13: 上报冷却时间，与 CH582M 一致
     p += ",\"dn\":\"" + String(deviceName) + "\"";
     // ★ v3.5: 自定义名称 d2 — 仅加密连接时泄露实际值，未加密时返回空串
     //   双重保护：特征值已有 ESP_GATT_PERM_READ_ENCRYPTED，JSON 层面再过滤一道
@@ -1509,29 +1480,10 @@ bool parseConfigLine(String line) {
         else if (key == "spike")   { rssiSpikeRejectDb = value.toInt();    changed = true; }
         else if (key == "uc")      { unlockCountRequired = value.toInt();  changed = true; }
         else if (key == "lc")      { lockCountRequired = value.toInt();    changed = true; }
-        else if (key == "interval"){
-            // ★ v3.13: 与 CH582M 一致，限制 100~2000ms
-            int iv = value.toInt();
-            if (iv >= 100 && iv <= 2000) { rssiSampleIntervalMs = iv; changed = true; }
-        }
+        else if (key == "interval"){ rssiSampleIntervalMs = value.toInt(); changed = true; }
         else if (key == "dlock")   { disconnectLockDelayMs = value.toInt();changed = true; }
-        // ★ v3.13: cooldown_ms 设备级参数，变更后持久化到 NVS
-        else if (key == "cooldown_ms") {
-            int cd = value.toInt();
-            if (cd >= 2000 && cd <= 30000 && manualCooldownMs != cd) {
-                manualCooldownMs = cd;
-                changed = true;
-                saveConfig();
-                Serial.printf("[CFG] cooldown_ms updated to %d and saved\n", manualCooldownMs);
-            }
-        }
         else if (key == "q")       { kf_q = value.toFloat(); changed = true; resetKalmanFilter(); }
         else if (key == "r")       { kf_r = value.toFloat(); changed = true; resetKalmanFilter(); }
-        // ★ v3.13: App 发送 kr=，仅更新 kf_r 不 reset，与 CH582M 行为一致（避免滤波输出跳变）
-        else if (key == "kr") {
-            float r = value.toFloat();
-            if (r >= 1.0f && r <= 50.0f) { kf_r = r; changed = true; }
-        }
         else if (key == "rssi") {
             latestRSSI = value.toInt();
             updateKalmanFilter(latestRSSI);
@@ -1551,20 +1503,18 @@ void loadConfig() {
 
     rssiUnlockThreshold = preferences.getInt("unlock", -45);
     rssiLockThreshold   = preferences.getInt("lock", -65);
-    rssiHysteresisDb    = preferences.getInt("hyst", 0);              // ★ v3.13: 默认 0
+    rssiHysteresisDb    = preferences.getInt("hyst", 5);
     rssiSpikeRejectDb   = preferences.getInt("spike", 25);
     unlockCountRequired = preferences.getInt("uc", 3);
     lockCountRequired   = preferences.getInt("lc", 5);
     rssiSampleIntervalMs= preferences.getInt("interval", 500);
     disconnectLockDelayMs=preferences.getInt("dlock", 5000);
-    manualCooldownMs    = preferences.getInt("cooldown_ms", 8000);   // ★ v3.13: 设备级冷却时间
-    kf_q = preferences.getFloat("kf_q", 1.0f);                        // ★ v3.13: 默认 1.0
-    kf_r = preferences.getFloat("kf_r", 15.0f);                       // ★ v3.13: 匹配 App "标准"档 R=15
+    kf_q = preferences.getFloat("kf_q", 4.0f);
+    kf_r = preferences.getFloat("kf_r", 16.0f);
 
-    Serial.printf("[CFG] loaded: unlock=%d lock=%d hyst=%d spike=%d uc=%d lc=%d int=%d dl=%d cd=%d\n",
+    Serial.printf("[CFG] loaded: unlock=%d lock=%d hyst=%d spike=%d uc=%d lc=%d int=%d dl=%d\n",
                   rssiUnlockThreshold, rssiLockThreshold, rssiHysteresisDb, rssiSpikeRejectDb,
-                  unlockCountRequired, lockCountRequired, rssiSampleIntervalMs, disconnectLockDelayMs,
-                  manualCooldownMs);
+                  unlockCountRequired, lockCountRequired, rssiSampleIntervalMs, disconnectLockDelayMs);
 }
 
 void saveConfig() {
@@ -1578,7 +1528,6 @@ void saveConfig() {
     preferences.putInt("lc", lockCountRequired);
     preferences.putInt("interval", rssiSampleIntervalMs);
     preferences.putInt("dlock", disconnectLockDelayMs);
-    preferences.putInt("cooldown_ms", manualCooldownMs);  // ★ v3.13: 设备级冷却时间持久化
     preferences.putFloat("kf_q", kf_q);
     preferences.putFloat("kf_r", kf_r);
 }
@@ -1602,8 +1551,6 @@ void handleSerialCommand() {
         executeUnlockSequence();
         currentState = STATE_UNLOCKED;
         resetKalmanFilter();
-        unlockCounter = 0;
-        lockCounter = 0;
         manualCommandTimestampMs = millis();
         manualCommandCooldown = true;
         Serial.println("[KEY] serial unlock");
@@ -1611,8 +1558,6 @@ void handleSerialCommand() {
         executeLockSequence();
         currentState = STATE_LOCKED;
         resetKalmanFilter();
-        unlockCounter = 0;
-        lockCounter = 0;
         manualCommandTimestampMs = millis();
         manualCommandCooldown = true;
         Serial.println("[KEY] serial lock");
