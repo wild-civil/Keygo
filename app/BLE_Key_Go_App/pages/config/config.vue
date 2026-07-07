@@ -17,15 +17,15 @@
         </view>
 
         <view class="mode-card"
-          :class="{ active: bleStore.autoReconnectMode === 'power_saver' }"
-          @tap="handleModeChange('power_saver')">
+          :class="{ active: bleStore.autoReconnectMode === 'manual' }"
+          @tap="handleModeChange('manual')">
           <view class="mode-card-header">
-            <text class="mode-icon">🔋</text>
-            <text class="mode-name">省电模式</text>
-            <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'power_saver'">当前</text>
+            <text class="mode-icon">🖐️</text>
+            <text class="mode-name">手动模式</text>
+            <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'manual'">当前</text>
           </view>
-          <text class="mode-desc">仅打开 App 时扫描连接，零后台功耗</text>
-          <text class="mode-power">额外功耗 = 0</text>
+          <text class="mode-desc">完全手动：不自动连接、也不自动锁车</text>
+          <text class="mode-power">适合露营等贴身场景，由你点按钮控制</text>
         </view>
 
         <view class="mode-card"

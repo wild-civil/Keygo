@@ -852,6 +852,9 @@ export async function sendConfig(deviceId, config) {
   if (config.cooldown_ms !== undefined) parts.push(`cooldown_ms=${config.cooldown_ms}`)
   // ★ v3.13: 卡尔曼 R 值
   if (config.kr !== undefined) parts.push(`kr=${config.kr}`)
+  // ★ v3.24: 自动锁使能 (autolock) — 手动模式由 Store 下发 0 关闭固件 RSSI 自动锁
+  //   注意：此前漏加此字段，导致手动模式下 autolock=0 被静默丢弃，固件仍保持自动锁！
+  if (config.autolock !== undefined) parts.push(`autolock=${config.autolock}`)
 
   const value = parts.join(' ')
   if (!value) return

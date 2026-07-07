@@ -111,7 +111,7 @@ export const useBleStore = defineStore('ble', {
     reconnectNextDelay: 0,        // 下次重连等待秒数（UI 显示用）
 
     // ★ v3.23: 智能重连模式
-    autoReconnectMode: 'comfort', // 'comfort' | 'power_saver' | 'speed'
+    autoReconnectMode: 'comfort', // 'comfort' | 'manual' | 'speed'
     _dormantPollTimer: null,      // 舒适模式后台轮询定时器
     _dormantPollGuard: 0,         // 轮询会话锁
     _dormantPollCount: 0,         // ★ v3.23.2: 轮询次数（用于时间漂移日志）
@@ -223,8 +223,9 @@ export const useBleStore = defineStore('ble', {
       if (!this._autoReconnectModeRestored) {
         this._autoReconnectModeRestored = true
         try {
-          const mode = uni.getStorageSync('ble_auto_reconnect_mode')
-          if (mode === 'comfort' || mode === 'power_saver' || mode === 'speed') {
+          let mode = uni.getStorageSync('ble_auto_reconnect_mode')
+          if (mode === 'power_saver') mode = 'manual'  // ★ v3.24: 旧"省电"模式迁移为"手动"
+          if (mode === 'comfort' || mode === 'manual' || mode === 'speed') {
             this.autoReconnectMode = mode
             console.log('[Store] 智能重连模式已恢复:', mode)
           }
@@ -533,6 +534,8 @@ export const useBleStore = defineStore('ble', {
      */
     async _ensureForegroundService() {
       if (this._foregroundServiceActive) return
+      // ★ v3.24: 手动模式不启动任何保活/后台扫描（完全由用户手动控制）
+      if (this.autoReconnectMode === 'manual') return
       if (this._foregroundServiceFailCount >= 3) {
         // 已经失败 3 次，放弃
         return
@@ -1156,6 +1159,7 @@ export const useBleStore = defineStore('ble', {
     _shouldAutoReconnect() {
       if (this.connected) return false
       if (this.reconnectMode === 'dormant') return false   // 用户主动断开
+      if (this.autoReconnectMode === 'manual') return false // ★ v3.24: 手动模式永不自动连接
       if (this.btState === 'off') return false
       // ① 绑定门槛预留：if (!this.isBound) return false
       return true
@@ -1320,9 +1324,9 @@ export const useBleStore = defineStore('ble', {
               console.log('[Store] 重连失败达 10 次，注册亮屏监听器（零后台功耗）')
               this._registerScreenOnListener()
             } else {
-              // 省电模式 → 彻底放弃
+              // ★ v3.24: 手动模式（及非舒适模式）→ 彻底放弃自动重连
               this.reconnectMode = 'idle'
-              console.log('[Store] 重连失败，已达最大尝试次数（省电模式，放弃重连）')
+              console.log('[Store] 重连失败，已达最大尝试次数（手动模式，放弃重连）')
             }
             return
           }
@@ -1703,9 +1707,11 @@ export const useBleStore = defineStore('ble', {
           interval: this.rssiReadPeriodMs,
           dlock: this.disconnectLockDelayMs,
           kr: this.kalmanR,
+          // ★ v3.24: 手动模式下发 autolock=0 禁用固件 RSSI 自动锁；其余模式 autolock=1 启用
+          autolock: this.autoReconnectMode === 'manual' ? 0 : 1,
           // ★ v3.12: cooldown_ms 不下发 — 设备级参数，由固件 DataFlash 管理
         })
-        console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ' interval=' + this.rssiReadPeriodMs + ' kr=' + this.kalmanR + ')')
+        console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ' interval=' + this.rssiReadPeriodMs + ' kr=' + this.kalmanR + ' autolock=' + (this.autoReconnectMode === 'manual' ? 0 : 1) + ')')
       } catch (e) {
         console.warn('[Store] 配置下发失败:', e?.message || e)
       }
@@ -2391,10 +2397,10 @@ export const useBleStore = defineStore('ble', {
     /**
      * 设置智能重连模式
      *
-     * @param {'comfort' | 'power_saver' | 'speed'} mode
+     * @param {'comfort' | 'manual' | 'speed'} mode
      */
     setAutoReconnectMode(mode) {
-      if (!['comfort', 'power_saver', 'speed'].includes(mode)) {
+      if (!['comfort', 'manual', 'speed'].includes(mode)) {
         console.warn('[Store] 无效的重连模式:', mode)
         return
       }
@@ -2417,12 +2423,13 @@ export const useBleStore = defineStore('ble', {
         if (!this.connected) {
           this._registerScreenOnListener()
         }
-      } else if (mode === 'power_saver') {
+      } else if (mode === 'manual') {
         // 退出 speed 模式 → 清理围栏相关
         if (prev === 'speed') this._onSpeedModeExit()
-        // 切换到省电模式 → 停止所有轮询 + 亮屏监听器
+        // ★ v3.24: 手动模式 → 停止所有轮询/亮屏监听/前台服务，完全由用户点击控制
         this._stopDormantPoll()
         this._unregisterScreenOnListener()
+        this._stopForegroundService()
         if (this._reconnectTimer) {
           clearTimeout(this._reconnectTimer)
           this._reconnectTimer = null
@@ -2433,6 +2440,11 @@ export const useBleStore = defineStore('ble', {
       } else if (mode === 'speed') {
         // ★ Phase 3: 切换到极速模式 → 停止后台轮询，记录当前停车位置
         this._onSpeedModeEnter()
+      }
+
+      // ★ v3.24: 模式切换影响自动锁 → 已连接时立即重新下发配置（autolock 跟随模式）
+      if (this.connected) {
+        this._syncConfigToDevice()
       }
     },
 
@@ -2613,7 +2625,7 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
-      if (this.autoReconnectMode === 'comfort' || this.autoReconnectMode === 'power_saver') {
+      if (this.autoReconnectMode === 'comfort') {
         // ★ 后台自动连（屏幕熄灭 / App 在后台）：每次心跳尝试连已知设备。
         //   AlarmManager 心跳在 Doze 深睡下仍能唤醒，配合前台服务即可实现真正的后台自动连。
         //   tryAutoConnect 内部先直连缓存设备（快、不扫描），失败才扫描已知设备集合。

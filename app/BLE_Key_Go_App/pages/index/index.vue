@@ -241,11 +241,8 @@ onShow(async () => {
     if (bleStore.reconnectMode === 'idle' && bleStore._shouldAutoReconnect()) {
       bleStore.tryAutoConnect()
     }
-  } else if (bleStore.autoReconnectMode === 'power_saver') {
-    // 省电模式 → 仅 idle 时尝试一次快速重连
-    if (bleStore.reconnectMode === 'idle' && bleStore._shouldAutoReconnect()) {
-      bleStore.tryAutoConnect()
-    }
+  } else if (bleStore.autoReconnectMode === 'manual') {
+    // ★ v3.24: 手动模式 — 不自动连接（统一闸门已拦截），仅由用户点击按钮控制
   } else if (bleStore.autoReconnectMode === 'speed') {
     // ★ Phase 3: 极速模式 → GPS 围栏检测（内部已含 _shouldAutoReconnect 闸门）
     if (!bleStore.connected) {
