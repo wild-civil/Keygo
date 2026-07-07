@@ -227,17 +227,18 @@ onShow(async () => {
 
   // ★ v1.0.1: 根据智能重连模式决定 onShow 行为
   if (bleStore.autoReconnectMode === 'comfort') {
-    // 舒适模式（亮屏触发）→ onShow 时直接尝试重连
-    if (bleStore.reconnectMode === 'idle') {
+    // 舒适模式（亮屏触发）→ onShow 时尝试重连
+    // 闸门：用户主动断开(dormant) / 已连接 / 蓝牙关 → 不自动连；idle 避免重入
+    if (bleStore.reconnectMode === 'idle' && bleStore._shouldAutoReconnect()) {
       bleStore.tryAutoConnect()
     }
   } else if (bleStore.autoReconnectMode === 'power_saver') {
     // 省电模式 → 仅 idle 时尝试一次快速重连
-    if (bleStore.reconnectMode === 'idle') {
+    if (bleStore.reconnectMode === 'idle' && bleStore._shouldAutoReconnect()) {
       bleStore.tryAutoConnect()
     }
   } else if (bleStore.autoReconnectMode === 'speed') {
-    // ★ Phase 3: 极速模式 → GPS 围栏检测，在围栏内才启动 BLE 扫描
+    // ★ Phase 3: 极速模式 → GPS 围栏检测（内部已含 _shouldAutoReconnect 闸门）
     if (!bleStore.connected) {
       bleStore.checkGeofenceApproach()
     }

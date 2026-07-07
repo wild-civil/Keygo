@@ -521,9 +521,10 @@ export function startScan(onDeviceFound, timeout = 10) {
 
     uni.onBluetoothDeviceFound(_deviceFoundCallback)
 
-    // ★ v3.2 优化: services 硬件级过滤 + 高功率扫描，大幅加速设备发现
+    // ★ v3.2 优化: 高功率扫描。注意：不传 services 硬件过滤 ——
+    //   Android 12+ 上带 services 过滤的发现经常返回空（系统要求该 UUID 必须在广播包里），
+    //   导致扫不到设备。设备识别改由下方回调里的 名字前缀/广播 UUID 二次过滤完成（更稳定）。
     uni.startBluetoothDevicesDiscovery({
-      services: [BLE_CONFIG.serviceUUID],
       allowDuplicatesKey: true,
       interval: 0,
       powerLevel: 'high',

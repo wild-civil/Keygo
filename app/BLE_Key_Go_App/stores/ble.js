@@ -1058,10 +1058,23 @@ export const useBleStore = defineStore('ble', {
       console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u76d1\u542c\u5668\u5df2\u6ce8\u9500')
     },
 
+    /**
+     * ★ 自动重连统一闸门（② 用户主动断开不自动连；① 绑定门槛预留）
+     *   所有自动触发点（onShow / 亮屏 / 围栏）都应先过此闸门。
+     *   注意：不含 "reconnectMode==='idle'" —— 那是 onShow 避免重入的额外约束。
+     *   @returns {boolean}
+     */
+    _shouldAutoReconnect() {
+      if (this.connected) return false
+      if (this.reconnectMode === 'dormant') return false   // 用户主动断开
+      if (this.btState === 'off') return false
+      // ① 绑定门槛预留：if (!this.isBound) return false
+      return true
+    },
+
     _onScreenOn(action) {
       if (this.autoReconnectMode !== 'comfort') return
-      if (this.connected) return
-      if (this.btState === 'off') return
+      if (!this._shouldAutoReconnect()) return
       const now = Date.now()
       if (now - this._lastScreenOnTrigger < 30000) {
         console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u89e6\u53d1\uff1a30s \u5185\u5df2\u626b\u63cf\u8fc7\uff0c\u8df3\u8fc7')
@@ -1931,8 +1944,85 @@ export const useBleStore = defineStore('ble', {
         console.log('[Store] tryAutoConnect: 蓝牙未开启，跳过')
         return false
       }
+      // ★ 方案B: 统一闸门（用户主动断开/已连接/蓝牙关 → 不自动连）
+      if (!this._shouldAutoReconnect()) return false
       this._ensureGlobalListeners()
-      return this.tryReconnect()
+
+      // 优先用缓存直连已知设备（最快，无需扫描）
+      const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+      if (knownId) {
+        this.deviceId = knownId
+        try {
+          await this._doReconnect()
+          return true
+        } catch (e) {
+          console.log('[Store] tryAutoConnect: 直连失败，转扫描兜底:', e?.message || e)
+        }
+      }
+      // 直连失败 / 无缓存 → 扫描已知设备，连信号最强者（方案B）
+      return await this.autoConnectBest(8)
+    },
+
+    /**
+     * ★ 方案B: 扫描并自动连接「已知设备里信号最强的那个」
+     *
+     *   已知设备 = 缓存的 deviceId（过渡期）。后续接入 ① 绑定门槛后，
+     *   扩展为受信任序列号列表：仅列表内设备才会被自动连接，避免误连陌生设备。
+     *
+     *   安全原则：不在已知集合内的设备绝不自动连接。
+     *   多设备：集合内有多台时，按 RSSI 取最强者。
+     *
+     *   @param {number} timeoutSec 扫描时长（秒）
+     *   @returns {Promise<boolean>} 是否成功连接
+     */
+    async autoConnectBest(timeoutSec = 8) {
+      if (!this._shouldAutoReconnect()) return false
+      if (this.scanning) {
+        console.log('[Store] autoConnectBest: 已有扫描在进行，跳过')
+        return false
+      }
+      // ★ 已知集合（过渡期：仅缓存 deviceId；① 接入点：受信任序列号列表）
+      const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+      if (!knownId) {
+        console.log('[Store] autoConnectBest: 无已知设备，不自动连接（避免误连陌生设备）')
+        return false
+      }
+      const knownSet = new Set([knownId])
+      // TODO ①: const trustedSerials = this._trustedSerials; 改为按序列号匹配
+
+      console.log('[Store] autoConnectBest: 扫描 ' + timeoutSec + 's，目标已知设备:', knownId)
+      const found = []
+      const onDeviceFound = (device) => {
+        if (!knownSet.has(device.deviceId)) return
+        // 同一设备可能多次上报（allowDuplicatesKey），保留最新 RSSI
+        const idx = found.findIndex(d => d.deviceId === device.deviceId)
+        if (idx >= 0) found[idx] = device
+        else found.push(device)
+        console.log('[Store] autoConnectBest 发现已知设备:', device.name, 'RSSI:', device.RSSI)
+      }
+      try {
+        await startScan(onDeviceFound, timeoutSec)
+      } catch (e) {
+        console.log('[Store] autoConnectBest 扫描异常:', e?.message || e)
+      }
+
+      if (this.connected) return true
+      if (found.length === 0) {
+        console.log('[Store] autoConnectBest: 未发现已知设备')
+        return false
+      }
+      // 按 RSSI 降序，取最强者
+      found.sort((a, b) => (b.RSSI ?? -999) - (a.RSSI ?? -999))
+      const best = found[0]
+      console.log('[Store] autoConnectBest: 选择最强已知设备', best.name, 'RSSI', best.RSSI)
+      try {
+        await this.connect(best.deviceId, best.name)
+        console.log('[Store] autoConnectBest: 已自动连接')
+        return true
+      } catch (e) {
+        console.log('[Store] autoConnectBest: 连接失败', e?.message || e)
+        return false
+      }
     },
 
 
@@ -2480,7 +2570,7 @@ export const useBleStore = defineStore('ble', {
      */
     async checkGeofenceApproach() {
       if (this.autoReconnectMode !== 'speed') return false
-      if (this.connected) return false
+      if (!this._shouldAutoReconnect()) return false
       if (this._geofenceApproachChecked) return false  // 本次已检测过
       this._geofenceApproachChecked = true
 
