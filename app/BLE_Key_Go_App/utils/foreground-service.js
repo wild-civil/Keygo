@@ -514,3 +514,191 @@ export function requestNotificationPermission() {
   })
 }
 
+// ==================== ★ v3.23.2: AlarmManager 心跳（防 Doze 冻结 JS） ====================
+
+/**
+ * Android Doze 模式下，JS 执行上下文会被系统冻结，导致：
+ *   - setInterval 停止触发（舒适模式 BLE 轮询失效）
+ *   - plus.geolocation.watchPosition 回调无法执行（极速模式 GPS 围栏失效）
+ *
+ * 解决方案：利用系统级 AlarmManager.setExactAndAllowWhileIdle()
+ * 每 60 秒触发一次广播 → 唤醒 JS 线程 → 回调通知 bleStore 执行一次检查。
+ *
+ * 与 WakeLock 的区别：
+ *   WakeLock  → 防止 CPU 休眠（Doze phase 1 有效）
+ *   AlarmManager → 即使在 Deep Doze（phase 2+）也能准时唤醒进程
+ *
+ * 兼容性：
+ *   - setExactAndAllowWhileIdle: API 23+ (Android 6+)
+ *   - BroadcastReceiver 动态注册: API 1+
+ *   - plus.android.implements: DCloud 内部桥接
+ */
+
+/** 心跳间隔（毫秒） */
+const HEARTBEAT_INTERVAL_MS = 60000 // 60 秒
+
+let _alarmReceiver = null
+let _alarmCallback = null
+let _alarmActive = false
+
+/**
+ * 启动 AlarmManager 心跳
+ *
+ * @param {Function} callback  每次心跳触发时的回调（无参数）
+ * @returns {boolean} 是否成功启动
+ */
+export function startHeartbeatAlarm(callback) {
+  if (!isAndroidApp()) {
+    console.log(`${TAG} ⏰ 非 Android 环境，跳过心跳`)
+    return false
+  }
+
+  if (_alarmActive) {
+    console.log(`${TAG} ⏰ 心跳已在运行，更新回调`)
+    _alarmCallback = callback
+    return true
+  }
+
+  _alarmCallback = callback
+
+  try {
+    const main = getMainActivity()
+    if (!main) {
+      console.warn(`${TAG} ⏰ 无法获取 Activity，心跳启动失败`)
+      return false
+    }
+
+    const pkgName = plus.android.invoke(main, 'getPackageName')
+    const Context = plus.android.importClass('android.content.Context')
+    const Intent = plus.android.importClass('android.content.Intent')
+    const IntentFilter = plus.android.importClass('android.content.IntentFilter')
+    const PendingIntent = plus.android.importClass('android.app.PendingIntent')
+
+    // ★ 动态注册 BroadcastReceiver
+    const ReceiverImpl = plus.android.implements(
+      'io.dcloud.feature.internal.reflect.BroadcastReceiver',
+      {
+        onReceive: function(ctx, intent) {
+          const action = intent.getAction()
+          if (action === 'com.keygo.HEARTBEAT_ALARM') {
+            console.log(`${TAG} ⏰ AlarmManager 心跳触发`)
+
+            // ★ 重新调度下一次心跳（用 setExact 而非 setRepeating，每次自续）
+            _rescheduleHeartbeatAlarm()
+
+            // ★ 触发 JS 回调
+            if (_alarmCallback) {
+              try { _alarmCallback() } catch (e) {
+                console.error(`${TAG} ⏰ 心跳回调异常:`, e?.message || e)
+              }
+            }
+          }
+        }
+      }
+    )
+
+    _alarmReceiver = ReceiverImpl
+    const filter = new IntentFilter('com.keygo.HEARTBEAT_ALARM')
+    main.registerReceiver(_alarmReceiver, filter)
+
+    _alarmActive = true
+
+    // ★ 调度第一次心跳
+    _rescheduleHeartbeatAlarm()
+
+    console.log(`${TAG} ⏰ AlarmManager 心跳已启动 (间隔 ${HEARTBEAT_INTERVAL_MS / 1000}s)`)
+    return true
+  } catch (e) {
+    console.error(`${TAG} ⏰ 心跳启动失败:`, e?.message || e)
+    _alarmReceiver = null
+    _alarmActive = false
+    return false
+  }
+}
+
+/**
+ * 重新调度下一次 AlarmManager 心跳
+ * 每次心跳触发后自续（不自续则只触发一次）
+ */
+function _rescheduleHeartbeatAlarm() {
+  try {
+    const main = getMainActivity()
+    if (!main) return
+
+    const Context = plus.android.importClass('android.content.Context')
+    const Intent = plus.android.importClass('android.content.Intent')
+    const PendingIntent = plus.android.importClass('android.app.PendingIntent')
+
+    const pkgName = plus.android.invoke(main, 'getPackageName')
+    const intent = new Intent('com.keygo.HEARTBEAT_ALARM')
+    intent.setPackage(pkgName) // ★ 显式指定包名（Android 8+ 要求）
+
+    const FLAG_IMMUTABLE = 67108864 // PendingIntent.FLAG_IMMUTABLE
+    const pi = PendingIntent.getBroadcast(main, 9998, intent, FLAG_IMMUTABLE)
+
+    const AlarmManager = plus.android.importClass('android.app.AlarmManager')
+    const alarmMgr = main.getSystemService(Context.ALARM_SERVICE)
+
+    // ★ setExactAndAllowWhileIdle: Doze 模式下也能准时触发
+    // 参数: type=0 (RTC_WAKEUP), triggerAt=epoch ms, operation=PendingIntent
+    const SystemCls = plus.android.importClass('java.lang.System')
+    const triggerTime = SystemCls.currentTimeMillis() + HEARTBEAT_INTERVAL_MS
+
+    alarmMgr.setExactAndAllowWhileIdle(0, triggerTime, pi)
+  } catch (e) {
+    console.error(`${TAG} ⏰ 重新调度心跳失败:`, e?.message || e)
+  }
+}
+
+/**
+ * 停止 AlarmManager 心跳
+ */
+export function stopHeartbeatAlarm() {
+  if (!_alarmActive) return
+
+  try {
+    const main = getMainActivity()
+    if (!main) return
+
+    const Context = plus.android.importClass('android.content.Context')
+    const Intent = plus.android.importClass('android.content.Intent')
+    const PendingIntent = plus.android.importClass('android.app.PendingIntent')
+
+    const pkgName = plus.android.invoke(main, 'getPackageName')
+    const intent = new Intent('com.keygo.HEARTBEAT_ALARM')
+    intent.setPackage(pkgName)
+
+    // ★ 先用 FLAG_NO_CREATE 获取已存在的 PendingIntent
+    const FLAG_NO_CREATE = 536870912
+    const FLAG_IMMUTABLE = 67108864
+    const pi = PendingIntent.getBroadcast(main, 9998, intent, FLAG_NO_CREATE | FLAG_IMMUTABLE)
+
+    if (pi) {
+      const AlarmManager = plus.android.importClass('android.app.AlarmManager')
+      const alarmMgr = main.getSystemService(Context.ALARM_SERVICE)
+      alarmMgr.cancel(pi)
+      pi.cancel()
+    }
+
+    // ★ 注销 BroadcastReceiver
+    if (_alarmReceiver) {
+      try { main.unregisterReceiver(_alarmReceiver) } catch (_) { /* 可能已注销 */ }
+      _alarmReceiver = null
+    }
+  } catch (e) {
+    console.warn(`${TAG} ⏰ 停止心跳异常:`, e?.message || e)
+  }
+
+  _alarmActive = false
+  _alarmCallback = null
+  console.log(`${TAG} ⏰ AlarmManager 心跳已停止`)
+}
+
+/**
+ * 查询心跳是否在运行
+ * @returns {boolean}
+ */
+export function isHeartbeatAlarmActive() {
+  return _alarmActive
+}
+

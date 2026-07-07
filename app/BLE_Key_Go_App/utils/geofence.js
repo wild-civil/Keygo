@@ -130,6 +130,16 @@ export function getCurrentPositionCoarse() {
  */
 export function saveParkingLocation(lat, lng) {
   try {
+    // ★ toFixed(6): WGS-84 坐标精度分析
+    //   1° 纬度 ≈ 111.32 km
+    //   toFixed(6) → 0.000001° → ~0.11m (11 厘米)
+    //   toFixed(5) → 0.00001°  → ~1.1m
+    //   toFixed(4) → 0.0001°   → ~11m
+    //
+    // 选用 6 位小数：比民用 GPS 精度（±5-50m）高出 2 个数量级，
+    // 确保 WGS-84↔GCJ-02 转换时不会因精度截断引入额外误差。
+    // 虽然 GPS 芯片本身只输出 float32（~6-7 位有效数字），但
+    // 保留全精度有利无害。
     const data = {
       lat: +lat.toFixed(6),
       lng: +lng.toFixed(6),

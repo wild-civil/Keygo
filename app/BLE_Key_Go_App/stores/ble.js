@@ -40,6 +40,8 @@ import {
   startForegroundService,
   stopForegroundService,
   getPluginStatus,
+  startHeartbeatAlarm,
+  stopHeartbeatAlarm,
 } from '@/utils/foreground-service.js'
 
 // ★ v3.23 Phase 3: 地理围栏工具
@@ -53,6 +55,7 @@ import {
   startGeofenceMonitor,
   stopGeofenceMonitor,
   isGeofenceMonitorActive,
+  getGeofenceMonitorStatus,
 } from '@/utils/geofence.js'
 
 export const useBleStore = defineStore('ble', {
@@ -105,6 +108,10 @@ export const useBleStore = defineStore('ble', {
     autoReconnectMode: 'comfort', // 'comfort' | 'power_saver' | 'speed'
     _dormantPollTimer: null,      // 舒适模式后台轮询定时器
     _dormantPollGuard: 0,         // 轮询会话锁
+    _dormantPollCount: 0,         // ★ v3.23.2: 轮询次数（用于时间漂移日志）
+    _dormantPollStartTime: 0,     // ★ v3.23.2: 轮询起始时间戳
+    _heartbeatActive: false,      // ★ v3.23.2: AlarmManager 心跳是否运行
+    _lastHeartbeatTime: 0,        // ★ v3.23.2: 上次心跳时间
 
     // ★ v3.23 Phase 3: 极速模式地理围栏
     _geofenceApproachChecked: false, // 本次 onShow 是否已触发围栏检测（防重复）
@@ -864,15 +871,26 @@ export const useBleStore = defineStore('ble', {
 
       this._dormantPollGuard++
       const guard = this._dormantPollGuard
-      console.log(`[Store] 🌙 舒适模式轮询启动 (guard=${guard})`)
+      this._dormantPollCount = 0
+      this._dormantPollStartTime = Date.now()
+
+      const nowStr = new Date().toLocaleTimeString()
+      console.log(`[Store] 🌙 舒适模式轮询启动 (guard=${guard}) @ ${nowStr}`)
+
+      // ★ v3.23.2: 启动 AlarmManager 心跳（防 Doze 冻结 setInterval）
+      this._startHeartbeat()
 
       // 立即执行第一次扫描
-      this._doDormantScan(guard)
+      this._dormantPollCount++
+      const scanStart = Date.now()
+      this._doDormantScan(guard).then(() => {
+        console.log(`[Store] 🌙 扫描 #${this._dormantPollCount} 完成 (耗时 ${Date.now() - scanStart}ms)`)
+      })
 
       // 之后每 2 分钟一次
+      const pollStartTime = this._dormantPollStartTime
       this._dormantPollTimer = setInterval(() => {
         if (this._dormantPollGuard !== guard) {
-          // 会话已过期，停止轮询
           this._stopDormantPoll()
           return
         }
@@ -880,6 +898,13 @@ export const useBleStore = defineStore('ble', {
           this._stopDormantPoll()
           return
         }
+        this._dormantPollCount++
+        const elapsed = Date.now() - pollStartTime
+        const expected = this._dormantPollCount * 120000  // 2 分钟间隔
+        const drift = elapsed - expected
+        const driftSign = drift > 0 ? '+' : ''
+        const driftWarn = Math.abs(drift) > 15000 ? ' ⚠️ 漂移!' : ''  // 超过 15s 告警
+        console.log(`[Store] 🌙 扫描 #${this._dormantPollCount} @ ${new Date().toLocaleTimeString()} | 距启动 ${Math.round(elapsed/1000)}s | 漂移 ${driftSign}${Math.round(drift/1000)}s${driftWarn}`)
         this._doDormantScan(guard)
       }, 120000) // 2 分钟
     },
@@ -911,7 +936,10 @@ export const useBleStore = defineStore('ble', {
         this._dormantPollTimer = null
       }
       this._dormantPollGuard++
-      console.log('[Store] 🌙 舒适模式轮询已停止')
+      // ★ v3.23.2: 停止 AlarmManager 心跳
+      this._stopHeartbeat()
+      const totalElapsed = this._dormantPollStartTime ? Math.round((Date.now() - this._dormantPollStartTime) / 1000) : 0
+      console.log(`[Store] 🌙 舒适模式轮询已停止 (共运行 ${totalElapsed}s, ${this._dormantPollCount} 次扫描)`)
     },
 
     /**
@@ -1148,9 +1176,10 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
-      // ★ v3.23: 重连成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏
+      // ★ v3.23: 重连成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳
       this._stopDormantPoll()
       this._stopGeofenceMonitor()
+      this._stopHeartbeat()
       // ★ v3.17: 连接成功后启动前台服务（Android 保活）
       this._ensureForegroundService()
       this._reconnectGuard = 0   /* ★ v3.16-P1: 连接成功，所有旧重连会话已失效，归零重置
@@ -1564,9 +1593,10 @@ export const useBleStore = defineStore('ble', {
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
-        // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏
+        // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳
         this._stopDormantPoll()
         this._stopGeofenceMonitor()
+        this._stopHeartbeat()
         // ★ v3.17: 连接成功后启动前台服务（Android 保活）
         this._ensureForegroundService()
 
@@ -1998,15 +2028,18 @@ export const useBleStore = defineStore('ble', {
         // ★ 停车位置保存成功后，启动后台 GPS 围栏监控
         if (saved && !this.connected) {
           this._startGeofenceMonitor()
+          // ★ v3.23.2: 启动 AlarmManager 心跳（确保 watchPosition 回调不被 Doze 冻结）
+          this._startHeartbeat()
         }
       })
     },
 
     /**
-     * 退出极速模式 → 停止围栏监控 + 清理前台服务
+     * 退出极速模式 → 停止围栏监控 + 停止心跳 + 清理前台服务
      */
     _onSpeedModeExit() {
       this._stopGeofenceMonitor()
+      this._stopHeartbeat()
       this._geofenceApproachChecked = false
       this._geofenceBleTriggered = false
     },
@@ -2091,6 +2124,83 @@ export const useBleStore = defineStore('ble', {
       this._geofenceBleTriggered = false
     },
 
+    // ==================== ★ v3.23.2: AlarmManager 心跳（防 Doze） ====================
+
+    /**
+     * 启动 AlarmManager 心跳
+     *
+     * 每次心跳触发时，根据当前模式执行对应操作：
+     *   舒适模式 → 确认 setInterval 存活，如果轮询长时间未触发则补一次 BLE 扫描
+     *   极速模式 → 仅确认 JS 线程存活（watchPosition 回调需要 JS 上下文）
+     *
+     * 幂等：已在运行中则跳过
+     */
+    _startHeartbeat() {
+      if (this._heartbeatActive) return
+      this._heartbeatActive = true
+      this._lastHeartbeatTime = Date.now()
+
+      const ok = startHeartbeatAlarm(() => {
+        this._onHeartbeatTick()
+      })
+
+      if (ok) {
+        console.log('[Store] ⏰ AlarmManager 心跳已启动 (60s 间隔)')
+      } else {
+        console.warn('[Store] ⏰ AlarmManager 心跳启动失败，后台重连可能受 Doze 影响')
+        this._heartbeatActive = false
+      }
+    },
+
+    /**
+     * 停止 AlarmManager 心跳
+     */
+    _stopHeartbeat() {
+      if (!this._heartbeatActive) return
+      this._heartbeatActive = false
+      stopHeartbeatAlarm()
+      console.log('[Store] ⏰ AlarmManager 心跳已停止')
+    },
+
+    /**
+     * ★ 心跳回调：每次 AlarmManager 唤醒时执行
+     *
+     * 由系统 AlarmManager 广播触发，即使在 Doze 深睡模式下也能准时抵达。
+     * 此回调意味着 JS 线程已被唤醒，可以做一次轻量检查。
+     */
+    _onHeartbeatTick() {
+      const now = Date.now()
+      const sinceLast = this._lastHeartbeatTime ? now - this._lastHeartbeatTime : -1
+      this._lastHeartbeatTime = now
+
+      console.log(`[Store] ⏰ 心跳 #${this._dormantPollCount || '?'} | 距上次 ${sinceLast > 0 ? Math.round(sinceLast/1000) + 's' : '?'} | 模式=${this.autoReconnectMode} | 已连=${this.connected}`)
+
+      // 已连接 → 不需要任何操作
+      if (this.connected) {
+        this._stopHeartbeat()
+        return
+      }
+
+      if (this.autoReconnectMode === 'comfort') {
+        // ★ 舒适模式：如果 setInterval 漂移过大（超过 3 分钟没有扫描），补一次扫描
+        const lastScanTime = this._dormantPollStartTime
+          ? this._dormantPollStartTime + (this._dormantPollCount * 120000)
+          : 0
+        const scanDrift = now - lastScanTime
+        if (scanDrift > 180000) { // 3 分钟
+          console.log(`[Store] ⏰ 心跳检测到扫描漂移 ${Math.round(scanDrift/1000)}s → 补一次 BLE 扫描`)
+          this._doDormantScan(this._dormantPollGuard)
+        }
+      } else if (this.autoReconnectMode === 'speed') {
+        // ★ 极速模式：仅确认 JS 存活即可（watchPosition 回调依赖 JS 上下文）
+        // 不需要额外操作，GPS 围栏回调会在位置更新时自动触发
+        const status = getGeofenceMonitorStatus ? getGeofenceMonitorStatus() : { active: false, lastPositionAge: -1 }
+        if (status.lastPositionAge > 120000) {
+          console.log(`[Store] ⏰ GPS 位置已过时 ${Math.round(status.lastPositionAge/1000)}s (可能被 Doze 抑制)`)
+        }
+      }
+    },
+
     /**
      * ★ v3.23.1: 围栏进入回调 → 启动 BLE 扫描
      *
@@ -2125,9 +2235,10 @@ export const useBleStore = defineStore('ble', {
      */
     _onGeofenceLeave(distance) {
       if (this.connected) {
-        // 已连接成功，停止 GPS 监控
-        console.log('[Store] ⚡ 已连接，停止围栏监控')
+        // 已连接成功，停止 GPS 监控 + 心跳
+        console.log('[Store] ⚡ 已连接，停止围栏监控 + 心跳')
         this._stopGeofenceMonitor()
+        this._stopHeartbeat()
         return
       }
 
