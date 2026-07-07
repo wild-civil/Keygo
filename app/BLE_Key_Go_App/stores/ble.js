@@ -83,6 +83,7 @@ export const useBleStore = defineStore('ble', {
     rssi: -999,
     filteredRssi: -999,
     batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
+    autoLockEnabled: -1,          // ★ v3.24-fixb: 固件自动锁使能状态(FF02 al 字段)，-1=未知/未同步，0=关闭(手动模式)，1=开启
     statusStale: false,            // ★ v3.15-#13: 超时未收到 Status Notify → 连接可能已中断
     unlockThreshold: -45,
     lockThreshold: -65,
@@ -2263,6 +2264,12 @@ export const useBleStore = defineStore('ble', {
       if (data.cd !== undefined && data.cd >= 2000 && data.cd <= 30000) {
         this.manualCooldownMs = data.cd
       }
+
+      // ★ v3.24-fixb: 自动锁使能状态 (al = auto lock enable)
+      //   来自 FF02 上报；0=手动模式已禁用 RSSI 自动锁，1=启用，-1 表示尚未收到
+      //   注意：必须存数值 0/1，不能写 `data.al === 1`（那会得到布尔 true/false，
+      //   导致 UI 的 `=== 0 / === 1` 判断全部落空、手动模式误显"已开启"）
+      if (data.al !== undefined) this.autoLockEnabled = (Number(data.al) === 0) ? 0 : 1
 
       // ★ v3.15-#13: 每次收到有效 Status 后重置看门狗
       this._resetStatusStaleTimer()

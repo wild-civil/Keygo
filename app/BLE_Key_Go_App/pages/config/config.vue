@@ -41,6 +41,18 @@
         </view>
       </view>
 
+      <!-- ★ v3.24-fixb: 设备自动锁状态可视化（来自 FF02 al 字段，确认模式真正下发到固件） -->
+      <view class="autolock-status" v-if="bleStore.connected">
+        <text class="al-label">🔒 设备自动锁</text>
+        <text class="al-value" :class="autoLockClass">{{ autoLockText }}</text>
+        <text class="al-hint" v-if="bleStore.autoReconnectMode === 'manual' && bleStore.autoLockEnabled === 0">
+          手动模式已生效，RSSI 抖动不会自动解锁/上锁
+        </text>
+        <text class="al-hint" v-else-if="bleStore.autoReconnectMode === 'manual' && bleStore.autoLockEnabled !== 0">
+          未生效：请确认已连接，或重新进入手动模式以下发配置
+        </text>
+      </view>
+
       <!-- ★ v3.23 Phase 3: 极速模式围栏信息 -->
       <view class="geofence-info" v-if="bleStore.autoReconnectMode === 'speed' && parkingInfo">
         <view class="geofence-row">
@@ -261,6 +273,18 @@ const monitorActive = computed(() => {
   if (bleStore.autoReconnectMode !== 'speed') return false
   if (bleStore.connected) return false
   return isGeofenceMonitorActive()
+})
+
+// ★ v3.24-fixb: 设备自动锁状态文案（来自 FF02 al 字段）
+const autoLockText = computed(() => {
+  const v = bleStore.autoLockEnabled
+  if (v === -1) return '同步中…'
+  return v === 0 ? '已关闭' : '已开启'
+})
+const autoLockClass = computed(() => {
+  const v = bleStore.autoLockEnabled
+  if (v === -1) return 'al-sync'
+  return v === 0 ? 'al-off' : 'al-on'
 })
 
 const parkingInfo = computed(() => {
@@ -596,6 +620,52 @@ async function handleSubmit() {
 .mode-power {
   display: block;
   font-size: 20rpx;
+  color: var(--text-muted);
+}
+
+/* ★ v3.24-fixb: 设备自动锁状态可视化 */
+.autolock-status {
+  margin-top: 16rpx;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12rpx;
+  background: var(--alpha-06);
+  border: 1rpx solid var(--border);
+  border-radius: 12rpx;
+  padding: 18rpx 22rpx;
+}
+
+.al-label {
+  font-size: 26rpx;
+  color: var(--text);
+}
+
+.al-value {
+  font-size: 26rpx;
+  font-weight: 600;
+  padding: 4rpx 16rpx;
+  border-radius: 20rpx;
+}
+
+.al-on {
+  color: #2ecc71;
+  background: rgba(46, 204, 113, 0.15);
+}
+
+.al-off {
+  color: #e67e22;
+  background: rgba(230, 126, 34, 0.15);
+}
+
+.al-sync {
+  color: var(--text-muted);
+  background: var(--alpha-05);
+}
+
+.al-hint {
+  flex-basis: 100%;
+  font-size: 22rpx;
   color: var(--text-muted);
 }
 
