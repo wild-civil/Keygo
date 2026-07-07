@@ -570,8 +570,8 @@ async function handleSetName() {
 }
 
 .status-card.reconnecting {
-  background: linear-gradient(135deg, #FFF8E1, #FFF3E0);
-  border-color: #FFE082;
+  background: var(--gradient-warn-card);
+  border-color: var(--border-warning);
 }
 
 .custom-name-display {
