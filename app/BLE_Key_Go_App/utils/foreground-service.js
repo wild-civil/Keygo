@@ -702,13 +702,23 @@ export function isHeartbeatAlarmActive() {
   return _alarmActive
 }
 
-// ==================== ★ v3.23.1: 亮屏广播接收器（舒适模式驱动） ====================
+// ==================== ★ v3.25: 亮屏广播接收器（舒适模式驱动，原生优先） ====================
 
 /**
- * 亮屏 BroadcastReceiver
+ * 亮屏 BroadcastReceiver（舒适模式后台重连的核心触发器）
  *
- * 舒适模式的核心触发器：用户亮屏/解锁的瞬间 → 回调通知 bleStore 执行一次 BLE 扫描。
- * 零后台额外功耗、零额外权限，系统管家找不到标记"高耗电应用"的理由。
+ * 平台策略（三级）：
+ *   1. Android + 原生插件可用（自定义基座 / 云端打包）：
+ *      走原生 startScreenOnReceiver —— 标准 android BroadcastReceiver 注册在
+ *      ApplicationContext，onReceive 是纯原生 Java，不依赖 WebView。
+ *      锁屏 / Doze 冻结 WebView 时仍能可靠触发（修复旧 plus.android.implements 桥接
+ *      在后台失效、用户开关屏毫无反应的问题）。
+ *   2. Android + 无原生插件（标准基座）：
+ *      回退 plus.android.implements 注册（WebVew 冻结时可能失效，但无需自定义基座）。
+ *   3. iOS / 鸿蒙 / 小程序：
+ *      无原生插件，isAndroidApp() 为 false → 直接返回 false（优雅降级）。
+ *      这些平台没有「屏幕亮起」系统广播；后台重连由 onShow（App 回到前台）、
+ *      心跳等机制承接，无需亮屏监听。
  *
  * 注册两个 Intent Action：
  *   - ACTION_SCREEN_ON: 屏幕亮了（含仅看时间、未解锁）
@@ -718,12 +728,14 @@ export function isHeartbeatAlarmActive() {
 
 let _screenReceiver = null
 let _screenCallback = null
+let _nativeScreenOnCallback = null
+let _screenOnViaNative = false
 
 /**
  * 注册亮屏广播接收器
  *
  * @param {Function} callback 亮屏时的回调 (action: string) => void
- * @returns {boolean} 是否成功注册
+ * @returns {boolean} 是否成功注册（非 Android 平台返回 false，调用方应据此降级）
  */
 export function registerScreenOnReceiver(callback) {
   if (!isAndroidApp()) {
@@ -731,6 +743,29 @@ export function registerScreenOnReceiver(callback) {
     return false
   }
 
+  // ★ 优先路径：原生插件（不依赖 WebView，后台可靠）
+  const plugin = getNativePlugin()
+  if (plugin && typeof plugin.startScreenOnReceiver === 'function') {
+    _nativeScreenOnCallback = callback
+    _screenOnViaNative = true
+    try {
+      plugin.startScreenOnReceiver((res) => {
+        if (!res || typeof res !== 'object') return
+        if (res.event === 'screenon' && _nativeScreenOnCallback) {
+          try { _nativeScreenOnCallback('android.intent.action.SCREEN_ON') }
+          catch (e) { console.error(`${TAG} 📱 原生亮屏回调异常:`, e?.message || e) }
+        }
+      })
+      console.log(`${TAG} 📱 亮屏广播已注册（原生插件，SCREEN_ON + USER_PRESENT）`)
+      return true
+    } catch (e) {
+      console.error(`${TAG} 📱 原生亮屏注册失败，回退 JS:`, e?.message || e)
+      _nativeScreenOnCallback = null
+      _screenOnViaNative = false
+    }
+  }
+
+  // ★ 回退路径：纯 JS（标准基座 / 无插件）。注意 WebView 冻结时可能失效。
   if (_screenReceiver) {
     // 已注册，仅更新回调
     _screenCallback = callback
@@ -747,9 +782,6 @@ export function registerScreenOnReceiver(callback) {
       return false
     }
 
-    // ★ fix: 用 Application Context 注册，使接收器在后台 Activity 被销毁后仍能在亮屏时触发。
-    //   动态注册的 BroadcastReceiver 随注册 Context 的生命周期：用 Activity 注册则 Activity
-    //   被后台销毁后接收器失效，导致亮屏无反应；Application Context 与进程同生命周期。
     const ctx = (typeof main.getApplicationContext === 'function') ? main.getApplicationContext() : main
 
     const Intent = plus.android.importClass('android.content.Intent')
@@ -795,6 +827,18 @@ export function registerScreenOnReceiver(callback) {
  * 注销亮屏广播接收器
  */
 export function unregisterScreenOnReceiver() {
+  // 原生路径
+  if (_screenOnViaNative) {
+    const plugin = getNativePlugin()
+    if (plugin && typeof plugin.stopScreenOnReceiver === 'function') {
+      try { plugin.stopScreenOnReceiver() } catch (e) { /* ignore */ }
+    }
+    _nativeScreenOnCallback = null
+    _screenOnViaNative = false
+    console.log(`${TAG} 📱 亮屏广播已注销（原生插件）`)
+    return
+  }
+  // JS 回退路径
   if (!_screenReceiver) return
   try {
     const main = getMainActivity()

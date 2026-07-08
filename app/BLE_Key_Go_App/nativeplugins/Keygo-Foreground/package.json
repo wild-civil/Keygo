@@ -1,0 +1,18 @@
+{
+  "name": "Keygo-Foreground",
+  "id": "Keygo-Foreground",
+  "version": "1.0.0",
+  "description": "KeyGo 原生前台服务：后台 BLE 扫描 + 亮屏/解锁监听（舒适模式后台重连核心）",
+  "_dp_type": "nativeplugin",
+  "_dp_nativeplugin": {
+    "android": {
+      "plugins": [
+        {
+          "type": "module",
+          "name": "Keygo-Foreground",
+          "class": "com.keygo.foreground.KeygoForegroundModule"
+        }
+      ]
+    }
+  }
+}
