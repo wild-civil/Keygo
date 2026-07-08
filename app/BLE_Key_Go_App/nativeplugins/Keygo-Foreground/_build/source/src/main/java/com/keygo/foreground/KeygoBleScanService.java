@@ -127,8 +127,16 @@ public class KeygoBleScanService extends Service {
      * 找不到资源时回退到 getApplicationInfo().icon，保证不崩。
      */
     private int getNotificationIconRes() {
-        int id = getResources().getIdentifier("keygo_notification_icon", "drawable", getPackageName());
-        return id != 0 ? id : getApplicationInfo().icon;
+        String[] candidatePkgs = new String[]{ getPackageName(), "com.keygo.foreground" };
+        int id = 0;
+        String matchedPkg = "";
+        for (String pkg : candidatePkgs) {
+            id = getResources().getIdentifier("keygo_notification_icon", "drawable", pkg);
+            if (id != 0) { matchedPkg = pkg; break; }
+        }
+        Log.i(TAG, "[KeyGo] icon resId=" + id + " pkg=" + (matchedPkg.isEmpty() ? "none" : matchedPkg));
+        if (id == 0) id = getApplicationInfo().icon;
+        return id;
     }
 
     // ==================== 原生心跳（抗 Doze） ====================
