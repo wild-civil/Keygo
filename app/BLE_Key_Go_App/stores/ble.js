@@ -189,16 +189,12 @@ export const useBleStore = defineStore('ble', {
       if (state.geofenceDistance < 0) return '获取中...'
       
       // 误差后缀（仅当 accuracy 有效且无歧义时显示）
+      // accuracy = 1σ ≈ 68.2% 置信区间半径，见 geofence.js watchPosition 的 coords.accuracy 定义
+      // ★ DEV-ONLY: 置信度显示，量产前删除`, 1σ` →  若想显示概率，可将其替换为` , 68.2%置信`
       let errSuffix = ''
       const acc = state.geofenceAccuracy
       if (acc > 0 && acc < 999) {
-        // 系统报告的 accuracy 就是 68% 置信区间误差半径
-        // 四舍五入到有意义的精度：<10m 保留个位，10-100 取整十，>100 取整百
-        let displayAcc
-        if (acc < 10) displayAcc = Math.round(acc)
-        else if (acc < 100) displayAcc = Math.round(acc / 10) * 10
-        else displayAcc = Math.round(acc / 100) * 100
-        errSuffix = ` (±${displayAcc}m)`
+        errSuffix = ` (±${Math.round(acc)}m, 1σ)` // `(±${Math.round(acc)}m)`为精度误差
       }
       
       if (state.geofenceDistance < 10) return `已到达 (<10m)${errSuffix}`
@@ -875,14 +871,15 @@ export const useBleStore = defineStore('ble', {
 
         if (cachedPos && cachedPos.age < MAX_CACHE_AGE) {
           console.log(`[Store] ⚡ 使用缓存坐标 (${(cachedPos.age / 1000).toFixed(1)}s 前，精度 ±${Math.round(cachedPos.accuracy)}m)`)
-          saveParkingLocation(cachedPos.lat, cachedPos.lng)
+          // ★ v3.25.2: 传入缓存的 accuracy（watchPosition 低功耗定位，通常 ±30-100m）
+          saveParkingLocation(cachedPos.lat, cachedPos.lng, cachedPos.accuracy)
           this._startGeofenceMonitor()
 
           // 异步补一次高精度 GPS，静默更新停车位置（不阻塞围栏启动/心跳）
           getCurrentPosition().then(pos => {
             if (pos) {
-              saveParkingLocation(pos.lat, pos.lng)
-              console.log('[Store] ⚡ 高精度 GPS 已更新停车位置')
+              saveParkingLocation(pos.lat, pos.lng, pos.accuracy)
+              console.log(`[Store] ⚡ 高精度 GPS 已更新停车位置 (精度 ±${Math.round(pos.accuracy)}m)`)
             }
           })
           return
@@ -895,9 +892,9 @@ export const useBleStore = defineStore('ble', {
 
         getCurrentPosition().then(pos => {
           if (pos) {
-            saveParkingLocation(pos.lat, pos.lng)
+            saveParkingLocation(pos.lat, pos.lng, pos.accuracy)
             this._startGeofenceMonitor()
-            console.log('[Store] ⚡ GPS 停车位置已记录，围栏监控已启动')
+            console.log(`[Store] ⚡ GPS 停车位置已记录 (精度 ±${Math.round(pos.accuracy)}m)，围栏监控已启动`)
           } else {
             // Priority 3: GPS 不可用 → 用 localStorage 旧位置悲观启动围栏
             console.warn('[Store] ⚡ GPS 不可用，使用旧停车位置悲观启动围栏...')
@@ -1937,9 +1934,9 @@ export const useBleStore = defineStore('ble', {
         if (this.autoReconnectMode === 'speed') {
           getCurrentPosition().then(pos => {
             if (pos) {
-              saveParkingLocation(pos.lat, pos.lng)
+              saveParkingLocation(pos.lat, pos.lng, pos.accuracy)
               this.parkingLocation = getParkingLocation()
-              console.log('[Store] ⚡ 连接成功 → 已更新停车位置')
+              console.log(`[Store] ⚡ 连接成功 → 已更新停车位置 (精度 ±${Math.round(pos.accuracy)}m)`)
             }
           })
         }
@@ -2627,7 +2624,7 @@ export const useBleStore = defineStore('ble', {
       // ★ 第一步：粗精度快速获取（不阻塞用户操作）
       const coarsePos = await getCurrentPositionCoarse()
       if (coarsePos) {
-        saveParkingLocation(coarsePos.lat, coarsePos.lng)
+        saveParkingLocation(coarsePos.lat, coarsePos.lng, coarsePos.accuracy)
         this.parkingLocation = getParkingLocation()
         console.log(`[Store] 🅿️ ⚡ 粗精度位置已记录: ${coarsePos.lat.toFixed(6)}, ${coarsePos.lng.toFixed(6)}`)
         uni.showToast({ title: '停车位置已记录 ✅', icon: 'success', duration: 1500 })
@@ -2636,7 +2633,7 @@ export const useBleStore = defineStore('ble', {
         getCurrentPosition().then(highPos => {
           if (highPos && !isNaN(highPos.accuracy) && highPos.accuracy < 30) {
             // 仅当精度明显更好时才更新（粗精度一般 50-200m）
-            saveParkingLocation(highPos.lat, highPos.lng)
+            saveParkingLocation(highPos.lat, highPos.lng, highPos.accuracy)
             this.parkingLocation = getParkingLocation()
             console.log(`[Store] 🅿️ ✨ 高精度位置已静默更新 (精度 ±${Math.round(highPos.accuracy)}m)`)
           }
@@ -2652,9 +2649,9 @@ export const useBleStore = defineStore('ble', {
         uni.showToast({ title: '无法获取位置，请稍后重试', icon: 'none', duration: 2000 })
         return false
       }
-      saveParkingLocation(pos.lat, pos.lng)
+      saveParkingLocation(pos.lat, pos.lng, pos.accuracy)
       this.parkingLocation = getParkingLocation()
-      console.log(`[Store] 🅿️ 停车位置已记录: ${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`)
+      console.log(`[Store] 🅿️ 停车位置已记录: ${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)} (精度 ±${Math.round(pos.accuracy)}m)`)
       uni.showToast({ title: '停车位置已记录 ✅', icon: 'success', duration: 1500 })
       return true
     },

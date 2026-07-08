@@ -355,14 +355,11 @@ const parkingInfo = computed(() => {
 // ★ v3.25.2: 增加误差显示
 const geofenceDistText = computed(() => {
   if (bleStore.geofenceDistance < 0) return ''
+  // ★ DEV-ONLY: 置信度显示，量产前删除`, 1σ` →  若想显示概率，可将其替换为` , 68.2%置信`
   let errSuffix = ''
   const acc = bleStore.geofenceAccuracy
   if (acc > 0 && acc < 999) {
-    let displayAcc
-    if (acc < 10) displayAcc = Math.round(acc)
-    else if (acc < 100) displayAcc = Math.round(acc / 10) * 10
-    else displayAcc = Math.round(acc / 100) * 100
-    errSuffix = `(±${displayAcc}m)`
+    errSuffix = `(±${Math.round(acc)}m, 1σ)` // `(±${Math.round(acc)}m)`为精度误差
   }
   if (bleStore.geofenceDistance < 10) return `· 已到达 (<10m)`
   if (bleStore.geofenceDistance < 1000) return `· ${bleStore.geofenceDistance}m ${errSuffix}`

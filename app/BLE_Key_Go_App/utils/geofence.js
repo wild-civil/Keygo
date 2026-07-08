@@ -107,7 +107,8 @@ export function getCurrentPositionCoarse() {
       success: (res) => {
         if (done) return
         done = true
-        resolve({ lat: res.latitude, lng: res.longitude })
+        // ★ v3.25.2: 补上 accuracy 字段，供 saveParkingLocation 记录
+        resolve({ lat: res.latitude, lng: res.longitude, accuracy: res.accuracy })
       },
       fail: () => {
         if (done) return
@@ -125,10 +126,17 @@ export function getCurrentPositionCoarse() {
 
 /**
  * 保存停车位置到本地存储
+ *
+ * ★ v3.25.2: 新增 accuracy 字段，记录该次 GPS 定位的精度（1σ 半径，米）。
+ *   - 用途：将来可据此过滤低精度停车记录（如 accuracy > 100m 时警告用户）
+ *   - 不影响现有逻辑：旧数据无 accuracy 字段，读取时返回 undefined（兼容）
+ *   - 不传 accuracy → 保存 -1 表示"精度未知"（如 getCurrentPositionCoarse 无精度时）
+ *
  * @param {number} lat 纬度
  * @param {number} lng 经度
+ * @param {number} [accuracy] GPS 精度（1σ 半径，米），可选。不传则记为 -1
  */
-export function saveParkingLocation(lat, lng) {
+export function saveParkingLocation(lat, lng, accuracy) {
   try {
     // ★ toFixed(6): WGS-84 坐标精度分析
     //   1° 纬度 ≈ 111.32 km
@@ -143,10 +151,13 @@ export function saveParkingLocation(lat, lng) {
     const data = {
       lat: +lat.toFixed(6),
       lng: +lng.toFixed(6),
-      savedAt: Date.now()
+      savedAt: Date.now(),
+      // accuracy: undefined/null/负数 → 统一记 -1（精度未知），有效值取整
+      accuracy: (accuracy != null && !isNaN(accuracy) && accuracy >= 0) ? Math.round(accuracy) : -1,
     }
     uni.setStorageSync(STORAGE_KEY, JSON.stringify(data))
-    console.log(`${TAG} 💾 停车位置已保存: ${data.lat}, ${data.lng}`)
+    const accStr = data.accuracy >= 0 ? `, 精度 ±${data.accuracy}m` : ''
+    console.log(`${TAG} 💾 停车位置已保存: ${data.lat}, ${data.lng}${accStr}`)
     return data
   } catch (e) {
     console.error(`${TAG} ❌ 保存停车位置失败:`, e)
@@ -156,7 +167,8 @@ export function saveParkingLocation(lat, lng) {
 
 /**
  * 读取停车位置
- * @returns {{lat: number, lng: number, savedAt: number}|null}
+ * @returns {{lat: number, lng: number, savedAt: number, accuracy: number}|null}
+ *   accuracy: GPS 精度（1σ 半径，米），-1=未知（旧数据/粗精度定位无精度），>=0 为有效值
  */
 export function getParkingLocation() {
   try {
