@@ -352,11 +352,21 @@ const parkingInfo = computed(() => {
 })
 
 // ★ v3.25-fix: 实时距离小字显示（读取 bleStore 响应式 geofenceDistance）
+// ★ v3.25.2: 增加误差显示
 const geofenceDistText = computed(() => {
   if (bleStore.geofenceDistance < 0) return ''
-  if (bleStore.geofenceDistance < 10) return '· 已到达 (<10m)'
-  if (bleStore.geofenceDistance < 1000) return `· ${bleStore.geofenceDistance}m`
-  return `· ${(bleStore.geofenceDistance / 1000).toFixed(1)}km`
+  let errSuffix = ''
+  const acc = bleStore.geofenceAccuracy
+  if (acc > 0 && acc < 999) {
+    let displayAcc
+    if (acc < 10) displayAcc = Math.round(acc)
+    else if (acc < 100) displayAcc = Math.round(acc / 10) * 10
+    else displayAcc = Math.round(acc / 100) * 100
+    errSuffix = `(±${displayAcc}m)`
+  }
+  if (bleStore.geofenceDistance < 10) return `· 已到达 (<10m)`
+  if (bleStore.geofenceDistance < 1000) return `· ${bleStore.geofenceDistance}m ${errSuffix}`
+  return `· ${(bleStore.geofenceDistance / 1000).toFixed(1)}km ${errSuffix}`
 })
 
 async function handleUpdateParking() {

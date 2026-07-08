@@ -128,6 +128,7 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.25: 极速模式实时距离显示
     geofenceDistance: -1,            // 当前到停车点的距离（米），-1=未知/不在极速模式
     geofenceDistanceAge: -1,         // 距离数据距今毫秒数（-1=无数据）
+    geofenceAccuracy: -1,            // ★ v3.25.2: GPS 定位精度（米），-1=未知，999=无精度信息
     parkingLocation: null,           // 停车位置 { lat, lng, savedAt }（供 UI 显示）
 
     // ★ v3.17: 前台服务状态（Android 保活）
@@ -183,12 +184,26 @@ export const useBleStore = defineStore('ble', {
     },
 
     // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
+    // ★ v3.25.2: 增加 ±xxm 误差显示，基于 watchPosition 系统报告的 accuracy
     geofenceDistanceText: (state) => {
       if (state.geofenceDistance < 0) return '获取中...'
-      if (state.geofenceDistance < 10) return '已到达 (<10m)'
-      if (state.geofenceDistance < 100) return `${state.geofenceDistance}m`
-      if (state.geofenceDistance < 1000) return `${state.geofenceDistance}m`
-      return `${(state.geofenceDistance / 1000).toFixed(1)}km`
+      
+      // 误差后缀（仅当 accuracy 有效且无歧义时显示）
+      let errSuffix = ''
+      const acc = state.geofenceAccuracy
+      if (acc > 0 && acc < 999) {
+        // 系统报告的 accuracy 就是 68% 置信区间误差半径
+        // 四舍五入到有意义的精度：<10m 保留个位，10-100 取整十，>100 取整百
+        let displayAcc
+        if (acc < 10) displayAcc = Math.round(acc)
+        else if (acc < 100) displayAcc = Math.round(acc / 10) * 10
+        else displayAcc = Math.round(acc / 100) * 100
+        errSuffix = ` (±${displayAcc}m)`
+      }
+      
+      if (state.geofenceDistance < 10) return `已到达 (<10m)${errSuffix}`
+      if (state.geofenceDistance < 1000) return `${state.geofenceDistance}m${errSuffix}`
+      return `${(state.geofenceDistance / 1000).toFixed(1)}km${errSuffix}`
     },
 
     isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
@@ -2525,6 +2540,7 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.25: 重置实时距离状态
       this.geofenceDistance = -1
       this.geofenceDistanceAge = -1
+      this.geofenceAccuracy = -1
 
       // ★ v3.25: 优先读取已有停车位置（来自"连接成功"或"断连"时自动记录）
       const existingParking = getParkingLocation()
@@ -2581,6 +2597,7 @@ export const useBleStore = defineStore('ble', {
       this.parkingLocation = existingParking
       this.geofenceDistance = -1
       this.geofenceDistanceAge = -1
+      this.geofenceAccuracy = -1
       this._geofenceBleTriggered = false
       this._startGeofenceMonitor()
     },
@@ -2705,9 +2722,11 @@ export const useBleStore = defineStore('ble', {
         // onLeave: 离开围栏
         (distance) => { this._onGeofenceLeave(distance) },
         // ★ v3.25: onPosition — 每次 GPS 更新时刷新距离显示
+        // ★ v3.25.2: 同时捕获 accuracy 用于误差显示
         (posInfo) => {
           this.geofenceDistance = posInfo.distance
           this.geofenceDistanceAge = 0  // 刚刚更新，年龄为 0
+          this.geofenceAccuracy = (posInfo.accuracy != null && posInfo.accuracy > 0) ? posInfo.accuracy : 999
         }
       )
 
@@ -2724,9 +2743,10 @@ export const useBleStore = defineStore('ble', {
     _stopGeofenceMonitor() {
       stopGeofenceMonitor()
       this._geofenceBleTriggered = false
-      // ★ v3.25: 停止围栏监控时重置距离显示
+      // ★ v3.25: 停止围栏监控时重置距离和精度显示
       this.geofenceDistance = -1
       this.geofenceDistanceAge = -1
+      this.geofenceAccuracy = -1
     },
 
     // ==================== ★ v3.23.2: AlarmManager 心跳（防 Doze） ====================

@@ -8,7 +8,7 @@
  *
  * GPS 策略：
  *   - enableHighAccuracy: false → 网络/基站定位为主 (~15mAh/天)
- *   - maximumAge: 60s → 复用系统缓存减少 GPS 芯片唤醒
+ *   - maximumAge: 15s → 平衡缓存复用与响应速度（v3.25.1 优化）
  *   - provider: 'system' → 系统自动选择最优定位源
  *
  * 生命周期：
@@ -340,7 +340,7 @@ export function startGeofenceMonitor(onEnter, onLeave, onPosition) {
       {
         enableHighAccuracy: false,   // ★ 低功耗：网络/基站定位为主
         timeout: 30000,              // 30 秒超时
-        maximumAge: 60000,           // 允许 60 秒缓存（减少 GPS 唤醒）
+        maximumAge: 15000,           // ★ v3.25.1: 60s → 15s 缓存（更快响应围栏变化）
         provider: 'system',          // 系统自动选择（network → gps）
         coordsType: 'wgs84',         // WGS-84 全球通用（兼容性最好）
       }
@@ -349,7 +349,7 @@ export function startGeofenceMonitor(onEnter, onLeave, onPosition) {
     console.log(`${TAG} ✅ 后台 Geofence 监控已启动 (watchId=${_watchId})`)
     console.log(`${TAG}    停车点: ${parking.lat.toFixed(6)}, ${parking.lng.toFixed(6)}`)
     console.log(`${TAG}    围栏半径: ${GEOFENCE_RADIUS}m`)
-    console.log(`${TAG}    GPS 模式: network(低功耗), 超时30s, 缓存60s`)
+    console.log(`${TAG}    GPS 模式: network(低功耗), 超时30s, 缓存15s`)
     return true
   } catch (e) {
     console.error(`${TAG} ❌ watchPosition 启动失败:`, e?.message || e)
