@@ -52,6 +52,7 @@ import {
 // ★ v3.23 Phase 3: 地理围栏工具
 import {
   GEOFENCE_RADIUS,
+  GEOFENCE_BLE_LATCH_MS,
   calculateDistance,
   getCurrentPosition,
   getCurrentPositionCoarse,
@@ -124,6 +125,7 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.23 Phase 3: 极速模式地理围栏
     _geofenceApproachChecked: false, // 本次 onShow 是否已触发围栏检测（防重复）
     _geofenceBleTriggered: false,    // 围栏是否已触发过 BLE 扫描（本轮监控内防重复）
+    _geofenceBleTriggeredAt: 0,     // ★ v3.25-fix: 触发时间戳，用于带超时的防抖闩锁
 
     // ★ v3.25: 极速模式实时距离显示
     geofenceDistance: -1,            // 当前到停车点的距离（米），-1=未知/不在极速模式
@@ -151,6 +153,13 @@ export const useBleStore = defineStore('ble', {
     /* ★ v3.15-#13: Status Notify 看门狗 — 超过 3s 未收到 FF02 推送则标记过期
      *   设备可能静默断开但 App 未感知，UI 可据此提示"连接可能已中断" */
     _statusStaleTimer: null,
+    // ★ v3.25-fix: 假断连 RSSI 延迟清零定时器。锁屏/Doze 下 Android 可能冒虚假
+    //   onBLEConnectionStateChange(false)，但底层 GATT 实际未断（固件 LED 仍按 RSSI 工作、
+    //   WRITE 仍成功）。为免页面误显 "--"，断连时先不立即清零 RSSI，而是延迟 3s 确认真断连：
+    //   期间若收到 FF02(c:1) 自愈则取消清零（见 _parseSingleStatus）。
+    _disconnectRssiClearTimer: null,
+    // ★ v3.25-fix2: GATT 上下文重建中标志，防止看门狗与重连逻辑并发触发多次重建
+    _repairing: false,
 
     // ★ v1.0.1: 亮屏触发（舒适模式核心）
     _screenOnReceiverActive: false,
@@ -543,6 +552,8 @@ export const useBleStore = defineStore('ble', {
         this._notifyTimer = null
       }
       this._notifyBuffer = ''
+      // ★ v3.25-fix: 取消可能残留的"假断连"延迟清零定时器（蓝牙真关闭立即清零）
+      if (this._disconnectRssiClearTimer) { clearTimeout(this._disconnectRssiClearTimer); this._disconnectRssiClearTimer = null }
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
@@ -844,10 +855,21 @@ export const useBleStore = defineStore('ble', {
       this._notifyBuffer = ''
       this.connected = false
       this.deviceState = 'LOCKED'
-      this.rssi = -999
-      this.filteredRssi = -999
-      this.statusStale = false
+      // ★ v3.25-fix: 不再立即清零 RSSI。锁屏/Doze 下 Android 可能发送虚假断连事件，
+      //   但 GATT 实际未断（固件 LED 仍按 RSSI 工作、解锁 WRITE 仍成功）。立即清零会让
+      //   页面在连接其实活着时误显 "--"。改为延迟 3s 确认真断连：期间若收到 FF02(c:1)
+      //   自愈，_parseSingleStatus 会重设 connected/filteredRssi 并取消本定时器（见下方）。
+      this.statusStale = true
       this.batteryLevel = -1        // ★ v3.14: 断连重置电量
+      if (this._disconnectRssiClearTimer) clearTimeout(this._disconnectRssiClearTimer)
+      this._disconnectRssiClearTimer = setTimeout(() => {
+        this._disconnectRssiClearTimer = null
+        // 已自愈（connected 回到 true / 收到 FF02）则不清除，避免误显 "--"
+        if (!this.connected) {
+          this.rssi = -999
+          this.filteredRssi = -999
+        }
+      }, 3000)
 
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
       this._restoredForSn = ''
@@ -995,6 +1017,14 @@ export const useBleStore = defineStore('ble', {
         const found = devices.some(d => d.deviceId === this.deviceId)
         if (found) {
           console.log('[Store] _verifyConnection: 连接正常（系统级验证）')
+          // ★ v3.25-fix3: 系统级"已连接"只代表 GATT 链路活着，不保证 FF02 的 Notify(CCCD)
+          //   订阅仍有效。Doze/后台后 CCCD 常被系统重置，导致 WRITE 仍成功（19:55:14 LOCK
+          //   写入成功即证 GATT 活着）但 FF02 不再送达 → 显示 "---" 且状态过期。
+          //   ① 重新武装状态看门狗：FF02 真死则 3s 后触发 _repairConnection 自动重建 GATT；
+          //   ② 主动在当前 GATT 上下文重开 FF02/Battery Notify：CCCD 仅被重置时即可恢复，
+          //      无需全量拆链；若 GATT 上下文本身已死，①的看门狗会兜底全量重建。
+          this._resetStatusStaleTimer()
+          this._enableStatusNotify()
           return true
         }
         // 设备不在系统已连接列表 → 连接已失效
@@ -1010,6 +1040,9 @@ export const useBleStore = defineStore('ble', {
             new Promise((_, reject) => setTimeout(() => reject(new Error('VERIFY_TIMEOUT')), 3000))
           ])
           console.log('[Store] _verifyConnection: 连接正常（GATT 回退验证）')
+          // ★ v3.25-fix3: 同上，恢复 FF02 Notify 并武装看门狗（见系统级验证分支）
+          this._resetStatusStaleTimer()
+          this._enableStatusNotify()
           return true
         } catch (e2) {
           const msg = e2?.message || String(e2)
@@ -1253,12 +1286,23 @@ export const useBleStore = defineStore('ble', {
         let connectRetries = 0
         let connecting = false
 
-        const onDeviceFound = (device) => {
+        const onDeviceFound = async (device) => {
           if (this._screenOnScanGuard !== guard || this.connected || connecting) return
           if (device.deviceId === targetId) {
             console.log(`[Store] \ud83d\udcf1 \u4eae\u5c4f\u626b\u63cf\u53d1\u73b0: ${device.name}, RSSI: ${device.RSSI}`)
             connecting = true
+            this._repairing = true // ★ v3.25-fix2: 占住标志，避免看门狗 _repairConnection 并发重建
+            // ★ v3.25-fix2: 先强制拆掉可能陈旧的 GATT 上下文。Android Doze/后台后，已建立
+            //   连接的 Notify 订阅(CCCD)会静默失效；而 createBLEConnection 对已连设备是空操作，
+            //   拿不到新 GATT 上下文，导致随后 notifyBLECharacteristicValueChange 在死句柄上
+            //   静默失败、FF02 全丢、页面卡 "---"。强制 close 后再 connect 可拿到全新 GATT
+            //   上下文，使 FF02 订阅真正恢复。未连接时 close 报错被忽略，无害。
+            await new Promise((resolve) => {
+              try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (e) { resolve() }
+            })
+            await new Promise(r => setTimeout(r, 400)) // 等 OS 真正拆链，避免与 connect 竞争
             this._connectWithResetFallback(targetId).then(() => {
+              this._repairing = false
               if (this._screenOnScanGuard !== guard || this.connected) return
               console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u8fde\u63a5\u6210\u529f\uff0c\u521d\u59cb\u5316...')
               this.connected = true
@@ -1295,6 +1339,7 @@ export const useBleStore = defineStore('ble', {
                 } catch (_) {}
               }, 800)
             }).catch((err) => {
+              this._repairing = false
               if (this._screenOnScanGuard !== guard || this.connected) return
               connectRetries++
               connecting = false
@@ -1425,18 +1470,31 @@ export const useBleStore = defineStore('ble', {
         this._syncConfigToDevice()
       }).catch(() => {})
 
-      // 注册 notify（延迟 800ms，给 GATT 服务就绪时间）
+      // 注册 notify（延迟 800ms，给 GATT 服务就绪时间）—— 抽成 _enableStatusNotify 复用
       const targetId = this.deviceId
       setTimeout(async () => {
         if (this.deviceId !== targetId || !this.connected) return
-        try {
-          await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
-          notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
-          this._fetchBatteryLevel(targetId).catch(() => {})
-        } catch (_) {}
+        this._enableStatusNotify()
       }, 800)
 
       uni.showToast({ title: '已自动连接', icon: 'success', duration: 1500 })
+    },
+
+    /**
+     * ★ v3.25-fix3: 在"已连接"状态下（重新）开启 FF02/Battery 的 Notify 订阅。
+     *   用途：① 连接成功后 _finalizeConnection 延迟开启；② onShow 经 _verifyConnection
+     *   确认连接仍活着后主动重开（Doze/后台使 CCCD 失效时的恢复手段）。
+     *   GATT 上下文健康时此调用幂等（重设 CCCD=0x0001，无害）；上下文本身已死时
+     *   静默失败，由 _repairConnection 的看门狗兜底做全量重建。
+     */
+    async _enableStatusNotify() {
+      const targetId = this.deviceId
+      if (!targetId || !this.connected) return
+      try {
+        await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
+        notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
+        this._fetchBatteryLevel(targetId).catch(() => {})
+      } catch (_) {}
     },
 
     /**
@@ -2072,6 +2130,8 @@ export const useBleStore = defineStore('ble', {
       this.fingerprint = ''               // ★ v3.3
       this._configDirty = false           // ★ v3.15: 重置脏标记（新连接重新初始化）
       this.deviceState = 'LOCKED'
+      // ★ v3.25-fix: 新连接前清除可能存在的"假断连"延迟清零定时器，避免其随后误清 RSSI
+      if (this._disconnectRssiClearTimer) { clearTimeout(this._disconnectRssiClearTimer); this._disconnectRssiClearTimer = null }
       this.rssi = -999
       this.filteredRssi = -999
       this._coolingDown = true
@@ -2304,7 +2364,14 @@ export const useBleStore = defineStore('ble', {
       }
 
       // 连接与车辆状态
-      if (data.c !== undefined) this.connected = data.c === 1
+      if (data.c !== undefined) {
+        // ★ v3.25-fix: 收到 FF02(c:1) 即视为已连，取消"假断连"的延迟 RSSI 清零
+        if (data.c === 1 && this._disconnectRssiClearTimer) {
+          clearTimeout(this._disconnectRssiClearTimer)
+          this._disconnectRssiClearTimer = null
+        }
+        this.connected = data.c === 1
+      }
 
       // RSSI（先更新，后续校验要用）
       if (data.r !== undefined && data.r > -999) this.rssi = data.r
@@ -2349,9 +2416,50 @@ export const useBleStore = defineStore('ble', {
         if (this.connected) {
           console.warn('[Store] Status Notify 超时，设备可能静默断连')
           this.statusStale = true
+          // ★ v3.25-fix2: 连接存活但 FF02 中断 → 自愈重建 GATT 上下文（见 _repairConnection）
+          this._repairConnection()
         }
         this._statusStaleTimer = null
       }, 3000)  // 3s = 3 × 固件 1s 推送周期，留足余量
+    },
+
+    /**
+     * ★ v3.25-fix2: "连接存活但 FF02 通知中断"自愈
+     *   症状：GATT 连接活着（固件 LED 仍按距离亮灭、WRITE 仍成功），但 App 不再收到
+     *   FF02 → statusStale=true 且 filteredRssi 卡在 -999（显示 "---"）。
+     *   根因：Android 在 Doze/后台后，已建立的 GATT 上下文的 Notify 订阅(CCCD)会静默失效；
+     *   此时 OS 层连接未真断，createBLEConnection 对已连设备是空操作，无法刷新 GATT 上下文，
+     *   导致 notifyBLECharacteristicValueChange 在陈旧句柄上静默失败、FF02 全被丢弃。
+     *   修复：强制 closeBLEConnection 拆掉陈旧上下文 → 再 createBLEConnection 建立全新 GATT
+     *   上下文 → _finalizeConnection 重新 enable FF02 Notify。这是 Android BLE 恢复 Notify
+     *   的可靠手段。用 _repairing 标志防重入。
+     */
+    async _repairConnection() {
+      if (this._repairing) return
+      const targetId = this.deviceId
+      if (!targetId || !this.connected) return
+      this._repairing = true
+      console.warn('[Store] ⚠ 连接存活但状态过期 → 强制重建 GATT 上下文以恢复 FF02 订阅')
+      try {
+        // 1) 拆掉可能陈旧的 GATT 上下文（未连接时 close 报错，忽略即可）
+        await new Promise((resolve) => {
+          try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (e) { resolve() }
+        })
+        await new Promise(r => setTimeout(r, 400))
+        // 2) 全新连接（获取新鲜 GATT 句柄）
+        this.connected = false
+        await this._connectWithResetFallback(targetId)
+        // 3) 统一收尾：重新 enable FF02/Battery Notify + 读序列号等
+        this._finalizeConnection(targetId)
+        console.warn('[Store] ✓ GATT 上下文已重建，FF02 订阅应已恢复')
+      } catch (e) {
+        console.warn('[Store] ⚠ GATT 重建失败，交由常规重连处理:', e?.message || e)
+        this.connected = false
+        this.statusStale = true
+        if (typeof this._scheduleReconnect === 'function') this._scheduleReconnect(0)
+      } finally {
+        this._repairing = false
+      }
     },
 
     // ==================== 命令 (v3.2) ====================
@@ -2845,9 +2953,28 @@ export const useBleStore = defineStore('ble', {
      *
      * 无重复扫描风险：_geofenceBleTriggered 全局防重复（watchPosition 和心跳共用）
      */
+    /**
+     * ★ v3.25-fix: 围栏 BLE 闩锁查询（带超时自动解锁）
+     *
+     * 之前 _geofenceBleTriggered 是永久闩锁：一旦在围栏内触发过重连，
+     * 只要不走出围栏，心跳/_onGeofenceEnter 就永远被拦截 → 死锁「通知在、连不上」。
+     * 现改为带超时的防抖：触发后 GEOFENCE_BLE_LATCH_MS 内视为已锁（防同一进入事件重复点火），
+     * 超时后自动解锁，允许后续心跳再次触发重连重试。
+     */
+    _isGeofenceBleLatched() {
+      if (!this._geofenceBleTriggered) return false
+      const elapsed = Date.now() - (this._geofenceBleTriggeredAt || 0)
+      if (elapsed > GEOFENCE_BLE_LATCH_MS) {
+        this._geofenceBleTriggered = false
+        console.log(`[Store] ⚡ 围栏 BLE 闩锁超时(${elapsed}ms)自动解锁，允许重连重试`)
+        return false
+      }
+      return true
+    },
+
     async _heartbeatGeofenceCheck() {
       if (this.connected) return           // 已连接，无需检测
-      if (this._geofenceBleTriggered) return  // BLE 已触发（可能由 watchPosition 触发）
+      if (this._isGeofenceBleLatched()) return  // BLE 已触发（可能由 watchPosition 触发），未超时则跳过
       if (!isGeofenceMonitorActive || !isGeofenceMonitorActive()) return  // 围栏未运行
 
       const parking = getParkingLocation()
@@ -2866,6 +2993,7 @@ export const useBleStore = defineStore('ble', {
       if (distance <= GEOFENCE_RADIUS) {
         console.log('[Store] ⏰ 心跳检测到进入围栏！启动 BLE 扫描...')
         this._geofenceBleTriggered = true
+        this._geofenceBleTriggeredAt = Date.now()
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this._startReconnect()
@@ -2879,7 +3007,7 @@ export const useBleStore = defineStore('ble', {
      * 防重复：每轮监控期间最多触发一次 BLE 重连。
      */
     _onGeofenceEnter(distance) {
-      if (this._geofenceBleTriggered) {
+      if (this._isGeofenceBleLatched()) {
         console.log(`[Store] ⚡ 围栏进入（${distance}m），但 BLE 已触发过，跳过`)
         return
       }
@@ -2889,6 +3017,7 @@ export const useBleStore = defineStore('ble', {
       }
 
       this._geofenceBleTriggered = true
+      this._geofenceBleTriggeredAt = Date.now()
       console.log(`[Store] ⚡ 🚀 围栏进入（${distance}m）→ 启动 BLE 扫描`)
 
       // 重置重连状态，立即启动激进扫描
@@ -2946,7 +3075,7 @@ export const useBleStore = defineStore('ble', {
       this._geofenceApproachChecked = true
 
       // ★ 如果后台 GPS 围栏已经触发过 BLE，不需要前台再触发
-      if (this._geofenceBleTriggered) {
+      if (this._isGeofenceBleLatched()) {
         console.log('[Store] ⚡ 后台围栏已触发 BLE，前台跳过')
         return false
       }
@@ -2971,6 +3100,7 @@ export const useBleStore = defineStore('ble', {
         // ★ 在围栏内 → 立即启动 BLE 扫描
         console.log('[Store] ⚡ 进入围栏！启动 BLE 扫描...')
         this._geofenceBleTriggered = true
+        this._geofenceBleTriggeredAt = Date.now()
         this.reconnectMode = 'idle'
         this.reconnectAttempt = 0
         this._startReconnect()

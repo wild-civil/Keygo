@@ -145,6 +145,12 @@ onLaunch(() => {
   // ★ v3.17.1: 诊断前台服务插件状态
   const pluginStatus = getPluginStatus()
   console.log('[App] 前台服务插件状态:', JSON.stringify(pluginStatus))
+  // ★ v3.24-fix: 明确告知原生后台扫描是否可用（自定义基座未打包插件时为 false）
+  if (pluginStatus.pluginLoaded) {
+    console.log('[App] ✅ 原生后台扫描插件已加载，后台重连走原生 BLE 扫描')
+  } else {
+    console.warn('[App] ⚠ 原生后台扫描插件未加载 → 已退化为纯 JS 模式（依赖 GPS 围栏重连，不可靠）')
+  }
 
   // ★ v3.17.1: Android 13+ 请求通知权限（前台服务必须）
   //   即使当前未连接设备，提前请求权限避免后续阻塞

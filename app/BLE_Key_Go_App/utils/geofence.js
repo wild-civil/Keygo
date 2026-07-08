@@ -26,6 +26,15 @@ const TAG = '[Geofence]'
 /** 围栏半径（米），可配置 */
 export const GEOFENCE_RADIUS = 100
 
+/**
+ * ★ v3.25-fix: 围栏触发 BLE 重连后的「防抖闩锁」超时（毫秒）。
+ * 之前 _geofenceBleTriggered 是永久闩锁：一旦在围栏内触发过重连，
+ * 只要不走出围栏就永远不再重试（心跳被拦截），导致「通知在、连不上」的死锁。
+ * 改为带超时的防抖：触发后保留 LATCH_MS 防止同一进入事件被重复点火，
+ * 超时后自动解锁，让后续心跳能继续重试重连。
+ */
+export const GEOFENCE_BLE_LATCH_MS = 20000
+
 /** 存储 key */
 const STORAGE_KEY = 'geofence_parking_location'
 

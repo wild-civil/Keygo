@@ -385,10 +385,13 @@ let _serviceStarted = false
 
 export function getPluginStatus() {
   const sdkVersion = getAndroidSdkVersion()
+  // ★ 真实探测原生插件是否可用（之前是写死的 false，会误导诊断）
+  const native = getNativePlugin()
+  const pluginLoaded = !!native
 
   return {
-    mode: 'jsOnly',
-    pluginLoaded: false,
+    mode: pluginLoaded ? 'native' : 'jsOnly',
+    pluginLoaded,
     isAndroidApp: isAndroidApp(),
     sdkVersion: sdkVersion,
     mainActivity: getMainActivity() != null,
