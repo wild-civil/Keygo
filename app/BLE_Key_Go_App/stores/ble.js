@@ -124,6 +124,11 @@ export const useBleStore = defineStore('ble', {
     _geofenceApproachChecked: false, // 本次 onShow 是否已触发围栏检测（防重复）
     _geofenceBleTriggered: false,    // 围栏是否已触发过 BLE 扫描（本轮监控内防重复）
 
+    // ★ v3.25: 极速模式实时距离显示
+    geofenceDistance: -1,            // 当前到停车点的距离（米），-1=未知/不在极速模式
+    geofenceDistanceAge: -1,         // 距离数据距今毫秒数（-1=无数据）
+    parkingLocation: null,           // 停车位置 { lat, lng, savedAt }（供 UI 显示）
+
     // ★ v3.17: 前台服务状态（Android 保活）
     _foregroundServiceActive: false,
     _foregroundServiceFailCount: 0,       // 失败次数（超过上限不再重试）
@@ -174,6 +179,15 @@ export const useBleStore = defineStore('ble', {
       if (r === -999 || r === undefined) return 0
       const pct = ((r + 100) / 80) * 100
       return Math.max(0, Math.min(100, Math.round(pct)))
+    },
+
+    // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
+    geofenceDistanceText: (state) => {
+      if (state.geofenceDistance < 0) return '获取中...'
+      if (state.geofenceDistance < 10) return '已到达 (<10m)'
+      if (state.geofenceDistance < 100) return `${state.geofenceDistance}m`
+      if (state.geofenceDistance < 1000) return `${state.geofenceDistance}m`
+      return `${(state.geofenceDistance / 1000).toFixed(1)}km`
     },
 
     isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
@@ -1903,6 +1917,17 @@ export const useBleStore = defineStore('ble', {
         // ★ v3.17: 连接成功后启动前台服务（Android 保活）
         this._ensureForegroundService()
 
+        // ★ v3.25: 极速模式下，连接成功 = 人就在车旁边，静默更新停车位置
+        if (this.autoReconnectMode === 'speed') {
+          getCurrentPosition().then(pos => {
+            if (pos) {
+              saveParkingLocation(pos.lat, pos.lng)
+              this.parkingLocation = getParkingLocation()
+              console.log('[Store] ⚡ 连接成功 → 已更新停车位置')
+            }
+          })
+        }
+
         // ★ v3.3: 从扫描缓存中提取设备指纹
         const cached = this.devices.find(d => d.deviceId === deviceId)
         this.fingerprint = cached?.fingerprint || ''
@@ -2482,7 +2507,8 @@ export const useBleStore = defineStore('ble', {
     /**
      * 进入极速模式
      *   - 停止所有 BLE 后台轮询
-     *   - 获取当前 GPS 位置作为停车点
+     *   - 优先使用已有停车位置（来自上次"连接成功"或"断连"时记录）
+     *   - 只有当完全没有历史停车位置时，才用当前 GPS 作为初始围栏中心
      *   - 启动前台服务 + 后台 GPS 围栏监控
      */
     _onSpeedModeEnter() {
@@ -2495,14 +2521,32 @@ export const useBleStore = defineStore('ble', {
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
       this._geofenceBleTriggered = false
+      // ★ v3.25: 重置实时距离状态
+      this.geofenceDistance = -1
+      this.geofenceDistanceAge = -1
 
-      // 获取当前位置保存为停车点
-      this._saveParkingNow().then((saved) => {
-        // ★ 停车位置保存成功后，启动后台 GPS 围栏监控
-        if (saved && !this.connected) {
+      // ★ v3.25: 优先读取已有停车位置（来自"连接成功"或"断连"时自动记录）
+      const existingParking = getParkingLocation()
+      if (existingParking) {
+        const ageMs = Date.now() - existingParking.savedAt
+        console.log(`[Store] ⚡ 使用已有停车位置 (${(ageMs / 1000).toFixed(0)}s 前): ${existingParking.lat.toFixed(6)}, ${existingParking.lng.toFixed(6)}`)
+        this.parkingLocation = existingParking
+        if (!this.connected) {
           this._startGeofenceMonitor()
-          // ★ v3.23.2: 启动 AlarmManager 心跳（确保 watchPosition 回调不被 Doze 冻结）
           this._startHeartbeat()
+        }
+        return
+      }
+
+      // ★ v3.25: 无历史停车位置（首次使用极速模式）→ 降级用当前 GPS
+      console.log('[Store] ⚡ 无已有停车位置，使用当前 GPS 作为初始围栏中心...')
+      this._saveParkingNow().then((saved) => {
+        if (saved) {
+          this.parkingLocation = getParkingLocation()
+          if (!this.connected) {
+            this._startGeofenceMonitor()
+            this._startHeartbeat()
+          }
         }
       })
     },
@@ -2554,6 +2598,7 @@ export const useBleStore = defineStore('ble', {
      *
      * 进入围栏 → _onGeofenceEnter() → 启动 BLE 扫描
      * 离开围栏 → _onGeofenceLeave() → 停止 BLE 扫描
+     * ★ v3.25: onPosition → 实时更新 geofenceDistance（供 UI 距离显示）
      */
     _startGeofenceMonitor() {
       if (this.autoReconnectMode !== 'speed') return
@@ -2569,6 +2614,9 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
+      // ★ v3.25: 同步更新 UI 用的停车位置
+      this.parkingLocation = parking
+
       // 重置触发标记（新一轮监控）
       this._geofenceBleTriggered = false
 
@@ -2579,7 +2627,12 @@ export const useBleStore = defineStore('ble', {
         // onEnter: 进入围栏
         (distance) => { this._onGeofenceEnter(distance) },
         // onLeave: 离开围栏
-        (distance) => { this._onGeofenceLeave(distance) }
+        (distance) => { this._onGeofenceLeave(distance) },
+        // ★ v3.25: onPosition — 每次 GPS 更新时刷新距离显示
+        (posInfo) => {
+          this.geofenceDistance = posInfo.distance
+          this.geofenceDistanceAge = 0  // 刚刚更新，年龄为 0
+        }
       )
 
       if (started) {
@@ -2595,6 +2648,9 @@ export const useBleStore = defineStore('ble', {
     _stopGeofenceMonitor() {
       stopGeofenceMonitor()
       this._geofenceBleTriggered = false
+      // ★ v3.25: 停止围栏监控时重置距离显示
+      this.geofenceDistance = -1
+      this.geofenceDistanceAge = -1
     },
 
     // ==================== ★ v3.23.2: AlarmManager 心跳（防 Doze） ====================

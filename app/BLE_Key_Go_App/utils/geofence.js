@@ -216,8 +216,14 @@ let _onEnterCallback = null
 /** 离开围栏回调 */
 let _onLeaveCallback = null
 
+/** 位置更新回调（每次 watchPosition 回调都触发，用于实时距离显示等） */
+let _onPositionCallback = null
+
 /** 最后收到 GPS 位置的时间戳（用于诊断） */
 let _lastPositionTime = 0
+
+/** ★ v3.25: watchPosition 回调中持续更新的最近一次有效坐标 */
+let _lastKnownPosition = null
 
 /**
  * 启动后台 GPS 围栏监控
@@ -232,9 +238,10 @@ let _lastPositionTime = 0
  *
  * @param {Function} onEnter  进入围栏回调 (distance: number) => void
  * @param {Function} onLeave  离开围栏回调 (distance: number) => void（可选）
+ * @param {Function} onPosition 位置更新回调 ({distance, latitude, longitude, accuracy, parking}) => void（可选）
  * @returns {boolean} 是否成功启动
  */
-export function startGeofenceMonitor(onEnter, onLeave) {
+export function startGeofenceMonitor(onEnter, onLeave, onPosition) {
   const parking = getParkingLocation()
   if (!parking) {
     console.warn(`${TAG} ⚠ 无法启动监控：无停车位置`)
@@ -243,11 +250,14 @@ export function startGeofenceMonitor(onEnter, onLeave) {
 
   if (_watchId !== null) {
     console.log(`${TAG} ℹ Geofence 监控已在运行，跳过 (watchId=${_watchId})`)
+    // ★ v3.25: 即使已运行，也更新回调（支持调用方动态更新）
+    if (onPosition) _onPositionCallback = onPosition
     return true
   }
 
   _onEnterCallback = onEnter || null
   _onLeaveCallback = onLeave || null
+  _onPositionCallback = onPosition || null
   _isInside = false
   _lastPositionTime = 0
 
@@ -262,6 +272,29 @@ export function startGeofenceMonitor(onEnter, onLeave) {
           coords.latitude, coords.longitude,
           parking.lat, parking.lng
         )
+
+        // ★ v3.25: 持续更新最近已知坐标（供 getLastKnownPosition 读取）
+        _lastKnownPosition = {
+          lat: coords.latitude,
+          lng: coords.longitude,
+          accuracy: coords.accuracy != null ? coords.accuracy : 999,
+          time: _lastPositionTime,
+        }
+
+        // ★ v3.25: 通知位置更新（供实时距离显示）
+        if (_onPositionCallback) {
+          try {
+            _onPositionCallback({
+              distance,
+              latitude: coords.latitude,
+              longitude: coords.longitude,
+              accuracy: coords.accuracy != null ? coords.accuracy : 999,
+              parking,
+            })
+          } catch (e) {
+            console.error(`${TAG} ❌ onPosition 回调异常:`, e?.message || e)
+          }
+        }
 
         // 精度信息（用于日志）
         const acc = coords.accuracy != null ? `±${Math.round(coords.accuracy)}m` : '?'
@@ -340,6 +373,8 @@ export function stopGeofenceMonitor() {
   _isInside = false
   _onEnterCallback = null
   _onLeaveCallback = null
+  _onPositionCallback = null
+  _lastKnownPosition = null    // ★ v3.25: 清理缓存坐标
 }
 
 /**
@@ -384,6 +419,40 @@ export function getLastKnownPosition() {
     accuracy: _lastKnownPosition.accuracy,
     time: _lastKnownPosition.time,
     age: Date.now() - _lastKnownPosition.time,
+  }
+}
+
+/**
+ * ★ v3.25: 获取当前到停车点的估算距离（同步，基于 watchPosition 缓存）
+ *
+ * 不发起异步 GPS 请求，直接使用 watchPosition 的缓存坐标，适合 UI 实时刷新。
+ * 
+ * @returns {{ distance: number, parking: object|null, source: string, age: number }|null}
+ *   distance: 距离（米），-1=无数据
+ *   parking: 停车位置信息，null=无停车位置
+ *   source: 数据来源 'watch_position'/'parking_only'
+ *   age: 坐标距今毫秒数，-1=无定位数据
+ */
+export function getDistanceToParking() {
+  const parking = getParkingLocation()
+  if (!parking) return null
+
+  const pos = getLastKnownPosition()
+  if (pos) {
+    return {
+      distance: calculateDistance(pos.lat, pos.lng, parking.lat, parking.lng),
+      parking,
+      source: 'watch_position',
+      age: pos.age,
+    }
+  }
+
+  // 有停车位置但无实时坐标 → 无法计算距离
+  return {
+    distance: -1,
+    parking,
+    source: 'parking_only',
+    age: -1,
   }
 }
 

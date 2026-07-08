@@ -58,6 +58,38 @@
       </view>
     </view>
 
+    <!-- ★ v3.25: 极速模式距离显示（仅 speed 模式 + 未连接 + 有停车位置时显示） -->
+    <view class="geofence-card" v-if="!bleStore.connected && bleStore.autoReconnectMode === 'speed' && bleStore.parkingLocation">
+      <view class="geofence-header">
+        <text class="geofence-icon">🅿️</text>
+        <text class="geofence-title">停车位置</text>
+        <text class="geofence-time" v-if="bleStore.parkingLocation">· {{ parkingTimeAgo }}</text>
+      </view>
+      <view class="geofence-body">
+        <view class="geofence-distance-row">
+          <text class="geofence-dist-label">距停车点</text>
+          <text class="geofence-dist-value" :class="{ arrived: bleStore.geofenceDistance >= 0 && bleStore.geofenceDistance < 10 }">
+            {{ bleStore.geofenceDistanceText }}
+          </text>
+        </view>
+        <!-- 距离进度条：离车越近越满 -->
+        <view class="geofence-bar-bg">
+          <view class="geofence-bar-fill" :style="{ width: geofenceBarPercent + '%' }"
+            :class="{ far: geofenceBarPercent < 30, mid: geofenceBarPercent >= 30 && geofenceBarPercent < 60, near: geofenceBarPercent >= 60 }">
+          </view>
+        </view>
+        <text class="geofence-hint" v-if="bleStore.geofenceDistance >= 0 && bleStore.geofenceDistance < 100">
+          🟢 已进入 100m 围栏，BLE 扫描已激活
+        </text>
+        <text class="geofence-hint" v-else-if="bleStore.geofenceDistance >= 100 && bleStore.geofenceDistance < 500">
+          正在接近中，距围栏还有 {{ bleStore.geofenceDistance - 100 }}m
+        </text>
+        <text class="geofence-hint dim" v-else>
+          等待 GPS 定位更新...
+        </text>
+      </view>
+    </view>
+
     <!-- 设备扫描区域 -->
     <view class="section" v-if="!bleStore.connected">
       <view class="section-header">
@@ -161,6 +193,32 @@ import { toast } from '@/utils/toast.js'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
+
+// ★ v3.25: 极速模式距离显示 — 停车时间相对描述
+const parkingTimeAgo = computed(() => {
+  const p = bleStore.parkingLocation
+  if (!p || !p.savedAt) return ''
+  const diff = Date.now() - p.savedAt
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}分钟前`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}小时前`
+  return `${Math.floor(diff / 86400000)}天前`
+})
+
+// ★ v3.25: 极速模式距离进度条（越近越满）
+//   500m → 0%, 10m → 100%（指数映射让近距离变化更灵敏）
+const geofenceBarPercent = computed(() => {
+  const d = bleStore.geofenceDistance
+  if (d < 0) return 0
+  if (d <= 10) return 100
+  if (d >= 500) return 0
+  // 指数衰减：距离折半 → 进度提升 20%
+  // 500m→0%, 250m→20%, 125m→40%, 60m→60%, 30m→80%, 10m→100%
+  // 公式: percent = 20 * (9 - log2(d/10))，clamp [0, 100]
+  const ratio = d / 10
+  const pct = 20 * (9 - Math.log2(ratio))
+  return Math.max(0, Math.min(100, Math.round(pct)))
+})
 
 // // ★★★ v3.14-bug watcher 诊断：监听 connected 变化，定位 phantom 连接的来源 ★★★ 
 // 在每次 connected 状态变化时，会打印：
@@ -910,5 +968,84 @@ async function handleSetName() {
 .pin-confirm {
   background: var(--gradient-accent);
   color: #fff;
+}
+
+/* ===== ★ v3.25: 极速模式距离显示卡片 ===== */
+.geofence-card {
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  padding: 24rpx;
+  margin-bottom: 30rpx;
+  border: 1rpx solid var(--border);
+}
+
+.geofence-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 16rpx;
+}
+
+.geofence-icon { font-size: 32rpx; margin-right: 8rpx; }
+
+.geofence-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.geofence-time {
+  font-size: 22rpx;
+  color: var(--text-muted);
+  margin-left: 6rpx;
+}
+
+.geofence-distance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 12rpx;
+}
+
+.geofence-dist-label {
+  font-size: 24rpx;
+  color: var(--text-tertiary);
+}
+
+.geofence-dist-value {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: var(--accent);
+  transition: color 0.3s;
+}
+
+.geofence-dist-value.arrived {
+  color: var(--accent-green);
+}
+
+.geofence-bar-bg {
+  height: 10rpx;
+  background: var(--border);
+  border-radius: 5rpx;
+  overflow: hidden;
+  margin-bottom: 12rpx;
+}
+
+.geofence-bar-fill {
+  height: 100%;
+  border-radius: 5rpx;
+  transition: width 1s ease;
+}
+
+.geofence-bar-fill.far  { background: linear-gradient(90deg, #90CAF9, #42A5F5); }
+.geofence-bar-fill.mid  { background: linear-gradient(90deg, #FFB74D, #FF9800); }
+.geofence-bar-fill.near { background: linear-gradient(90deg, #81C784, #4CAF50); }
+
+.geofence-hint {
+  font-size: 22rpx;
+  color: var(--accent-green);
+}
+
+.geofence-hint.dim {
+  color: var(--text-muted);
 }
 </style>
