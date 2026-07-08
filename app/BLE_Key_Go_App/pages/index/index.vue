@@ -304,6 +304,8 @@ onShow(async () => {
   } else if (bleStore.autoReconnectMode === 'speed') {
     // ★ Phase 3: 极速模式 → GPS 围栏检测（内部已含 _shouldAutoReconnect 闸门）
     if (!bleStore.connected) {
+      // ★ v3.25.1-fix: 重启后恢复停车位置 + 围栏监控（修复重启无距离显示的 bug）
+      bleStore._restoreSpeedModeState()
       bleStore.checkGeofenceApproach()
     }
   }

@@ -2553,6 +2553,39 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.25.1-fix: APP 重启后恢复极速模式状态
+     *
+     * 极速模式切换时 _onSpeedModeEnter() 会正确初始化 parkingLocation + 围栏监控，
+     * 但 APP 重启时 autoReconnectMode 仅从 storage 恢复字符串值，无人调用 enter 逻辑。
+     *
+     * 此方法在 index.vue onShow 中调用，确保重启后：
+     *   1. parkingLocation 从 localStorage 恢复 → UI 卡片正常显示
+     *   2. _startGeofenceMonitor() 启动 → watchPosition 实时距离更新
+     *
+     * 幂等：已连接 / 已有 parkingLocation / 围栏监控已运行 → 跳过
+     * 注意：心跳由 prepareForAutoConnect() 启动，此处不再重复启动
+     */
+    _restoreSpeedModeState() {
+      if (this.autoReconnectMode !== 'speed') return
+      if (this.connected) return
+      if (this.parkingLocation && isGeofenceMonitorActive && isGeofenceMonitorActive()) return
+
+      const existingParking = getParkingLocation()
+      if (!existingParking) {
+        console.log('[Store] ⚡ 重启恢复：无停车位置记录，跳过（需先连接一次设备记录位置）')
+        return
+      }
+
+      const ageMs = Date.now() - existingParking.savedAt
+      console.log(`[Store] ⚡ 重启恢复停车位置 (${(ageMs / 1000).toFixed(0)}s 前): ${existingParking.lat.toFixed(6)}, ${existingParking.lng.toFixed(6)}`)
+      this.parkingLocation = existingParking
+      this.geofenceDistance = -1
+      this.geofenceDistanceAge = -1
+      this._geofenceBleTriggered = false
+      this._startGeofenceMonitor()
+    },
+
+    /**
      * 退出极速模式 → 停止围栏监控 + 停止心跳 + 清理前台服务
      */
     _onSpeedModeExit() {
