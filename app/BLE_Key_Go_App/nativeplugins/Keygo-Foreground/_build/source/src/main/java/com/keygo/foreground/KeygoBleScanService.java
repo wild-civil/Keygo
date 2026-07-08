@@ -101,12 +101,18 @@ public class KeygoBleScanService extends Service {
         Notification.Builder b;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) b = new Notification.Builder(this, CHANNEL_ID);
         else b = new Notification.Builder(this);
-        b                .setContentTitle("KeyGo 车钥匙")
-                .setContentText("后台连接中，靠近车辆自动解锁")
-                .setSmallIcon(getNotificationIconRes())
-                .setLargeIcon(BitmapFactory.decodeResource(getResources(), getNotificationIconRes()))
-                .setContentIntent(pi)
-                .setOngoing(true);
+        // --------------- 通知图标说明（重要）---------------
+        // 1. setSmallIcon(int) → 通知【左侧】的小图标（状态栏也会用它）。
+        //    这里用 getApplicationInfo().icon，即 App 本身的图标（你的绿色 KeyGo 图标），
+        //    保证通知左侧和桌面图标一致。
+        // 2. setLargeIcon(Bitmap) → 通知【右侧】的大图标；去掉这行后右侧不会出现多余图标。
+        //    之前把 setLargeIcon 也写上了，导致右侧出现一个白色方块 APP 图标。
+        // --------------------------------------------------
+        b.setSmallIcon(getApplicationInfo().icon)
+         .setContentTitle("KeyGo 车钥匙")
+         .setContentText("后台连接中，靠近车辆自动解锁")
+         .setContentIntent(pi)
+         .setOngoing(true);
         // Android 14+ 必须在 startForeground 之前已在 manifest 声明 foregroundServiceType
         startForeground(NOTIF_ID, b.build());
     }
