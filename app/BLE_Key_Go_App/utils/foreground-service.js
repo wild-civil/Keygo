@@ -133,7 +133,10 @@ function getAppIconResId(main, pkgName) {
     if (!resources) return 0
 
     // 尝试 app 自身的 drawable icon
+    // ★ 优先查找插件自带的 keygo_notification_icon（KeyGo 专用通知图标），
+    //   避免基座默认 HbuilderX 图标被状态栏显示。
     const candidates = [
+      { name: 'keygo_notification_icon', type: 'drawable' },
       { name: 'icon', type: 'drawable' },
       { name: 'ic_launcher', type: 'mipmap' },
       { name: 'ic_notification', type: 'drawable' },

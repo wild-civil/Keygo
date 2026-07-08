@@ -1,0 +1,7 @@
+# 本地编译 KeyGo 插件 aar 时产生的中间产物（非源码，无需入库）
+aar_stage/
+classes/
+stub_classes/
+classes.jar
+aar_contents.txt
+build.log

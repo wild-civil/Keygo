@@ -50,6 +50,34 @@ public class KeygoForegroundModule extends UniModule {
     private UniJSCallback screenOnCallback;
     private BroadcastReceiver screenOnReceiver;
 
+    /**
+     * 通过反射兼容不同 uni-app SDK 版本的上下文字段：
+     *   - 旧版（继承自 Weex WXModule）：mWXSDKInstance
+     *   - 新版（uni-app）：mUniSDKInstance
+     * 直接硬编码字段名在另一版本 SDK 上会抛 NoSuchFieldError，故用反射兜底。
+     */
+    private Context getAppContext() {
+        try {
+            Class<?> c = getClass();
+            while (c != null && c != Object.class) {
+                for (String name : new String[] { "mUniSDKInstance", "mWXSDKInstance" }) {
+                    try {
+                        java.lang.reflect.Field f = c.getDeclaredField(name);
+                        f.setAccessible(true);
+                        Object inst = f.get(this);
+                        if (inst != null) {
+                            return (Context) inst.getClass().getMethod("getContext").invoke(inst);
+                        }
+                    } catch (Exception ignore) { /* 尝试下一个字段 */ }
+                }
+                c = c.getSuperclass();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "getAppContext 反射失败", e);
+        }
+        return null;
+    }
+
     @UniJSMethod(uiThread = false)
     public void startScan(JSONObject options, UniJSCallback callback) {
         Log.i(TAG, "startScan");
@@ -62,8 +90,9 @@ public class KeygoForegroundModule extends UniModule {
         });
 
         String targetName = (options != null) ? options.optString("targetName", "") : "";
+        Context ctx = getAppContext();
+        if (ctx == null) { Log.e(TAG, "getAppContext 失败，无法启动服务"); return; }
         try {
-            Context ctx = mWXSDKInstance.getContext().getApplicationContext();
             Intent intent = new Intent(ctx, KeygoBleScanService.class);
             intent.putExtra("targetName", targetName == null ? "" : targetName);
             ctx.startForegroundService(intent);
@@ -77,8 +106,9 @@ public class KeygoForegroundModule extends UniModule {
     @UniJSMethod(uiThread = false)
     public void stopScan(UniJSCallback callback) {
         Log.i(TAG, "stopScan");
+        Context ctx = getAppContext();
+        if (ctx == null) { Log.e(TAG, "getAppContext 失败"); return; }
         try {
-            Context ctx = mWXSDKInstance.getContext().getApplicationContext();
             Intent intent = new Intent(ctx, KeygoBleScanService.class);
             ctx.stopService(intent);
         } catch (Exception e) {
@@ -115,8 +145,9 @@ public class KeygoForegroundModule extends UniModule {
             Log.i(TAG, "screenOnReceiver 已注册，仅更新回调");
             return;
         }
+        Context ctx = getAppContext();
+        if (ctx == null) { Log.e(TAG, "getAppContext 失败，无法注册亮屏监听"); return; }
         try {
-            Context ctx = mWXSDKInstance.getContext().getApplicationContext();
             screenOnReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
@@ -147,9 +178,9 @@ public class KeygoForegroundModule extends UniModule {
     @UniJSMethod(uiThread = false)
     public void stopScreenOnReceiver(UniJSCallback callback) {
         Log.i(TAG, "stopScreenOnReceiver");
-        if (screenOnReceiver != null) {
+        Context ctx = getAppContext();
+        if (screenOnReceiver != null && ctx != null) {
             try {
-                Context ctx = mWXSDKInstance.getContext().getApplicationContext();
                 ctx.unregisterReceiver(screenOnReceiver);
             } catch (Exception e) {
                 Log.w(TAG, "注销 screenOnReceiver 失败（可能已注销）", e);

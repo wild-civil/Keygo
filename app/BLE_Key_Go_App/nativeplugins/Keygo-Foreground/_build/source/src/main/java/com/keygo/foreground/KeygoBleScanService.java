@@ -19,6 +19,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
@@ -99,13 +101,24 @@ public class KeygoBleScanService extends Service {
         Notification.Builder b;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) b = new Notification.Builder(this, CHANNEL_ID);
         else b = new Notification.Builder(this);
-        b.setContentTitle("KeyGo 车钥匙")
+        b                .setContentTitle("KeyGo 车钥匙")
                 .setContentText("后台连接中，靠近车辆自动解锁")
-                .setSmallIcon(getApplicationInfo().icon)
+                .setSmallIcon(getNotificationIconRes())
+                .setLargeIcon(BitmapFactory.decodeResource(getResources(), getNotificationIconRes()))
                 .setContentIntent(pi)
                 .setOngoing(true);
         // Android 14+ 必须在 startForeground 之前已在 manifest 声明 foregroundServiceType
         startForeground(NOTIF_ID, b.build());
+    }
+
+    /**
+     * 状态栏小图标：优先用插件自带的白色通知图标（keygo_notification_icon），
+     * 不依赖基座包图标（自定义基座默认是 HbuilderX 图标，会导致状态栏显示 HbuilderX）。
+     * 找不到资源时回退到 getApplicationInfo().icon，保证不崩。
+     */
+    private int getNotificationIconRes() {
+        int id = getResources().getIdentifier("keygo_notification_icon", "drawable", getPackageName());
+        return id != 0 ? id : getApplicationInfo().icon;
     }
 
     // ==================== 原生心跳（抗 Doze） ====================

@@ -2,8 +2,8 @@
     "name" : "BLE车钥匙",
     "appid" : "__UNI__35B0789",
     "description" : "BLE车钥匙舒适进入系统",
-    "versionName" : "1.0.3",
-    "versionCode" : 103,
+    "versionName" : "1.0.7",
+    "versionCode" : 107,
     "transformPx" : false,
     "app-plus" : {
         "usingComponents" : true,

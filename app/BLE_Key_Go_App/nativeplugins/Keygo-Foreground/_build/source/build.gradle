@@ -1,6 +1,10 @@
 apply plugin: 'com.android.library'
 
 android {
+    // ★ 注意：不要在此写 namespace。
+    //   DCloud 云端编译本地源码插件使用的是较旧版本的 AGP（Android Gradle Plugin），
+    //   `namespace` 是 AGP 7.0+ 才支持的 DSL，旧 AGP 不认识会直接配置失败、静默丢弃插件。
+    //   包名统一由 AndroidManifest.xml 的 package 属性提供（新旧 AGP 都兼容）。
     compileSdkVersion 30
     defaultConfig {
         minSdkVersion 21
