@@ -103,18 +103,15 @@ public class KeygoBleScanService extends Service {
         else b = new Notification.Builder(this);
         // --------------- 通知图标说明（重要）---------------
         // 1. setSmallIcon(int) → 通知【左侧】的小图标（状态栏也会用它）。
-        //    这里不能直接用 getApplicationInfo().icon，因为 DCloud 自定义基座打包时，
-        //    getApplicationInfo().icon 返回的可能是基座默认图标（绿色 H），而不是
-        //    manifest.json 里配置的 static/icons/ 自定义图标。
-        //    所以把 static/icons/ 下的图标复制到插件 res/drawable-*/keygo_app_icon.png，
-        //    通过 getIdentifier("keygo_app_icon", ...) 直接查找，确保通知左侧和 App 桌面图标一致。
-        //    找不到时回退到 getApplicationInfo().icon，保证不崩。
-        // 2. setLargeIcon(Bitmap) → 通知【右侧】的大图标；去掉这行后右侧不会出现多余图标。
-        //    之前把 setLargeIcon 也写上了，导致右侧出现一个白色方块 APP 图标。
+        //    使用插件自带的 keygo_notification_icon（内容 = static/icons/ 的钥匙线稿），
+        //    通过 getNotificationIconRes() 查找。该资源已在 DCloud 自定义基座运行时验证可用
+        //    （1.0.7 起生效，不会回退到基座默认图标）。
+        //    ★ 注意：Android 5.0+ 会强制把 SmallIcon 渲染成单色（按通知背景取黑/白/灰），
+        //      所以左侧看到的是单色钥匙线稿，这是系统行为，无法显示彩色。
+        // 2. setLargeIcon(Bitmap) → 通知【右侧】的大图标；不调用它，右侧就不会出现多余图标。
+        //    之前误加了 setLargeIcon，导致右侧出现一个白色方块 APP 图标。
         // --------------------------------------------------
-        int appIconRes = getResources().getIdentifier("keygo_app_icon", "drawable", getPackageName());
-        if (appIconRes == 0) appIconRes = getApplicationInfo().icon;
-        b.setSmallIcon(appIconRes)
+        b.setSmallIcon(getNotificationIconRes())
          .setContentTitle("KeyGo 车钥匙")
          .setContentText("后台连接中，靠近车辆自动解锁")
          .setContentIntent(pi)
@@ -124,8 +121,9 @@ public class KeygoBleScanService extends Service {
     }
 
     /**
-     * 状态栏小图标：优先用插件自带的白色通知图标（keygo_notification_icon），
-     * 不依赖基座包图标（自定义基座默认是 HbuilderX 图标，会导致状态栏显示 HbuilderX）。
+     * 通知左侧小图标资源：查找插件自带的 keygo_notification_icon
+     * （内容 = static/icons/ 的钥匙线稿，已用 aapt2 验证会被 DCloud 打包进 APK，
+     *  并在 1.0.7 自定义基座运行时成功生效，不会回退到基座默认图标）。
      * 找不到资源时回退到 getApplicationInfo().icon，保证不崩。
      */
     private int getNotificationIconRes() {
