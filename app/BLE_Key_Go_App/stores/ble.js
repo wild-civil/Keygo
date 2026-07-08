@@ -293,12 +293,15 @@ export const useBleStore = defineStore('ble', {
 
       // 连接状态监听（全局唯一）
       this._connHandler = onBLEConnectionStateChange((connected, deviceId) => {
-        // 过滤：只处理当前设备
         if (deviceId !== this.deviceId) return
-
         if (!connected) {
           console.log('[Store] 设备断开连接（全局监听器）')
           this._handleDisconnect()
+        } else if (!this.connected) {
+          // ★ fix: 连接已建立但 store 状态未同步（如 _doReconnect guard 失效导致跳过回写）。
+          //   底层 BLE 连接已活，但 store 未设置 connected=true，notify 未注册，RSSI 不会显示。
+          console.log('[Store] 连接已建立（全局监听器补位），同步状态...')
+          this._finalizeConnection(deviceId)
         }
       })
 
@@ -786,6 +789,15 @@ export const useBleStore = defineStore('ble', {
 
     /** 统一断连处理入口（由全局 _connHandler 触发） */
     _handleDisconnect() {
+      // ★ fix (②): 幂等保护
+      //   同一物理断连可能被多个监听器重复触发（如全局监听器 + 重连流程残留监听），
+      //   导致 _reconnectGuard 被双增、并产生并行重连循环。_handleDisconnect 进入后会
+      //   立刻将 connected 置 false（见下方），故第二次重入时直接返回，避免重复处理。
+      if (this.connected === false) {
+        console.log('[Store] 断连已处理过（幂等保护，跳过重复触发）')
+        return
+      }
+
       // ★ v3.11: 清除所有定时器防止竞态
       if (this._reconnectTimer) {
         clearTimeout(this._reconnectTimer)
@@ -821,6 +833,12 @@ export const useBleStore = defineStore('ble', {
         // 1. 确保前台服务存活（GPS 监控需要）
         this._ensureForegroundService()
 
+        // ★ fix (①B): 同步启动 AlarmManager 心跳（抗 Doze）。
+        //   原实现将 _startHeartbeat 放在 getCurrentPosition().then 异步回调里，
+        //   GPS 在室内/Doze 下不回调时心跳永不启动，导致后台重连失效。
+        //   现改为断连即刻同步启动；GPS 仅用于精修停车点，不作为启动心跳的前提。
+        this._startHeartbeat()
+
         // 2. Priority 1: 尝试使用 watchPosition 缓存的最近坐标（同步，零延迟）
         const cachedPos = getLastKnownPosition()
         const MAX_CACHE_AGE = 300000  // 5 分钟
@@ -829,9 +847,8 @@ export const useBleStore = defineStore('ble', {
           console.log(`[Store] ⚡ 使用缓存坐标 (${(cachedPos.age / 1000).toFixed(1)}s 前，精度 ±${Math.round(cachedPos.accuracy)}m)`)
           saveParkingLocation(cachedPos.lat, cachedPos.lng)
           this._startGeofenceMonitor()
-          this._startHeartbeat()
 
-          // 异步补一次高精度 GPS，静默更新停车位置（不阻塞围栏启动）
+          // 异步补一次高精度 GPS，静默更新停车位置（不阻塞围栏启动/心跳）
           getCurrentPosition().then(pos => {
             if (pos) {
               saveParkingLocation(pos.lat, pos.lng)
@@ -841,7 +858,7 @@ export const useBleStore = defineStore('ble', {
           return
         }
 
-        // 3. Priority 2 & 3: 缓存不可用 → 异步 GPS / 悲观启动
+        // 3. Priority 2 & 3: 缓存不可用 → 异步 GPS / 悲观启动（心跳已同步启动）
         console.log(cachedPos
           ? `[Store] ⚡ 缓存坐标过期 (${(cachedPos.age / 1000).toFixed(0)}s)，降级为异步 GPS`
           : '[Store] ⚡ 无缓存坐标，异步获取 GPS...')
@@ -850,18 +867,15 @@ export const useBleStore = defineStore('ble', {
           if (pos) {
             saveParkingLocation(pos.lat, pos.lng)
             this._startGeofenceMonitor()
-            this._startHeartbeat()
             console.log('[Store] ⚡ GPS 停车位置已记录，围栏监控已启动')
           } else {
             // Priority 3: GPS 不可用 → 用 localStorage 旧位置悲观启动围栏
             console.warn('[Store] ⚡ GPS 不可用，使用旧停车位置悲观启动围栏...')
             this._startGeofenceMonitor()  // 内部读取 localStorage 旧位置
-            this._startHeartbeat()
           }
         }).catch(() => {
           console.warn('[Store] ⚡ GPS 异常，悲观启动围栏...')
           this._startGeofenceMonitor()
-          this._startHeartbeat()
         })
         return
       }
@@ -889,6 +903,19 @@ export const useBleStore = defineStore('ble', {
         console.log('[Store] 蓝牙已关闭，暂停重连，等待蓝牙恢复')
         this.reconnectMode = 'paused'
         return
+      }
+
+      // ★ fix (①A): 舒适模式断连 → 同步启动 AlarmManager 心跳（抗 Doze）。
+      //   原 _startDormantPoll（唯一会启动心跳的函数）是死代码从未被调用，
+      //   导致舒适模式后台重连完全依赖会被 Doze 冻结的 setTimeout。
+      //   设备回来后，心跳每 60s 触发 tryAutoConnect（见 _onHeartbeatTick 舒适分支）。
+      if (this.autoReconnectMode === 'comfort') {
+        // ★ fix: 断开即刻注册亮屏监听器（不再等 10 次重连失败后才注册）。
+        //   原实现把亮屏触发当作「10 次 setTimeout 重连都失败」的兜底，但后台 + Doze
+        //   下 setTimeout 会被冻结、且设备常在到 10 次之前就已连回，导致整段后台窗口里
+        //   亮屏监听器从未生效，用户开关屏毫无反应。现断开即注册，亮屏/解锁立刻触发扫描。
+        this._startHeartbeat()
+        this._registerScreenOnListener()
       }
 
       // 异常断连 → 启动重连循环（以新 guard 值启动）
@@ -1315,14 +1342,14 @@ export const useBleStore = defineStore('ble', {
             return
           }
 
-          if (this.reconnectAttempt >= 10) {
-            // ★ v3.23: 10 次失败后根据模式分支
+          if (this.reconnectAttempt >= 5) {
+            // ★ v3.23: 5 次失败后根据模式分支
             this.reconnectAttempt = 0
             this.reconnectNextDelay = 0
             if (this.autoReconnectMode === 'comfort') {
               // ★ v1.0.1: 舒适模式 → 注册亮屏监听器（零后台功耗）
               this.reconnectMode = 'idle'
-              console.log('[Store] 重连失败达 10 次，注册亮屏监听器（零后台功耗）')
+              console.log('[Store] 重连失败达 5 次，注册亮屏监听器（零后台功耗）')
               this._registerScreenOnListener()
             } else {
               // ★ v3.24: 手动模式（及非舒适模式）→ 彻底放弃自动重连
@@ -1338,6 +1365,51 @@ export const useBleStore = defineStore('ble', {
           this._scheduleReconnect(delay)
         }
       }, delayMs)
+    },
+
+    /**
+     * ★ 连接成功后的统一状态同步（手动连接 / 自动重连 / 全局监听器补位共用）
+     *   将底层 BLE 连接建立后的 store 状态同步、服务停止、notify 注册、序列号读取
+     *   提取为公共方法，避免 connect() / _doReconnect / 全局监听器补位 三处重复。
+     */
+    _finalizeConnection(deviceId) {
+      this.connected = true
+      this.lastDeviceId = deviceId
+      if (!this.deviceName) {
+        const macClean = this.deviceId.replace(/:/g, '')
+        const macSuffix = macClean.slice(-6).toUpperCase()
+        this.deviceName = 'KeyGo-' + macSuffix
+      }
+      this.reconnectMode = 'idle'
+      this.reconnectAttempt = 0
+      this.reconnectNextDelay = 0
+      this._stopDormantPoll()
+      this._unregisterScreenOnListener()
+      this._stopGeofenceMonitor()
+      this._stopHeartbeat()
+      this._ensureForegroundService()
+      this._reconnectGuard = 0
+
+      // 读取序列号（异步，不阻塞）
+      readSerialNumber(this.deviceId, 5000).then(sn => {
+        this.serialNumber = sn
+        this._resolveDeviceName(sn)
+        this._loadConfigForDevice(sn)
+        this._syncConfigToDevice()
+      }).catch(() => {})
+
+      // 注册 notify（延迟 800ms，给 GATT 服务就绪时间）
+      const targetId = this.deviceId
+      setTimeout(async () => {
+        if (this.deviceId !== targetId || !this.connected) return
+        try {
+          await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
+          notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
+          this._fetchBatteryLevel(targetId).catch(() => {})
+        } catch (_) {}
+      }, 800)
+
+      uni.showToast({ title: '已自动连接', icon: 'success', duration: 1500 })
     },
 
     /**
@@ -1439,57 +1511,7 @@ export const useBleStore = defineStore('ble', {
       // ★ 二次锁检查（getBluetoothAdapterState 是异步的，期间锁可能失效）
       if (!guardValid()) guardAbort('最终适配器确认后锁失效')
 
-      this.connected = true
-      this.lastDeviceId = this.deviceId
-
-      // ★ v3.6: 恢复设备名（重连路径没有 connect() 调用，需手动恢复）
-      if (!this.deviceName) {
-        const macClean = this.deviceId.replace(/:/g, '')
-        const macSuffix = macClean.slice(-6).toUpperCase()
-        this.deviceName = 'KeyGo-' + macSuffix
-      }
-
-      // ★ v3.6: 重连成功 → 重置为 idle（覆盖 tryReconnect 和 _scheduleReconnect 两条路径）
-      this.reconnectMode = 'idle'
-      this.reconnectAttempt = 0
-      this.reconnectNextDelay = 0
-      // ★ v3.23: 重连成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳 + 亮屏监听器
-      this._stopDormantPoll()
-      this._unregisterScreenOnListener()
-      this._stopGeofenceMonitor()
-      this._stopHeartbeat()
-      // ★ v3.17: 连接成功后启动前台服务（Android 保活）
-      this._ensureForegroundService()
-      this._reconnectGuard = 0   /* ★ v3.16-P1: 连接成功，所有旧重连会话已失效，归零重置
-                                  *   之前的 _reconnectGuard 值（如 5, 42, 28347...）
-                                  *   在日志中会让人误以为是 bug，其实它们已经没用了，
-                                  *   归零后视觉干净，下次断连从 1 开始递增 */
-
-      // ★ v3.11-fix4: 重连成功后恢复本地设备名称
-      //   不能依赖内存中的 serialNumber（disconnect 会清空），必须主动读取
-      readSerialNumber(this.deviceId, 5000).then(sn => {
-        this.serialNumber = sn
-        this._resolveDeviceName(sn)
-        // ★ v3.12: 重连成功后加载设备专属配置 + 下发到固件（per-phone 个性化）
-        this._loadConfigForDevice(sn)
-        this._syncConfigToDevice()
-      }).catch(err => {
-        console.log('[Store] 重连后读取序列号失败（名称/配置恢复跳过）:', err?.message || err)
-      })
-
-      // 恢复 Notify
-      await new Promise(r => setTimeout(r, 800))
-      await notifyBLECharacteristicValueChange(
-        this.deviceId,
-        BLE_CONFIG.serviceUUID,
-        BLE_CONFIG.statusCharUUID,
-        true
-      )
-      // ★ v3.14: 启用电池电量 Notify + 非阻塞读取初始电量
-      notifyBLECharacteristicValueChange(
-        this.deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
-      ).catch(() => {})
-      this._fetchBatteryLevel(this.deviceId).catch(() => {})
+      this._finalizeConnection(this.deviceId)
     },
 
     /**

@@ -747,6 +747,11 @@ export function registerScreenOnReceiver(callback) {
       return false
     }
 
+    // ★ fix: 用 Application Context 注册，使接收器在后台 Activity 被销毁后仍能在亮屏时触发。
+    //   动态注册的 BroadcastReceiver 随注册 Context 的生命周期：用 Activity 注册则 Activity
+    //   被后台销毁后接收器失效，导致亮屏无反应；Application Context 与进程同生命周期。
+    const ctx = (typeof main.getApplicationContext === 'function') ? main.getApplicationContext() : main
+
     const Intent = plus.android.importClass('android.content.Intent')
     const IntentFilter = plus.android.importClass('android.content.IntentFilter')
 
@@ -774,7 +779,7 @@ export function registerScreenOnReceiver(callback) {
     const filter = new IntentFilter()
     filter.addAction(Intent.ACTION_SCREEN_ON)
     filter.addAction(Intent.ACTION_USER_PRESENT)
-    main.registerReceiver(_screenReceiver, filter)
+    ctx.registerReceiver(_screenReceiver, filter)
 
     console.log(`${TAG} 📱 亮屏广播已注册 (SCREEN_ON + USER_PRESENT)`)
     return true
@@ -794,7 +799,8 @@ export function unregisterScreenOnReceiver() {
   try {
     const main = getMainActivity()
     if (main) {
-      main.unregisterReceiver(_screenReceiver)
+      const ctx = (typeof main.getApplicationContext === 'function') ? main.getApplicationContext() : main
+      ctx.unregisterReceiver(_screenReceiver)
     }
   } catch (e) {
     // 可能已被系统注销
