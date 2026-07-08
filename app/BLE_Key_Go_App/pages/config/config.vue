@@ -57,6 +57,7 @@
       <view class="geofence-info" v-if="bleStore.autoReconnectMode === 'speed' && parkingInfo">
         <view class="geofence-row">
           <text class="geofence-label">📍 停车位置</text>
+          <text class="geofence-dist-inline" v-if="geofenceDistText">{{ geofenceDistText }}</text>
           <text class="geofence-action" @tap="handleUpdateParking">更新</text>
         </view>
         <view class="geofence-row">
@@ -336,7 +337,8 @@ const autoLockClass = computed(() => {
 })
 
 const parkingInfo = computed(() => {
-  const p = getParkingLocation()
+  // ★ v3.25-fix: 优先读取 bleStore.parkingLocation（响应式，手动更新后自动刷新）
+  const p = bleStore.parkingLocation || getParkingLocation()
   if (!p) return null
   const d = new Date(p.savedAt)
   return {
@@ -347,6 +349,14 @@ const parkingInfo = computed(() => {
     lng: p.lng,
     savedAt: p.savedAt,
   }
+})
+
+// ★ v3.25-fix: 实时距离小字显示（读取 bleStore 响应式 geofenceDistance）
+const geofenceDistText = computed(() => {
+  if (bleStore.geofenceDistance < 0) return ''
+  if (bleStore.geofenceDistance < 10) return '· 已到达 (<10m)'
+  if (bleStore.geofenceDistance < 1000) return `· ${bleStore.geofenceDistance}m`
+  return `· ${(bleStore.geofenceDistance / 1000).toFixed(1)}km`
 })
 
 async function handleUpdateParking() {
@@ -770,6 +780,13 @@ async function handleSubmit() {
   font-size: 24rpx;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.geofence-dist-inline {
+  font-size: 20rpx;
+  color: var(--accent);
+  flex: 1;
+  margin-left: 8rpx;
 }
 
 .geofence-val {

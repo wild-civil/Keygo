@@ -61,6 +61,7 @@ import {
   stopGeofenceMonitor,
   isGeofenceMonitorActive,
   getLastKnownPosition,  // ★ v3.24: watchPosition 缓存坐标（同步，消除竞态）
+  getDistanceToParking,  // ★ v3.25: 同步获取缓存距离（UI 初始化用）
 } from '@/utils/geofence.js'
 
 export const useBleStore = defineStore('ble', {
@@ -2563,10 +2564,38 @@ export const useBleStore = defineStore('ble', {
 
     /**
      * 获取当前位置并保存为停车点
+     *
+     * ★ v3.25-fix: 快速响应策略
+     *   1. 先用粗精度 GPS 快速获取（~2-5s），立即保存并通知用户
+     *   2. 后台异步用高精度 GPS 静默更新（无需用户等待）
+     *   3. 粗精度失败时降级为高精度 GPS（15s 兜底）
+     *
      * @returns {Promise<boolean>} 是否保存成功
      */
     async _saveParkingNow() {
-      console.log('[Store] 🅿️ 正在获取停车位置...')
+      console.log('[Store] 🅿️ 正在获取停车位置（快速模式）...')
+      // ★ 第一步：粗精度快速获取（不阻塞用户操作）
+      const coarsePos = await getCurrentPositionCoarse()
+      if (coarsePos) {
+        saveParkingLocation(coarsePos.lat, coarsePos.lng)
+        this.parkingLocation = getParkingLocation()
+        console.log(`[Store] 🅿️ ⚡ 粗精度位置已记录: ${coarsePos.lat.toFixed(6)}, ${coarsePos.lng.toFixed(6)}`)
+        uni.showToast({ title: '停车位置已记录 ✅', icon: 'success', duration: 1500 })
+
+        // ★ 第二步：后台静默用高精度 GPS 更新（不阻塞、不显示 toast）
+        getCurrentPosition().then(highPos => {
+          if (highPos && !isNaN(highPos.accuracy) && highPos.accuracy < 30) {
+            // 仅当精度明显更好时才更新（粗精度一般 50-200m）
+            saveParkingLocation(highPos.lat, highPos.lng)
+            this.parkingLocation = getParkingLocation()
+            console.log(`[Store] 🅿️ ✨ 高精度位置已静默更新 (精度 ±${Math.round(highPos.accuracy)}m)`)
+          }
+        })
+        return true
+      }
+
+      // ★ 降级：粗精度不可用 → 高精度 GPS（15s，用户需等待但确保拿到位置）
+      console.log('[Store] 🅿️ 粗精度不可用，降级为高精度 GPS...')
       const pos = await getCurrentPosition()
       if (!pos) {
         console.warn('[Store] ⚠ 停车位置获取失败（GPS 不可用）')
@@ -2574,6 +2603,7 @@ export const useBleStore = defineStore('ble', {
         return false
       }
       saveParkingLocation(pos.lat, pos.lng)
+      this.parkingLocation = getParkingLocation()
       console.log(`[Store] 🅿️ 停车位置已记录: ${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`)
       uni.showToast({ title: '停车位置已记录 ✅', icon: 'success', duration: 1500 })
       return true
@@ -2585,7 +2615,12 @@ export const useBleStore = defineStore('ble', {
      */
     async saveCurrentParkingLocation() {
       if (this.autoReconnectMode !== 'speed') return false
-      return await this._saveParkingNow()
+      const ok = await this._saveParkingNow()
+      // ★ v3.25-fix: 保存成功后同步更新响应式状态，确保 config/index 页面实时刷新
+      if (ok) {
+        this.parkingLocation = getParkingLocation()
+      }
+      return ok
     },
 
     /**
@@ -2616,6 +2651,14 @@ export const useBleStore = defineStore('ble', {
 
       // ★ v3.25: 同步更新 UI 用的停车位置
       this.parkingLocation = parking
+
+      // ★ v3.25-fix: 立即用缓存坐标初始化距离（避免 "获取中..." 长时间显示）
+      const cachedDist = getDistanceToParking()
+      if (cachedDist && cachedDist.distance >= 0) {
+        this.geofenceDistance = cachedDist.distance
+        this.geofenceDistanceAge = cachedDist.age
+        console.log(`[Store] ⚡ 缓存距离已初始化: ${cachedDist.distance}m (${(cachedDist.age / 1000).toFixed(0)}s 前)`)
+      }
 
       // 重置触发标记（新一轮监控）
       this._geofenceBleTriggered = false
