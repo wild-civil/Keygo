@@ -2,7 +2,8 @@
  * ★ 开发调试面板状态 / 日志收集（v3.27-dev）
  *
  * 仅用于开发期真机调试，正式发版前建议移除 App.vue 中的 <DebugFloatPanel /> 引用。
- * 面板状态持久化：用户点「×」关闭后，重启 App 也不会再出现（除非手动清除 storage）。
+ * 关闭逻辑：点「×」仅在本轮 App 运行期间隐藏（仅本次会话），杀进程重开即恢复显示，
+ * 不写 storage，避免调试期误关后永久消失。后期移除面板时本文件可整体删除。
  */
 import { reactive } from 'vue'
 
@@ -27,17 +28,9 @@ export const debugState = reactive({
   pluginStatus: null,
 })
 
-const STORAGE_KEY = 'keygo_debug_panel_closed'
-
-/** 初始化：读取用户是否关闭过 */
+/** 初始化（无需读取 storage：关闭仅当前会话有效，重开即恢复） */
 export function initDebugPanel() {
-  try {
-    const saved = uni.getStorageSync(STORAGE_KEY)
-    if (saved === true || saved === 'true' || saved === 1) {
-      debugState.closed = true
-      debugState.visible = false
-    }
-  } catch (_) {}
+  // 仅本次会话关闭，故不读取历史关闭状态
 }
 
 /** 展开/收起 */
@@ -46,22 +39,16 @@ export function toggleDebugPanel() {
   debugState.visible = !debugState.visible
 }
 
-/** 用户关闭面板（持久化） */
+/** 用户关闭面板（仅本次会话，不持久化） */
 export function closeDebugPanel() {
   debugState.closed = true
   debugState.visible = false
-  try {
-    uni.setStorageSync(STORAGE_KEY, true)
-  } catch (_) {}
 }
 
-/** 重新打开（调试用） */
+/** 重新打开（调试用，当前会话内） */
 export function openDebugPanel() {
   debugState.closed = false
   debugState.visible = true
-  try {
-    uni.removeStorageSync(STORAGE_KEY)
-  } catch (_) {}
 }
 
 /** 添加一条日志 */

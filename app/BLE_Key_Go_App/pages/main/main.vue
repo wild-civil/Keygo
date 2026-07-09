@@ -43,6 +43,9 @@
         <text class="tabbar-text">{{ tab.name }}</text>
       </view>
     </view>
+
+    <!-- ★ v3.27-dev: 开发期调试浮动面板（真机不连电脑也能看状态） -->
+    <DebugFloatPanel />
   </view>
 </template>
 
@@ -55,6 +58,7 @@ import IndexPage from '@/pages/index/index.vue'
 import ControlPage from '@/pages/control/control.vue'
 import ConfigPage from '@/pages/config/config.vue'
 import LoginPage from '@/pages/login/login.vue'
+import DebugFloatPanel from '@/components/DebugFloatPanel.vue'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()

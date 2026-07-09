@@ -1,13 +1,13 @@
 <template>
   <!-- 仅开发期显示，用户关闭后从 DOM 移除 -->
-  <view v-if="!state.closed" class="debug-float-root" :class="{ collapsed: !state.visible }">
+  <view v-if="!state.closed" class="debug-float-root" :class="{ collapsed: !state.visible }" :style="rootStyle" @touchstart.stop="onDragStart" @touchmove.stop="onDragMove" @touchend.stop="onDragEnd">
     <!-- 展开面板 -->
     <view v-if="state.visible" class="debug-panel">
       <view class="debug-header">
         <text class="debug-title">DEV 调试</text>
         <view class="debug-actions">
-          <text class="debug-btn" @click="toggle">收起</text>
-          <text class="debug-btn debug-btn-close" @click="close">×</text>
+          <text class="debug-btn" @click="onToggle">收起</text>
+          <text class="debug-btn debug-btn-close" @click="onClose">×</text>
         </view>
       </view>
 
@@ -64,14 +64,14 @@
     </view>
 
     <!-- 收起态：小圆点 -->
-    <view v-else class="debug-bubble" @click="toggle">
+    <view v-else class="debug-bubble" @click="onToggle">
       <text class="debug-bubble-text">DEV</text>
     </view>
   </view>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import { useBleStore } from '@/stores/ble.js'
 import {
   debugState,
@@ -81,10 +81,51 @@ import {
 } from '@/utils/debug-panel.js'
 
 const state = debugState
-const bleStore = useBleStore()
 
-const toggle = () => toggleDebugPanel()
-const close = () => closeDebugPanel()
+// ★ 拖动支持：用 transform 平移，跨端最稳（无需读取 DOM 尺寸，避免 App 端 getBoundingClientRect 不可用导致拖不动）
+const pos = reactive({ tx: 0, ty: 0 })
+const rootStyle = computed(() => ({
+  transform: `translate(${pos.tx}px, ${pos.ty}px)`,
+}))
+let _dragging = false
+let _moved = false
+let _sx = 0, _sy = 0
+function _clamp(v, min, max) { return Math.max(min, Math.min(v, max)) }
+function onDragStart(e) {
+  const t = e.touches && e.touches[0]
+  if (!t) return
+  _sx = t.clientX; _sy = t.clientY
+  _dragging = true
+  _moved = false
+}
+function onDragMove(e) {
+  if (!_dragging) return
+  const t = e.touches && e.touches[0]
+  if (!t) return
+  const dx = t.clientX - _sx, dy = t.clientY - _sy
+  if (Math.abs(dx) > 4 || Math.abs(dy) > 4) _moved = true
+  const info = uni.getSystemInfoSync()
+  const maxX = info.windowWidth - 40
+  const maxY = info.windowHeight - 40
+  pos.tx = _clamp(pos.tx + dx, -maxX, maxX)
+  pos.ty = _clamp(pos.ty + dy, -maxY, maxY)
+  _sx = t.clientX; _sy = t.clientY
+}
+function onDragEnd() { _dragging = false }
+// 拖动后松手误触「收起/关闭」的防护
+function onToggle() { if (_moved) { _moved = false; return } toggleDebugPanel() }
+function onClose() { if (_moved) { _moved = false; return } closeDebugPanel() }
+
+let bleStore
+try {
+  bleStore = useBleStore()
+  console.log('[DebugPanel] useBleStore 成功')
+} catch (e) {
+  console.log('[DebugPanel] useBleStore 抛错:', e && e.message)
+}
+if (!bleStore) bleStore = {}
+
+// ★ 切换/关闭见上方 onToggle / onClose（带拖动误触防护）
 
 const fgActive = computed(() => state.foregroundStatus?.active || bleStore._foregroundServiceActive || false)
 const fgText = computed(() => {
@@ -133,7 +174,7 @@ const lastReconnectClass = computed(() => {
 }
 
 .debug-panel {
-  background: rgba(0, 0, 0, 0.82);
+  background: rgba(18, 20, 38, 0.6);
   border: 1rpx solid rgba(255, 255, 255, 0.18);
   border-radius: 16rpx;
   padding: 16rpx;
@@ -240,7 +281,7 @@ const lastReconnectClass = computed(() => {
   width: 84rpx;
   height: 84rpx;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(18, 20, 38, 0.55);
   border: 1rpx solid rgba(255, 221, 0, 0.45);
   display: flex;
   align-items: center;

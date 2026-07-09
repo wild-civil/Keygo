@@ -2,15 +2,12 @@
   <view class="app-root">
     <router-view />
     <CustomTabBar />
-    <!-- ★ v3.27-dev: 开发期调试浮动面板（真机不连电脑也能看状态） -->
-    <DebugFloatPanel />
   </view>
 </template>
 
 <script setup>
 import { onLaunch, onShow, onHide } from '@dcloudio/uni-app'
 import CustomTabBar from '@/components/CustomTabBar.vue'
-import DebugFloatPanel from '@/components/DebugFloatPanel.vue'
 import { useThemeStore } from '@/stores/theme.js'
 import { useBleStore } from '@/stores/ble.js'
 import { initBluetooth } from '@/utils/ble.js'
