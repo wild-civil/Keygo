@@ -3,8 +3,9 @@
     "configurations" : [
         {
             "customPlaygroundType" : "local",
+            "localRepoPath" : "",
             "packageName" : "",
-            "playground" : "custom",
+            "playground" : "standard",
             "type" : "uni-app:app-android"
         },
         {

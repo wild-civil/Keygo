@@ -134,12 +134,20 @@ onShow(() => {
   themeStore.applyNavBar()
 })
 
+// ★ v3.27: 根据命令错误码返回诚实文案（不再把所有失败都说成"请检查连接"）
+function cmdErrorMsg(err) {
+  const code = err && err.code
+  if (code === 'NO_CONN') return '未连接，请先连接设备'
+  if (code === 'TOO_FAST') return '操作太频繁，请稍候'
+  return '发送失败，请检查连接'
+}
+
 async function handleUnlock() {
   try {
     await bleStore.unlock()
     toast.success('解锁成功')
-  } catch {
-    toast.error('发送失败，请检查连接')
+  } catch (err) {
+    toast.error(cmdErrorMsg(err))
   }
 }
 
@@ -147,8 +155,8 @@ async function handleLock() {
   try {
     await bleStore.lock()
     toast.success('锁车成功')
-  } catch {
-    toast.error('发送失败，请检查连接')
+  } catch (err) {
+    toast.error(cmdErrorMsg(err))
   }
 }
 
@@ -156,8 +164,8 @@ async function handleTrunk() {
   try {
     await bleStore.trunk()
     toast.success('后备箱已触发')
-  } catch {
-    toast.error('发送失败')
+  } catch (err) {
+    toast.error(cmdErrorMsg(err))
   }
 }
 

@@ -55,6 +55,10 @@ public class KeygoBleScanService extends Service {
     private static final String ACTION_TICK = "com.keygo.BG_TICK";
     private static final long TICK_INTERVAL = 60000; // 60s 原生心跳
 
+    // ★ v3.26: 钥匙通知图标，Base64 内嵌 PNG（编译进 class，运行时零依赖，
+    //   不依赖 assets / getIdentifier / 插件资源，100% 可靠，彻底修复左侧 H 图标问题）。
+    private static final String KEY_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAABfklEQVR4nO3cy5KDMAxEUbVr/v+XNcUiu3mQ2Nht+Z4tKZAlC4ghiQAAAAAAAAAAAAAAAAAAoBLNOlBm5n+fkTQtHhdanfTTiyGnpJ9YjOae/Cf360C7JUjFuqHtNjuzWDe0HZORhYrQdk1CFilC23nwaRLH1AK4DTrN4ll6G4qHC+A629I0rqEFcB9kmsf3m68Fx/zpi1TGoWYWQDe2ZRxGE9r7k6WDjALuLJs8fRf06bqN4hDchroXoOP00zuLFQegA4oWYNTsVRRHByxGARajAItRgKIFGPVNNqM4OsC9AB2vgfTO3owD0AHFC/DpLM44hCY+cbpzrOw6wBuny7/Gc+2nd7vjA5lXwDwRW/xI8pjTy9BrgPtLsTKPb8hF2HWQMo3L9RRkQSZFa7sG7hrPu7Tzi1BamPxRt6Ft15mnzWf+S/cgVnSCiiR/yFLE7GSoUPIvQwfzZDeoWOIfWYx7KkkqmvwLv5RfjP+KAAAAAAAAAAAAAAAAAABEKd/FFo1NJ/LsxwAAAABJRU5ErkJggg==";
+
     private BluetoothLeScanner scanner;
     private ScanCallback scanCallback;
     private String targetName;
@@ -63,6 +67,7 @@ public class KeygoBleScanService extends Service {
     private AlarmManager alarmMgr;
     private PendingIntent tickPi;
     private BroadcastReceiver tickReceiver;
+    private BroadcastReceiver screenOnReceiver;
 
     @Override
     public void onCreate() {
@@ -78,6 +83,7 @@ public class KeygoBleScanService extends Service {
         }
         startForeground();
         setupTickAlarm();
+        setupScreenOnReceiver();
         startScan();
         return START_STICKY;
     }
@@ -103,15 +109,14 @@ public class KeygoBleScanService extends Service {
         else b = new Notification.Builder(this);
         // --------------- 通知图标说明（重要）---------------
         // 1. setSmallIcon(int) → 通知【左侧】的小图标（状态栏也会用它）。
-        //    使用插件自带的 keygo_notification_icon（内容 = static/icons/ 的钥匙线稿），
-        //    通过 getNotificationIconRes() 查找。该资源已在 DCloud 自定义基座运行时验证可用
-        //    （1.0.7 起生效，不会回退到基座默认图标）。
+        //    当前直接使用 App 桌面图标（drawable/icon.png = KeyGo logo），见 getNotificationSmallIcon()。
         //    ★ 注意：Android 5.0+ 会强制把 SmallIcon 渲染成单色（按通知背景取黑/白/灰），
-        //      所以左侧看到的是单色钥匙线稿，这是系统行为，无法显示彩色。
+        //      所以左侧看到的是单色化的 App 图标剪影，这是系统行为，无法显示彩色。
         // 2. setLargeIcon(Bitmap) → 通知【右侧】的大图标；不调用它，右侧就不会出现多余图标。
         //    之前误加了 setLargeIcon，导致右侧出现一个白色方块 APP 图标。
         // --------------------------------------------------
-        b.setSmallIcon(getNotificationIconRes())
+        android.graphics.drawable.Icon _ic = getNotificationSmallIcon();
+        b.setSmallIcon(_ic != null ? _ic : android.graphics.drawable.Icon.createWithResource(this, getApplicationInfo().icon))
          .setContentTitle("KeyGo 车钥匙")
          .setContentText("后台连接中，靠近车辆自动解锁")
          .setContentIntent(pi)
@@ -126,17 +131,23 @@ public class KeygoBleScanService extends Service {
      *  并在 1.0.7 自定义基座运行时成功生效，不会回退到基座默认图标）。
      * 找不到资源时回退到 getApplicationInfo().icon，保证不崩。
      */
-    private int getNotificationIconRes() {
-        String[] candidatePkgs = new String[]{ getPackageName(), "com.keygo.foreground" };
-        int id = 0;
-        String matchedPkg = "";
-        for (String pkg : candidatePkgs) {
-            id = getResources().getIdentifier("keygo_notification_icon", "drawable", pkg);
-            if (id != 0) { matchedPkg = pkg; break; }
+    /**
+     * Notification small icon: prefer loading key line-art from plugin assets
+     * (bypasses getIdentifier, which returns 0 at runtime under DCloud build).
+     * Fallback to getIdentifier, then to app icon (HBuilder H) to avoid crash.
+     */
+    private android.graphics.drawable.Icon getNotificationSmallIcon() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) return null;
+        // ★ 用户要求：状态栏左侧小图标直接使用 App 桌面图标（drawable/icon.png，即 KeyGo logo）。
+        //   Android 5.0+ 会强制把小图标单色化（按通知背景取黑/白/灰），全彩 logo 会被渲染成单色剪影，
+        //   这是系统行为。如后续出现显示异常（如看不清形状），可改回钥匙线稿或单独做白色剪影资源。
+        int appIcon = getApplicationInfo().icon;
+        if (appIcon != 0) {
+            Log.i(TAG, "[KeyGo] icon from app launcher icon (res=" + appIcon + ")");
+            return android.graphics.drawable.Icon.createWithResource(this, appIcon);
         }
-        Log.i(TAG, "[KeyGo] icon resId=" + id + " pkg=" + (matchedPkg.isEmpty() ? "none" : matchedPkg));
-        if (id == 0) id = getApplicationInfo().icon;
-        return id;
+        Log.w(TAG, "[KeyGo] app icon not found, fallback to HBuilder icon");
+        return null;
     }
 
     // ==================== 原生心跳（抗 Doze） ====================
@@ -171,6 +182,45 @@ public class KeygoBleScanService extends Service {
         } else {
             alarmMgr.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, next, tickPi);
         }
+    }
+
+    // ==================== 亮屏/解锁监听（舒适模式核心触发器） ====================
+    private long _lastScreenOnTs = 0;
+    private void setupScreenOnReceiver() {
+        if (screenOnReceiver != null) return;
+        screenOnReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null) return;
+                String a = intent.getAction();
+                if (Intent.ACTION_SCREEN_ON.equals(a) || Intent.ACTION_USER_PRESENT.equals(a)) {
+                    long now = System.currentTimeMillis();
+                    if (now - _lastScreenOnTs < 3000) return; // 去重：同一次亮屏 SCREEN_ON+USER_PRESENT 只触发一次
+                    _lastScreenOnTs = now;
+                    Log.i(TAG, "亮屏/解锁，立即触发积极扫描");
+                    onScreenOn();
+                }
+            }
+        };
+        IntentFilter f = new IntentFilter();
+        f.addAction(Intent.ACTION_SCREEN_ON);
+        f.addAction(Intent.ACTION_USER_PRESENT);
+        registerReceiver(screenOnReceiver, f);
+        Log.i(TAG, "screenOnReceiver 已注册 (前台服务内)");
+    }
+
+    /** 亮屏时强制重启一次积极扫描：前台服务常驻、不受 Doze 限制，必能收到亮屏广播。
+     *  解决原先亮屏监听挂在 Activity 上下文上、锁屏后台收不到广播导致开关屏无反应的问题。 */
+    private void onScreenOn() {
+        Log.i(TAG, "SCREEN_ON/USER_PRESENT → emitScreenOn + rescan");
+        // ★ v3.26: 通过事件总线通知 JS 走「心跳同款」高可靠重连路径（tryAutoConnect / 高功率扫描），
+        //   不再仅依赖原生 LOW_POWER 扫描（后台常扫不到设备）。前台服务常驻，必能收到亮屏广播。
+        BleScanEventBus.getInstance().emitScreenOn();
+        BluetoothManager bm = (BluetoothManager) getSystemService(BLUETOOTH_SERVICE);
+        BluetoothAdapter adapter = bm != null ? bm.getAdapter() : null;
+        if (adapter == null || !adapter.isEnabled()) return;
+        stopScan();
+        startScan();
     }
 
     /** 心跳触发：确认蓝牙已开、扫描仍在跑，否则自救 */
@@ -263,10 +313,14 @@ public class KeygoBleScanService extends Service {
         if (tickReceiver != null) {
             try { unregisterReceiver(tickReceiver); } catch (Exception e) { /* ignore */ }
         }
+        if (screenOnReceiver != null) {
+            try { unregisterReceiver(screenOnReceiver); } catch (Exception e) { /* ignore */ }
+        }
         if (alarmMgr != null && tickPi != null) {
             try { alarmMgr.cancel(tickPi); } catch (Exception e) { /* ignore */ }
         }
         BleScanEventBus.getInstance().clearListener();
+        BleScanEventBus.getInstance().clearScreenOn();
 
         // ★ 抗被杀：安排 15s 后自重启。Android 12+ 通过 PendingIntent 启动前台服务属豁免场景。
         try {

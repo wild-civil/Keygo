@@ -37,6 +37,7 @@ if errorlevel 1 (echo JAR FAILED & exit /b 1)
 echo === 4. 组装 aar 内容 ===
 copy "%ROOT%\_build\source\src\main\AndroidManifest.xml" "%STAGE%\AndroidManifest.xml" >nul
 xcopy "%ROOT%\_build\source\src\main\res" "%STAGE%\res\" /E /I /Y >nul
+xcopy "%ROOT%\_build\source\src\main\assets" "%STAGE%\assets\" /E /I /Y >nul
 echo. > "%STAGE%\R.txt"
 
 echo === 5. 生成 keygo-foreground.aar ===

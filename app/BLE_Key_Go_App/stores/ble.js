@@ -49,6 +49,14 @@ import {
   stopNativeBackgroundScan,
 } from '@/utils/foreground-service.js'
 
+// ★ v3.27-dev: 调试面板日志（仅开发期使用）
+import {
+  setDebugScreenOn,
+  setDebugDeviceFound,
+  setDebugReconnectResult,
+  setDebugForegroundStatus,
+} from '@/utils/debug-panel.js'
+
 // ★ v3.23 Phase 3: 地理围栏工具
 import {
   GEOFENCE_RADIUS,
@@ -97,6 +105,13 @@ export const useBleStore = defineStore('ble', {
     kalmanR: 15,                    // ★ 与 CH582M / ESP32C3 默认 kf_r=15.0 一致
     manualCooldown: false,        // 手动命令冷却中
     manualCooldownMs: 8000,      // ★ v3.7 / v3.12: 初始默认值（设备连接后由 FF02 同步覆盖，设备级参数）
+
+    // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
+    _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
+    _lastCmdAt: 0,               // 上次命令发起时间戳(ms)，用于最小间隔节流
+    _configWriteBusy: false,      // 配置写下发在途（串行化，避免并发写特征值）
+    _modeDebounceTimer: null,     // 模式切换防抖定时器
+
 
 
     // 连接历史（自动重连用）
@@ -348,12 +363,36 @@ export const useBleStore = defineStore('ble', {
           const chunk = arrayBufferToString(res.value)
           this._notifyBuffer += chunk
 
-          if (this._notifyTimer) clearTimeout(this._notifyTimer)
-          this._notifyTimer = setTimeout(() => {
+          // ★ v3.28: 状态显示提速——完整包立即解析，不再无脑等 200ms 分包防抖。
+          //   背景：CH582M 固件命令处理后已立即 KeyGo_NotifyStatus() 上报
+          //         （见 peripheral.c CHAR3 命令分支），设备是"秒回"的；
+          //         但此前 APP 每次收到 Notify 都固定 setTimeout(200) 拼包才刷新 UI，
+          //         造成用户感觉"设备快、APP 慢"（最坏 +200ms 延迟）。
+          //   原理：状态包是 JSON，完整时必以 '}' 结尾；多包粘连为 "}{...}"，末尾仍是 '}'。
+          //         → 缓冲区 trim 后以 '}' 结尾 = 已收全：立即 flush 解析（单包场景 ~0ms 刷新）。
+          //         → 否则视为分包未收全：保留 200ms 兜底定时器，等待后续分包拼接。
+          //
+          //   【备份】v3.27 及之前的原实现（无条件 200ms 防抖）：
+          //     if (this._notifyTimer) clearTimeout(this._notifyTimer)
+          //     this._notifyTimer = setTimeout(() => {
+          //       const fullData = this._notifyBuffer
+          //       this._notifyBuffer = ''
+          //       this._handleStatusNotify(fullData)
+          //     }, 200)
+          if (this._notifyTimer) { clearTimeout(this._notifyTimer); this._notifyTimer = null }
+          if (this._notifyBuffer.trim().endsWith('}')) {
+            // 完整包 → 立即解析刷新 UI（不再等 200ms）
             const fullData = this._notifyBuffer
             this._notifyBuffer = ''
             this._handleStatusNotify(fullData)
-          }, 200)
+          } else {
+            // 半包（分包未收全）→ 200ms 兜底，等后续分包到齐再解析
+            this._notifyTimer = setTimeout(() => {
+              const fullData = this._notifyBuffer
+              this._notifyBuffer = ''
+              this._handleStatusNotify(fullData)
+            }, 200)
+          }
         }
 
         // ★ v3.14: 电池电量 Notify (0x2A19) — 固件电压变化时实时推送
@@ -593,6 +632,7 @@ export const useBleStore = defineStore('ble', {
           this._foregroundServiceActive = true
           this._foregroundServiceNative = true
           this._foregroundServiceFailCount = 0
+          setDebugForegroundStatus(true, true, knownId)
           console.log('[Store] 🔒 原生前台服务 + 后台扫描已启动（已知设备:', knownId, '）')
           return
         }
@@ -604,6 +644,7 @@ export const useBleStore = defineStore('ble', {
         if (result === true) {
           this._foregroundServiceActive = true
           this._foregroundServiceFailCount = 0
+          setDebugForegroundStatus(true, false)
           console.log('[Store] 🔒 前台服务已启动（纯 JS 回退，通知栏应可见）')
         } else {
           this._foregroundServiceFailCount++
@@ -671,6 +712,7 @@ export const useBleStore = defineStore('ble', {
       if (this._lastNativeReconnect && now - this._lastNativeReconnect < 8000) return
       this._lastNativeReconnect = now
       console.log('[Store] 🔑 原生后台扫描发现已知设备，触发重连')
+      setDebugDeviceFound(dev)
       this.tryAutoConnect()
     },
 
@@ -1269,6 +1311,7 @@ export const useBleStore = defineStore('ble', {
       this._lastScreenOnTrigger = now
       const label = action === 'android.intent.action.USER_PRESENT' ? '\u5df2\u89e3\u9501' : '\u5c4f\u5e55\u4eae\u8d77'
       console.log(`[Store] \ud83d\udcf1 \u4eae\u5c4f\u89e6\u53d1\uff08${label}\uff09\u2192 \u542f\u52a8\u626b\u63cf`)
+      setDebugScreenOn(label)
       this._doScreenOnScan()
     },
 
@@ -1305,6 +1348,7 @@ export const useBleStore = defineStore('ble', {
               this._repairing = false
               if (this._screenOnScanGuard !== guard || this.connected) return
               console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u8fde\u63a5\u6210\u529f\uff0c\u521d\u59cb\u5316...')
+              setDebugReconnectResult(true, '\u4eae\u5c4f\u8fde\u63a5\u6210\u529f')
               this.connected = true
               this.lastDeviceId = targetId
               if (!this.deviceName) {
@@ -1344,6 +1388,7 @@ export const useBleStore = defineStore('ble', {
               connectRetries++
               connecting = false
               console.log(`[Store] \ud83d\udcf1 \u8fde\u63a5\u5931\u8d25 (${connectRetries}/2):`, err?.message || err)
+              setDebugReconnectResult(false, `\u4eae\u5c4f\u8fde\u63a5\u5931\u8d25: ${err?.message || err || 'unknown'}`)
             })
           }
         }
@@ -1398,6 +1443,7 @@ export const useBleStore = defineStore('ble', {
           this.reconnectAttempt = 0
           this.reconnectNextDelay = 0
           console.log('[Store] 重连成功！')
+          setDebugReconnectResult(true, '\u5b9a\u65f6\u91cd\u8fde\u6210\u529f')
         } catch (e) {
           // ★ v3.6-fixD2: SESSION_EXPIRED → 蓝牙关断穿透，立即中止，不重试
           if (e && e.message === 'SESSION_EXPIRED') {
@@ -1406,6 +1452,7 @@ export const useBleStore = defineStore('ble', {
           }
 
           this.reconnectAttempt++
+          setDebugReconnectResult(false, `定时重连失败 #${this.reconnectAttempt}: ${e?.message || e || 'unknown'}`)
 
           // ★ v3.6: 如果是蓝牙关闭导致的失败，_doReconnect 已将 mode 设为 paused
           //   不再调度下一轮，等待适配器状态变化事件来恢复
@@ -1806,6 +1853,13 @@ export const useBleStore = defineStore('ble', {
      */
     async _syncConfigToDevice() {
       if (!this.deviceId || !this.connected) return
+      // ★ v3.27: 串行化——若已有配置写下发在途，跳过本次（最终态由调用方保证再触发一次）。
+      //   防止模式切换/提交配置并发写同一特征值导致 GATT busy 丢命令。
+      if (this._configWriteBusy) {
+        console.log('[Store] 配置写下发中，跳过本次 _syncConfigToDevice')
+        return
+      }
+      this._configWriteBusy = true
       try {
         await sendConfig(this.deviceId, {
           unlock: this.unlockThreshold,
@@ -1822,6 +1876,8 @@ export const useBleStore = defineStore('ble', {
         console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ' interval=' + this.rssiReadPeriodMs + ' kr=' + this.kalmanR + ' autolock=' + (this.autoReconnectMode === 'manual' ? 0 : 1) + ')')
       } catch (e) {
         console.warn('[Store] 配置下发失败:', e?.message || e)
+      } finally {
+        this._configWriteBusy = false
       }
     },
 
@@ -2487,42 +2543,82 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.27: 开启手动命令冷却（固件端主导保护 + 手机端 RSSI 转发阻断）
+     *   真正的保护链在固件端：sendCommand("UNLOCK") → KeyGo_HandleCommand()：
+     *     ① g_manualCooldown=1 (cooldownMs 内跳过状态机)
+     *     ② g_unlockCounter/g_lockCounter=0 (清零防止累积计数触发自动操作)
+     *   ★ v3.7: 冷却时长使用设备同步值 manualCooldownMs，非硬编码 8s
+     */
+    _beginManualCooldown() {
+      this.manualCooldown = true
+      if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
+      this._cooldownTimer = setTimeout(() => {
+        this.manualCooldown = false
+        this._cooldownTimer = null
+        console.log(`[Store] RSSI 状态机冷却结束 (${this.manualCooldownMs}ms)`)
+      }, this.manualCooldownMs)
+    },
+
+    /**
+     * ★ v3.27: 带节流 + 串行化的命令发送助手
+     *
+     *   - 未连接 → 抛 {code:'NO_CONN'}，由 UI 提示「未连接，请先连接设备」
+     *   - 正在发送另一命令 → 抛 {code:'TOO_FAST'}，提示「操作太频繁，请稍候」
+     *   - 连续命令间隔 < CMD_MIN_INTERVAL_MS → 自动等待到最小间隔（真正的防连发）
+     *   - 真正 GATT/连接错误 → 抛 {code:'FAIL'}，提示「发送失败，请检查连接」
+     *
+     * @param {string} command 命令字符串
+     * @param {{cooldown?: boolean}} [opts] cooldown=true 时发起前开启手动冷却（UNLOCK/LOCK 用）
+     */
+    async _throttledCommand(command, opts = {}) {
+      const CMD_MIN_INTERVAL_MS = 600
+      if (!this.connected) {
+        const e = new Error('未连接设备')
+        e.code = 'NO_CONN'
+        throw e
+      }
+      if (this._cmdBusy) {
+        const e = new Error('操作太频繁，请稍候')
+        e.code = 'TOO_FAST'
+        throw e
+      }
+      // ★ 立即置位，避免并发 await 期间被重复放行
+      this._cmdBusy = true
+      try {
+        const wait = CMD_MIN_INTERVAL_MS - (Date.now() - this._lastCmdAt)
+        if (wait > 0) await new Promise(r => setTimeout(r, wait))
+        if (opts.cooldown) this._beginManualCooldown()  // 固件端主导保护（UNLOCK/LOCK）
+        await this.sendCommand(command)
+        this._lastCmdAt = Date.now()
+      } catch (err) {
+        if (err && err.code) throw err  // 已知业务错误，直接透传
+        const e = new Error('发送失败，请检查连接')
+        e.code = 'FAIL'
+        e.cause = err
+        throw e
+      } finally {
+        this._cmdBusy = false
+      }
+    },
+
+    /**
      * 车辆控制命令（连接即授权）
      */
     async unlock() {
-      if (!this.connected) throw new Error('未连接设备')
-      // ★ v3.6-fixH: manualCooldown 阻断手机→设备 RSSI 转发（备用通道，非主力）
-      //   真正的保护链在固件端：sendCommand("UNLOCK") → KeyGo_HandleCommand():
-      //     ① g_manualCooldown=1 (cooldownMs 内跳过状态机)
-      //     ② g_unlockCounter/g_lockCounter=0 (清零防止累积计数触发自动操作)
-      // ★ v3.7: 冷却时长使用设备同步值 manualCooldownMs，非硬编码 8s
-      this.manualCooldown = true
-      if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
-      this._cooldownTimer = setTimeout(() => {
-        this.manualCooldown = false
-        this._cooldownTimer = null
-        console.log(`[Store] RSSI 状态机冷却结束 (${this.manualCooldownMs}ms)`)
-      }, this.manualCooldownMs)
-      await this.sendCommand('UNLOCK')
+      await this._throttledCommand('UNLOCK', { cooldown: true })
     },
 
     async lock() {
-      if (!this.connected) throw new Error('未连接设备')
-      // ★ v3.6-fixH: 同上，固件端主导保护
-      // ★ v3.7: 使用设备同步的 manualCooldownMs
-      this.manualCooldown = true
-      if (this._cooldownTimer) clearTimeout(this._cooldownTimer)
-      this._cooldownTimer = setTimeout(() => {
-        this.manualCooldown = false
-        this._cooldownTimer = null
-        console.log(`[Store] RSSI 状态机冷却结束 (${this.manualCooldownMs}ms)`)
-      }, this.manualCooldownMs)
-      await this.sendCommand('LOCK')
+      await this._throttledCommand('LOCK', { cooldown: true })
     },
 
     async trunk() {
-      if (!this.connected) throw new Error('未连接设备')
-      await this.sendCommand('TRUNK')
+      if (!this.connected) {
+        const e = new Error('未连接设备')
+        e.code = 'NO_CONN'
+        throw e
+      }
+      await this._throttledCommand('TRUNK')
     },
 
     /**
@@ -2572,6 +2668,10 @@ export const useBleStore = defineStore('ble', {
     /**
      * 设置智能重连模式
      *
+     * ★ v3.27: 防抖——快速连点（comfort→speed→manual）时只保留最后一次生效，
+     *   避免并发触发极速模式 GPS/围栏异步任务（孤儿任务）与并发写 BLE 配置。
+     *   UI 高亮立即更新（选中态即时反馈），重量级副作用延迟 350ms 在 _applyModeSideEffects 执行。
+     *
      * @param {'comfort' | 'manual' | 'speed'} mode
      */
     setAutoReconnectMode(mode) {
@@ -2580,14 +2680,28 @@ export const useBleStore = defineStore('ble', {
         return
       }
       const prev = this.autoReconnectMode
+      // ★ 立即更新 UI 高亮（卡片选中态即时反馈）
       this.autoReconnectMode = mode
-
       // 持久化
       try {
         uni.setStorageSync('ble_auto_reconnect_mode', mode)
       } catch {}
 
-      console.log(`[Store] 智能重连模式: ${prev} → ${mode}`)
+      // ★ 防抖：覆盖上一次的待执行副作用，仅最后一次真正执行
+      if (this._modeDebounceTimer) clearTimeout(this._modeDebounceTimer)
+      this._modeDebounceTimer = setTimeout(() => {
+        this._modeDebounceTimer = null
+        this._applyModeSideEffects(mode, prev)
+      }, 350)
+    },
+
+    /**
+     * ★ v3.27: 模式切换的副作用（由 setAutoReconnectMode 防抖后调用）
+     * @param {'comfort' | 'manual' | 'speed'} mode 目标模式
+     * @param {'comfort' | 'manual' | 'speed'} prev 切换前的模式（用于判断是否需要清理极速资源）
+     */
+    _applyModeSideEffects(mode, prev) {
+      console.log(`[Store] 智能重连模式生效: ${prev} → ${mode}`)
 
       // ★ 模式切换时的行为调整
       if (mode === 'comfort') {
@@ -2633,6 +2747,12 @@ export const useBleStore = defineStore('ble', {
      *   - 启动前台服务 + 后台 GPS 围栏监控
      */
     _onSpeedModeEnter() {
+      // ★ v3.27: 可取消守卫——若已进入极速模式的异步流程中途被切走
+      //   （防抖取消 / 用户切到别的模式），直接中止，避免残留 GPS/围栏任务停在错误状态
+      if (this.autoReconnectMode !== 'speed') {
+        console.log('[Store] ⚡ _onSpeedModeEnter 已取消（当前模式非 speed）')
+        return
+      }
       this._stopDormantPoll()
       if (this._reconnectTimer) {
         clearTimeout(this._reconnectTimer)
@@ -2663,6 +2783,11 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.25: 无历史停车位置（首次使用极速模式）→ 降级用当前 GPS
       console.log('[Store] ⚡ 无已有停车位置，使用当前 GPS 作为初始围栏中心...')
       this._saveParkingNow().then((saved) => {
+        // ★ v3.27: 异步回调里再校验一次，避免在途 GPS 完成后已被切走仍启动围栏
+        if (this.autoReconnectMode !== 'speed') {
+          console.log('[Store] ⚡ 停车位置保存完成，但已切离极速模式，放弃启动围栏')
+          return
+        }
         if (saved) {
           this.parkingLocation = getParkingLocation()
           if (!this.connected) {

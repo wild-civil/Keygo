@@ -2,12 +2,15 @@
   <view class="app-root">
     <router-view />
     <CustomTabBar />
+    <!-- ★ v3.27-dev: 开发期调试浮动面板（真机不连电脑也能看状态） -->
+    <DebugFloatPanel />
   </view>
 </template>
 
 <script setup>
 import { onLaunch, onShow, onHide } from '@dcloudio/uni-app'
 import CustomTabBar from '@/components/CustomTabBar.vue'
+import DebugFloatPanel from '@/components/DebugFloatPanel.vue'
 import { useThemeStore } from '@/stores/theme.js'
 import { useBleStore } from '@/stores/ble.js'
 import { initBluetooth } from '@/utils/ble.js'
@@ -21,6 +24,7 @@ import {
   openBatteryOptimizationSettings,
   getRomGuidance,
 } from '@/utils/power-saver.js'
+import { initDebugPanel, setDebugPluginStatus } from '@/utils/debug-panel.js'
 
 const themeStore = useThemeStore()
 const bleStore = useBleStore()
@@ -139,11 +143,15 @@ function checkBatteryOptimization() {
 onLaunch(() => {
   console.log('[BLE-KeyGo] App launched')
 
+  // ★ v3.27-dev: 初始化开发调试面板（用户可关闭，关闭状态持久化）
+  initDebugPanel()
+
   // ★ 初始化主题（读取持久化 → 检测系统主题 → 监听变化 → 启动 auto 轮询）
   themeStore.init()
 
   // ★ v3.17.1: 诊断前台服务插件状态
   const pluginStatus = getPluginStatus()
+  setDebugPluginStatus(pluginStatus)
   console.log('[App] 前台服务插件状态:', JSON.stringify(pluginStatus))
   // ★ v3.24-fix: 明确告知原生后台扫描是否可用（自定义基座未打包插件时为 false）
   if (pluginStatus.pluginLoaded) {

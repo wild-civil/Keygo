@@ -48,7 +48,7 @@ public class KeygoForegroundModule extends UniModule {
      *     用户亮屏/解锁 → 系统唤醒 App → WebView 解冻 → keepAlive 回调送达 JS → 触发扫描。
      */
     private UniJSCallback screenOnCallback;
-    private BroadcastReceiver screenOnReceiver;
+    private boolean screenOnForwardReady = false;
 
     /**
      * 通过反射兼容不同 uni-app SDK 版本的上下文字段：
@@ -88,6 +88,16 @@ public class KeygoForegroundModule extends UniModule {
                 pushEvent("devicefound", mac, name, rssi, null);
             }
         });
+        // ★ v3.26: 服务（重）启动时，若曾请求亮屏转发，重新挂上屏幕亮事件监听
+        if (screenOnForwardReady) {
+            BleScanEventBus.getInstance().setScreenOnListener(new BleScanEventBus.OnScreenOnListener() {
+                @Override
+                public void onScreenOn() {
+                    Log.i(TAG, "亮屏事件(经总线) → 推送 JS");
+                    pushScreenOn();
+                }
+            });
+        }
 
         String targetName = (options != null) ? options.optString("targetName", "") : "";
         Context ctx = getAppContext();
@@ -141,35 +151,24 @@ public class KeygoForegroundModule extends UniModule {
     public void startScreenOnReceiver(UniJSCallback callback) {
         Log.i(TAG, "startScreenOnReceiver");
         this.screenOnCallback = callback;
-        if (screenOnReceiver != null) {
-            Log.i(TAG, "screenOnReceiver 已注册，仅更新回调");
+        if (screenOnForwardReady) {
+            Log.i(TAG, "screenOnReceiver 转发已就绪，仅更新回调");
             return;
         }
-        Context ctx = getAppContext();
-        if (ctx == null) { Log.e(TAG, "getAppContext 失败，无法注册亮屏监听"); return; }
-        try {
-            screenOnReceiver = new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    if (intent == null) return;
-                    String action = intent.getAction();
-                    if (Intent.ACTION_SCREEN_ON.equals(action)
-                            || Intent.ACTION_USER_PRESENT.equals(action)) {
-                        Log.i(TAG, "亮屏事件: " + action);
-                        pushScreenOn();
-                    }
-                }
-            };
-            IntentFilter f = new IntentFilter();
-            f.addAction(Intent.ACTION_SCREEN_ON);
-            f.addAction(Intent.ACTION_USER_PRESENT);
-            ctx.registerReceiver(screenOnReceiver, f);
-            Log.i(TAG, "screenOnReceiver 已注册 (SCREEN_ON + USER_PRESENT)");
-        } catch (Exception e) {
-            Log.e(TAG, "startScreenOnReceiver 失败", e);
-            screenOnReceiver = null;
-            this.screenOnCallback = null;
-        }
+        // ★ v3.26: 真正的亮屏广播接收器已移到前台服务 KeygoBleScanService（常驻、不受 Doze /
+        //   Activity 销毁影响，100% 收到广播）。本方法只把“亮屏→JS”的转发挂到事件总线：
+        //   前台服务收到 SCREEN_ON/USER_PRESENT → BleScanEventBus.emitScreenOn()
+        //   → 此处 listener → pushScreenOn() → JS 触发 tryAutoConnect（与心跳同路径，高可靠）。
+        //   不再在 Activity 上下文注册 BroadcastReceiver（后台 Activity 被回收 → 收不到广播）。
+        screenOnForwardReady = true;
+        BleScanEventBus.getInstance().setScreenOnListener(new BleScanEventBus.OnScreenOnListener() {
+            @Override
+            public void onScreenOn() {
+                Log.i(TAG, "亮屏事件(经总线) → 推送 JS");
+                pushScreenOn();
+            }
+        });
+        Log.i(TAG, "screenOnReceiver 转发已就绪（实际接收器在前台服务内）");
     }
 
     /**
@@ -178,15 +177,8 @@ public class KeygoForegroundModule extends UniModule {
     @UniJSMethod(uiThread = false)
     public void stopScreenOnReceiver(UniJSCallback callback) {
         Log.i(TAG, "stopScreenOnReceiver");
-        Context ctx = getAppContext();
-        if (screenOnReceiver != null && ctx != null) {
-            try {
-                ctx.unregisterReceiver(screenOnReceiver);
-            } catch (Exception e) {
-                Log.w(TAG, "注销 screenOnReceiver 失败（可能已注销）", e);
-            }
-            screenOnReceiver = null;
-        }
+        BleScanEventBus.getInstance().clearScreenOn();
+        screenOnForwardReady = false;
         this.screenOnCallback = null;
         if (callback != null) callback.invoke(new JSONObject());
     }
