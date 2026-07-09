@@ -73,6 +73,32 @@ import {
   getDistanceToParking,  // ★ v3.25: 同步获取缓存距离（UI 初始化用）
 } from '@/utils/geofence.js'
 
+// ★ v3.27-fix ②: GATT 写串行锁（模块级单例）
+//   所有写特征值操作（手动命令 / 配置下发）都经由本 Promise 链排队，保证
+//   「上一条 write 的 onCharacteristicWrite 回调真正落地后，再发下一条」。
+//   这是从源头消除 Android BLE GATT_BUSY(status 11) / write failed 的关键：
+//   此前 _cmdBusy(守护手动命令) 与 _configWriteBusy(守护配置下发) 互不协调，
+//   可能并发抢同一 GATT 通道，导致后发的写被系统/固件拒掉，误报「发送失败」。
+let _writeChain = Promise.resolve()
+function enqueueWrite(writeFn) {
+  // 无论上一条写成功或失败，都接着执行下一条（不把错误传进链里阻断后续排队）
+  const run = _writeChain.then(() => writeFn(), () => writeFn())
+  _writeChain = run.then(() => {}, () => {})  // 吞掉异常，避免 unhandled rejection
+  return run
+}
+
+// ★ v3.27-fix ①: 判定是否为 GATT 瞬时写冲突（连接其实未断，仅本次写被拒）
+//   涵盖 Android 常见表现：GATT_BUSY(status 11)、系统 errCode 10008、以及
+//   含 'write fail' / 'already' / 'busy' / 'gatt' 字样的 errMsg。
+//   这类不该提示「检查连接」，而应提示「指令冲突，请重试」。
+//   注意：明确是连接断开(not connected / disconnect / closed)的，不算瞬时冲突，
+//   保持 FAIL「发送失败，请检查连接」以如实反映连接问题。
+function _isGattConflict(err) {
+  const msg = (err && (err.errMsg || err.message || String(err) || '')).toLowerCase()
+  if (/not connected|disconnect|connection.*closed|closed/.test(msg)) return false
+  return /gatt\s*busy|status\s*11|10008|write\s*fail|already|busy|gatt/.test(msg)
+}
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -1861,7 +1887,8 @@ export const useBleStore = defineStore('ble', {
       }
       this._configWriteBusy = true
       try {
-        await sendConfig(this.deviceId, {
+        // ★ v3.27-fix ②: 经写队列串行化，与手动命令共用同一 GATT 通道，避免并发写冲突
+        await enqueueWrite(() => sendConfig(this.deviceId, {
           unlock: this.unlockThreshold,
           lock: this.lockThreshold,
           uc: this.unlockCountRequired,
@@ -1872,7 +1899,7 @@ export const useBleStore = defineStore('ble', {
           // ★ v3.24: 手动模式下发 autolock=0 禁用固件 RSSI 自动锁；其余模式 autolock=1 启用
           autolock: this.autoReconnectMode === 'manual' ? 0 : 1,
           // ★ v3.12: cooldown_ms 不下发 — 设备级参数，由固件 DataFlash 管理
-        })
+        }))
         console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ' interval=' + this.rssiReadPeriodMs + ' kr=' + this.kalmanR + ' autolock=' + (this.autoReconnectMode === 'manual' ? 0 : 1) + ')')
       } catch (e) {
         console.warn('[Store] 配置下发失败:', e?.message || e)
@@ -2539,7 +2566,9 @@ export const useBleStore = defineStore('ble', {
 
     async sendCommand(command) {
       if (!this.deviceId) throw new Error('未连接设备')
-      await sendCommand(this.deviceId, command)
+      // ★ v3.27-fix ②: 经模块级写队列串行化，保证「上一条 write 落地后再发下一条」，
+      //   避免与配置下发并发抢 GATT 通道（从源头降低 GATT_BUSY / write failed）。
+      await enqueueWrite(() => sendCommand(this.deviceId, command))
     },
 
     /**
@@ -2564,8 +2593,9 @@ export const useBleStore = defineStore('ble', {
      *
      *   - 未连接 → 抛 {code:'NO_CONN'}，由 UI 提示「未连接，请先连接设备」
      *   - 正在发送另一命令 → 抛 {code:'TOO_FAST'}，提示「操作太频繁，请稍候」
-     *   - 连续命令间隔 < CMD_MIN_INTERVAL_MS → 自动等待到最小间隔（真正的防连发）
-     *   - 真正 GATT/连接错误 → 抛 {code:'FAIL'}，提示「发送失败，请检查连接」
+   *   - 连续命令间隔 < CMD_MIN_INTERVAL_MS → 自动等待到最小间隔（真正的防连发）
+   *   - GATT 瞬时写冲突(如 GATT_BUSY/10008) → 抛 {code:'CONFLICT'}，提示「指令冲突，请重试」
+   *   - 真正连接/其他错误 → 抛 {code:'FAIL'}，提示「发送失败，请检查连接」
      *
      * @param {string} command 命令字符串
      * @param {{cooldown?: boolean}} [opts] cooldown=true 时发起前开启手动冷却（UNLOCK/LOCK 用）
@@ -2592,6 +2622,15 @@ export const useBleStore = defineStore('ble', {
         this._lastCmdAt = Date.now()
       } catch (err) {
         if (err && err.code) throw err  // 已知业务错误，直接透传
+        // ★ v3.27-fix ①: 区分 GATT 瞬时写冲突 —— 连接其实没断，仅本次写被拒
+        //   （快速连点 / 配置下发与命令并发时易触发）。这类不该提示「检查连接」，
+        //   改为提示「指令冲突，请重试」，避免用户误以为蓝牙断了。
+        if (_isGattConflict(err)) {
+          const e = new Error('指令冲突，请重试')
+          e.code = 'CONFLICT'
+          e.cause = err
+          throw e
+        }
         const e = new Error('发送失败，请检查连接')
         e.code = 'FAIL'
         e.cause = err

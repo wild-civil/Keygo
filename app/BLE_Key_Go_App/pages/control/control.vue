@@ -139,6 +139,7 @@ function cmdErrorMsg(err) {
   const code = err && err.code
   if (code === 'NO_CONN') return '未连接，请先连接设备'
   if (code === 'TOO_FAST') return '操作太频繁，请稍候'
+  if (code === 'CONFLICT') return '指令冲突，请重试'
   return '发送失败，请检查连接'
 }
 
