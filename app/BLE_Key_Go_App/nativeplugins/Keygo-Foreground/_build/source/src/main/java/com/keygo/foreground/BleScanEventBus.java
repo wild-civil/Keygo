@@ -7,20 +7,20 @@ package com.keygo.foreground;
  * KeygoForegroundModule 注册 listener，再通过 UniJSCallback 把结果推给 JS。
  * 二者同进程，静态单例即可共享。
  *
- * v3.26: 新增亮屏事件（OnScreenOnListener）。前台服务收到 SCREEN_ON/USER_PRESENT 后
+ * v3.26: 新增亮屏事件（OnScreenEventListener）。前台服务收到 SCREEN_ON/USER_PRESENT 后
  *   emitScreenOn()，经 UniModule 推给 JS 触发 tryAutoConnect（与心跳一致的高可靠路径）。
  */
 public class BleScanEventBus {
     private static BleScanEventBus instance;
     private OnDeviceFoundListener listener;
-    private OnScreenOnListener screenOnListener;
+    private OnScreenEventListener screenEventListener;
 
     public interface OnDeviceFoundListener {
         void onDeviceFound(String mac, String name, int rssi);
     }
 
-    public interface OnScreenOnListener {
-        void onScreenOn();
+    public interface OnScreenEventListener {
+        void onScreenEvent(String type);
     }
 
     public static synchronized BleScanEventBus getInstance() {
@@ -31,8 +31,8 @@ public class BleScanEventBus {
     public void setListener(OnDeviceFoundListener l) { this.listener = l; }
     public void clearListener() { this.listener = null; }
 
-    public void setScreenOnListener(OnScreenOnListener l) { this.screenOnListener = l; }
-    public void clearScreenOn() { this.screenOnListener = null; }
+    public void setScreenEventListener(OnScreenEventListener l) { this.screenEventListener = l; }
+    public void clearScreenOn() { this.screenEventListener = null; }
 
     public void emit(String mac, String name, int rssi) {
         if (listener != null) {
@@ -44,13 +44,16 @@ public class BleScanEventBus {
         }
     }
 
-    public void emitScreenOn() {
-        if (screenOnListener != null) {
+    public void emitScreenEvent(String type) {
+        if (screenEventListener != null) {
             try {
-                screenOnListener.onScreenOn();
+                screenEventListener.onScreenEvent(type);
             } catch (Exception e) {
-                android.util.Log.w("KeygoBleScanSvc", "emitScreenOn fail", e);
+                android.util.Log.w("KeygoBleScanSvc", "emitScreenEvent fail", e);
             }
         }
     }
+
+    /** @deprecated 兼容旧调用点 */
+    public void emitScreenOn() { emitScreenEvent("screen_on"); }
 }

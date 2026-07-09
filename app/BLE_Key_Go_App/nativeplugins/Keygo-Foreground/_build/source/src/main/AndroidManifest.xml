@@ -4,6 +4,7 @@
     <!-- 前台服务及 connectedDevice 类型所需权限（app 级已在 manifest.json 声明，这里补全以保证插件独立可编） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Android 12+ BLE 运行时权限（KeygoBleScanService 扫描需要 BLUETOOTH_SCAN，enable 需要 BLUETOOTH_CONNECT） -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />

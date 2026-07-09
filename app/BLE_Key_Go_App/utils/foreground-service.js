@@ -757,9 +757,14 @@ export function registerScreenOnReceiver(callback) {
     try {
       plugin.startScreenOnReceiver((res) => {
         if (!res || typeof res !== 'object') return
-        if (res.event === 'screenon' && _nativeScreenOnCallback) {
-          try { _nativeScreenOnCallback('android.intent.action.SCREEN_ON') }
-          catch (e) { console.error(`${TAG} 📱 原生亮屏回调异常:`, e?.message || e) }
+        if (res.event === 'screen' && _nativeScreenOnCallback) {
+          const type = res.type || 'unknown'
+          const action = type === 'screen_off' ? 'android.intent.action.SCREEN_OFF'
+                       : type === 'user_present' ? 'android.intent.action.USER_PRESENT'
+                       : 'android.intent.action.SCREEN_ON'
+          addDebugLog(`原生屏幕事件: ${type}`)
+          try { _nativeScreenOnCallback(action) }
+          catch (e) { console.error(`${TAG} 📱 原生屏幕回调异常:`, e?.message || e) }
         }
       })
       console.log(`${TAG} 📱 亮屏广播已注册（原生插件，SCREEN_ON + USER_PRESENT）`)
@@ -798,9 +803,10 @@ export function registerScreenOnReceiver(callback) {
       {
         onReceive: function(ctx, intent) {
           const action = intent.getAction()
-          if (action === Intent.ACTION_SCREEN_ON || action === Intent.ACTION_USER_PRESENT) {
-            const label = action === Intent.ACTION_USER_PRESENT ? 'USER_PRESENT(已解锁)' : 'SCREEN_ON'
-            console.log(`${TAG} 📱 亮屏事件: ${label}`)
+          if (action === Intent.ACTION_SCREEN_ON || action === Intent.ACTION.USER_PRESENT || action === Intent.ACTION.SCREEN_OFF) {
+            const label = action === Intent.ACTION_SCREEN_OFF ? 'SCREEN_OFF(屏幕关闭)' : action === Intent.ACTION_USER_PRESENT ? 'USER_PRESENT(已解锁)' : 'SCREEN_ON'
+            console.log(`${TAG} 📱 屏幕事件: ${label}`)
+            addDebugLog(`JS回退屏幕事件: ${label}`)
             if (_screenCallback) {
               try {
                 _screenCallback(action)
@@ -817,6 +823,7 @@ export function registerScreenOnReceiver(callback) {
     const filter = new IntentFilter()
     filter.addAction(Intent.ACTION_SCREEN_ON)
     filter.addAction(Intent.ACTION_USER_PRESENT)
+    filter.addAction(Intent.ACTION_SCREEN_OFF)
     ctx.registerReceiver(_screenReceiver, filter)
 
     console.log(`${TAG} 📱 亮屏广播已注册 (SCREEN_ON + USER_PRESENT)`)

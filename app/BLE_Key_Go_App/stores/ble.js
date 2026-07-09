@@ -51,11 +51,16 @@ import {
 
 // ★ v3.27-dev: 调试面板日志（仅开发期使用）
 import {
+  addDebugLog,
   setDebugScreenOn,
   setDebugDeviceFound,
   setDebugReconnectResult,
   setDebugForegroundStatus,
 } from '@/utils/debug-panel.js'
+
+// ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
+//   先禁用原生分支，走纯 JS 兜底；定位原生根因后改回 false。
+const __DISABLE_NATIVE_FG = false
 
 // ★ v3.23 Phase 3: 地理围栏工具
 import {
@@ -639,21 +644,31 @@ export const useBleStore = defineStore('ble', {
      * 幂等 + 重试限制：成功后不再重试，失败最多尝试 3 次
      */
     async _ensureForegroundService() {
-      if (this._foregroundServiceActive) return
+      addDebugLog(`_ensureForegroundService: mode=${this.autoReconnectMode} deviceId='${this.deviceId || ''}' storage='${uni.getStorageSync('ble_device_id') || ''}'`)
+      if (this._foregroundServiceActive) {
+        addDebugLog('_ensureForegroundService: 已在运行，跳过')
+        return
+      }
       // ★ v3.24: 手动模式不启动任何保活/后台扫描（完全由用户手动控制）
-      if (this.autoReconnectMode === 'manual') return
+      if (this.autoReconnectMode === 'manual') {
+        addDebugLog('_ensureForegroundService: 手动模式，跳过', 'info')
+        return
+      }
       if (this._foregroundServiceFailCount >= 3) {
         // 已经失败 3 次，放弃
+        addDebugLog('_ensureForegroundService: 已失败3次，放弃', 'warning')
         return
       }
 
       const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
+      addDebugLog(`_ensureForegroundService: knownId='${knownId || '(空)'}'`, knownId ? 'success' : 'warning')
 
       // ★ v3.24: 优先原生插件（真正后台重连的核心）
       //   原生层 KeygoBleScanService 在原生 Android 进程常驻，锁屏/Doze 下仍能 BLE 扫描，
       //   扫到已知设备即回调唤醒 JS 触发 tryAutoConnect。这是纯 JS 方案做不到的。
-      if (knownId) {
+      if (knownId && !__DISABLE_NATIVE_FG) {
         const started = startNativeBackgroundScan('', (dev) => this._onNativeDeviceFound(dev))
+        addDebugLog(`_ensureForegroundService: 原生启动返回 started=${started}`)
         if (started) {
           this._foregroundServiceActive = true
           this._foregroundServiceNative = true
@@ -662,11 +677,14 @@ export const useBleStore = defineStore('ble', {
           console.log('[Store] 🔒 原生前台服务 + 后台扫描已启动（已知设备:', knownId, '）')
           return
         }
+      } else {
+        addDebugLog(`_ensureForegroundService: 原生分支${__DISABLE_NATIVE_FG ? '已禁用(止血)' : 'knownId为空'} → 走纯JS前台服务`, 'warning')
       }
 
       // ★ 回退：纯 JS（无已知设备 或 插件不可用）
       try {
         const result = await startForegroundService()
+        addDebugLog(`_ensureForegroundService: 纯JS前台服务 result=${result}`, result ? 'success' : 'error')
         if (result === true) {
           this._foregroundServiceActive = true
           this._foregroundServiceFailCount = 0
@@ -1322,6 +1340,11 @@ export const useBleStore = defineStore('ble', {
     },
 
     _onScreenOn(action) {
+      if (action === 'android.intent.action.SCREEN_OFF') {
+        console.log('[Store] 📱 屏幕关闭事件（不触发重连）')
+        setDebugScreenOn('屏幕关闭')
+        return
+      }
       if (this.autoReconnectMode !== 'comfort') return
       if (!this._shouldAutoReconnect()) return
       const now = Date.now()

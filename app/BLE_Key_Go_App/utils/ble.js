@@ -124,6 +124,12 @@ function requestAndroidPermissions() {
       perms.push('android.permission.BLUETOOTH_SCAN')
       perms.push('android.permission.BLUETOOTH_CONNECT')
     }
+    // ★ 修复：Android 13+(API33+) 前台服务必须运行时授予 POST_NOTIFICATIONS，否则 startForeground()
+    //   抛异常(已被 onStartCommand 的 try/catch 吞掉) → 前台服务未真正前台化 → 后台/Doze 下被系统回收 →
+    //   锁屏广播接收器随 Service 一并注销，导致收不到 SCREEN_ON/OFF/USER_PRESENT（DEV 面板无屏幕事件）。
+    if (apiLevel >= 33) {
+      perms.push('android.permission.POST_NOTIFICATIONS')
+    }
 
     console.log('[BLE] 准备申请 Android 权限:', JSON.stringify(perms), 'API=' + apiLevel)
 

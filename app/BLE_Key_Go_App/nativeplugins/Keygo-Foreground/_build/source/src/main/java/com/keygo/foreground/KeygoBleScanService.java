@@ -81,10 +81,11 @@ public class KeygoBleScanService extends Service {
         if (intent != null && intent.hasExtra("targetName")) {
             targetName = intent.getStringExtra("targetName");
         }
-        startForeground();
-        setupTickAlarm();
-        setupScreenOnReceiver();
-        startScan();
+        // 防御：任意一步抛异常都不应杀死进程（否则锁屏后无法后台重连 / 抓不到屏幕事件）
+        try { setupScreenOnReceiver(); } catch (Throwable t) { Log.e(TAG, "setupScreenOnReceiver 失败", t); }
+        try { setupTickAlarm(); } catch (Throwable t) { Log.e(TAG, "setupTickAlarm 失败", t); }
+        try { startForeground(); } catch (Throwable t) { Log.e(TAG, "startForeground 失败(可能缺 POST_NOTIFICATIONS)", t); }
+        try { startScan(); } catch (Throwable t) { Log.e(TAG, "startScan 失败", t); }
         return START_STICKY;
     }
 
@@ -165,6 +166,7 @@ public class KeygoBleScanService extends Service {
             public void onReceive(Context context, Intent intent) {
                 if (ACTION_TICK.equals(intent.getAction())) {
                     Log.i(TAG, "心跳 tick");
+                    scheduleNextTick(TICK_INTERVAL); // 重新调度下一次，形成周期心跳
                     ensureScanRunning();
                 }
             }
@@ -178,7 +180,7 @@ public class KeygoBleScanService extends Service {
         if (alarmMgr == null || tickPi == null) return;
         long next = SystemClock.elapsedRealtime() + delayMs;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            alarmMgr.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, next, tickPi);
+            alarmMgr.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, next, tickPi); // 非精确：免精确闹钟权限，仍能在 Doze 下唤醒
         } else {
             alarmMgr.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, next, tickPi);
         }
@@ -193,11 +195,19 @@ public class KeygoBleScanService extends Service {
             public void onReceive(Context context, Intent intent) {
                 if (intent == null) return;
                 String a = intent.getAction();
+                // ★ SCREEN_OFF 与 SCREEN_ON/USER_PRESENT 平级，避免互相嵌套导致死代码
+                if (Intent.ACTION_SCREEN_OFF.equals(a)) {
+                    Log.i(TAG, "SCREEN_OFF -> emit screen_off");
+                    BleScanEventBus.getInstance().emitScreenEvent("screen_off");
+                    return; // 屏幕熄灭，无需触发扫描/重连
+                }
                 if (Intent.ACTION_SCREEN_ON.equals(a) || Intent.ACTION_USER_PRESENT.equals(a)) {
                     long now = System.currentTimeMillis();
                     if (now - _lastScreenOnTs < 3000) return; // 去重：同一次亮屏 SCREEN_ON+USER_PRESENT 只触发一次
                     _lastScreenOnTs = now;
                     Log.i(TAG, "亮屏/解锁，立即触发积极扫描");
+                    BleScanEventBus.getInstance().emitScreenEvent(
+                        Intent.ACTION_USER_PRESENT.equals(a) ? "user_present" : "screen_on");
                     onScreenOn();
                 }
             }
@@ -205,6 +215,7 @@ public class KeygoBleScanService extends Service {
         IntentFilter f = new IntentFilter();
         f.addAction(Intent.ACTION_SCREEN_ON);
         f.addAction(Intent.ACTION_USER_PRESENT);
+        f.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(screenOnReceiver, f);
         Log.i(TAG, "screenOnReceiver 已注册 (前台服务内)");
     }

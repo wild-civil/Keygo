@@ -90,11 +90,11 @@ public class KeygoForegroundModule extends UniModule {
         });
         // ★ v3.26: 服务（重）启动时，若曾请求亮屏转发，重新挂上屏幕亮事件监听
         if (screenOnForwardReady) {
-            BleScanEventBus.getInstance().setScreenOnListener(new BleScanEventBus.OnScreenOnListener() {
+            BleScanEventBus.getInstance().setScreenEventListener(new BleScanEventBus.OnScreenEventListener() {
                 @Override
-                public void onScreenOn() {
+                public void onScreenEvent(String type) {
                     Log.i(TAG, "亮屏事件(经总线) → 推送 JS");
-                    pushScreenOn();
+                    pushScreenEvent(type);
                 }
             });
         }
@@ -144,7 +144,7 @@ public class KeygoForegroundModule extends UniModule {
      * 在 ApplicationContext 上注册标准 BroadcastReceiver，监听：
      *   - Intent.ACTION_SCREEN_ON    屏幕亮起
      *   - Intent.ACTION_USER_PRESENT 用户已解锁（有锁屏密码时更精准）
-     * 收到后通过 keepAlive 回调向 JS 推送 { event: 'screenon' }。
+     * 收到后通过 keepAlive 回调向 JS 推送 { event: 'screen', type: 'screen_on'|'screen_off'|'user_present' }。
      * 接收器为原生实现，不受 WebView 冻结影响（修复 JS plus.android.implements 后台失效）。
      */
     @UniJSMethod(uiThread = false)
@@ -161,11 +161,11 @@ public class KeygoForegroundModule extends UniModule {
         //   → 此处 listener → pushScreenOn() → JS 触发 tryAutoConnect（与心跳同路径，高可靠）。
         //   不再在 Activity 上下文注册 BroadcastReceiver（后台 Activity 被回收 → 收不到广播）。
         screenOnForwardReady = true;
-        BleScanEventBus.getInstance().setScreenOnListener(new BleScanEventBus.OnScreenOnListener() {
+        BleScanEventBus.getInstance().setScreenEventListener(new BleScanEventBus.OnScreenEventListener() {
             @Override
-            public void onScreenOn() {
+            public void onScreenEvent(String type) {
                 Log.i(TAG, "亮屏事件(经总线) → 推送 JS");
-                pushScreenOn();
+                pushScreenEvent(type);
             }
         });
         Log.i(TAG, "screenOnReceiver 转发已就绪（实际接收器在前台服务内）");
@@ -183,15 +183,18 @@ public class KeygoForegroundModule extends UniModule {
         if (callback != null) callback.invoke(new JSONObject());
     }
 
-    /** 推送亮屏事件给 JS（keepAlive 保证可多次调用） */
-    private void pushScreenOn() {
+    /** 推送屏幕事件给 JS（keepAlive 保证可多次调用）。type: screen_on / screen_off / user_present */
+    private void pushScreenEvent(String type) {
         if (screenOnCallback == null) return;
         JSONObject o = new JSONObject();
-        try { o.put("event", "screenon"); } catch (Exception e) { /* ignore */ }
+        try {
+            o.put("event", "screen");
+            o.put("type", type == null ? "unknown" : type);
+        } catch (Exception e) { /* ignore */ }
         try {
             screenOnCallback.invokeAndKeepAlive(o);
         } catch (Exception e) {
-            Log.w(TAG, "pushScreenOn 失败（JS 回调可能已失效）", e);
+            Log.w(TAG, "pushScreenEvent 失败（JS 回调可能已失效）", e);
         }
     }
 

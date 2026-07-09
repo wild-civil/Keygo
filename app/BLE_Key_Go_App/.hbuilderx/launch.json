@@ -5,7 +5,7 @@
             "customPlaygroundType" : "local",
             "localRepoPath" : "",
             "packageName" : "",
-            "playground" : "standard",
+            "playground" : "custom",
             "type" : "uni-app:app-android"
         },
         {
