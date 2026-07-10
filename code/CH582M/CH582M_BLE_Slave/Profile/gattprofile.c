@@ -139,7 +139,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar3UUID},
-        GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE,  // ★ 命令通道：须加密链路（已配对）才能写（Phase0/1 门控）
+        GATT_PERMIT_WRITE,  // ★ 明文写：无头设备 Just-Works 配对无 MITM 防护，安全边界改由应用层 BIND/AUTH(HMAC) 承担，去掉加密门控以杜绝强制配对弹窗
         0,
         simpleProfileChar3
     },
@@ -158,7 +158,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar4UUID},
-        GATT_PERMIT_READ | GATT_PERMIT_ENCRYPT_READ,   // ★ 序列号（=MAC）须加密链路才能读，防泄露设备身份
+        GATT_PERMIT_READ,   // ★ 明文读：序列号(=MAC)用于 KDF 派生 bindKey，需随时可读以便恢复绑定态；安全由应用层 AUTH 保证，去掉加密门控
         0,
         simpleProfileChar4
     },

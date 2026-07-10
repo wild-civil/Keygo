@@ -96,6 +96,13 @@
 > - `simpleProfilechar3UUID`（CHAR3，FF03 命令）权限 `GATT_PERMIT_WRITE` → `| GATT_PERMIT_ENCRYPT_WRITE`（行 142，同上注释）
 > - `simpleProfilechar4UUID`（CHAR4，FF04 序列号）`GATT_PERMIT_READ` → `| GATT_PERMIT_ENCRYPT_READ`（行 161）
 > 加 `ENCRYPT` 后，未加密链路写/读这些特征会被 ATT 层拒绝（`ATT_ERR_INSUFFICIENT_ENCRYPT 0x0f`）。
+>
+> ⚠️ **2026-07-10 设计回退（重要）**：Phase 0 落地的 FF03/FF04 加密门控在 App 联动联调中发现严重问题——
+> 无头设备 Just Works 配对**无任何防中间人能力**，却强制每次连接/读序列号都弹系统配对框；且 Android 在"读加密特征失败"时
+> `readBLECharacteristicValue` 直接 `fail`，App 无可靠的重试-等待配对完成机制，导致序列号永远读不到 → 绑定态无法恢复 → 配置页恒显"未绑定"，
+> 并反复触发配对弹窗、连接不稳使 FF02 状态(RSSI)也收不到。**结论**：对 No-IO 设备，链路加密门控弊大于利，
+> **安全边界改由应用层 `BIND` + `AUTH`(HMAC 挑战应答) 承担**。已回退 FF03/FF04 的 `ENCRYPT_*` 权限（改回纯 `GATT_PERMIT_WRITE` / `GATT_PERMIT_READ`），
+> Bond Manager 仍保留 `WAIT_FOR_REQ` 配置（仅当访问加密属性才触发，现已不触发，等效休眠）。详见 §3b-0。
 
 ### 1.7 信任列表自身存储（应用层数据，非 LTK）
 
@@ -150,12 +157,14 @@
 - [ ] 手机重连 KeyGo → 应**自动加密**（不再弹配对框），串口无重新配对日志。
 - 验收：LTK 在 SNV 存活，重连自动加密——证明持久化 OK。
 
-### P0-5：控制特征被加密门控（✅ 已落地 2026-07-10）
-- [x] `gattprofile.c` 的 CHAR3（FF03 命令）权限：`GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE`。
-- [x] `gattprofile.c` 的 CHAR4（FF04 序列号）权限：`GATT_PERMIT_READ | GATT_PERMIT_ENCRYPT_READ`（防未加密读取泄露设备 MAC）。
-- [x] `SIMPLEPROFILE_CHAR3_LEN` 由 50 → 80，以容纳 `AUTH:<64hex>`（≈69 字节）指令。
-- [ ] 验收（待用户烧录）：未配对/未加密手机写 FF03 → 返回 `ATT_ERR_INSUFFICIENT_ENCRYPT (0x0f)`；配对加密后可写。
-- 说明：FF01（RSSI/配置）**暂未**加 ENCRYPT（避免日常调参被迫先配对，降低 App 摩擦）；后续如需可补。
+### P0-5：控制特征被加密门控（⚠️ 已回退 2026-07-10）
+- [x] ~~`gattprofile.c` 的 CHAR3（FF03 命令）权限：`GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE`。~~
+- [x] ~~`gattprofile.c` 的 CHAR4（FF04 序列号）权限：`GATT_PERMIT_READ | GATT_PERMIT_ENCRYPT_READ`（防未加密读取泄露设备 MAC）。~~
+- [x] `SIMPLEPROFILE_CHAR3_LEN` 由 50 → 80，以容纳 `AUTH:<64hex>`（≈69 字节）指令。**此改动保留**（长度无关加密）。
+- ⚠️ **回退**：FF03/FF04 的 `ENCRYPT_*` 权限已于 2026-07-10 联调后移除（改回纯 `GATT_PERMIT_WRITE` / `GATT_PERMIT_READ`）。
+  原因：无头设备 Just Works 无 MITM 防护，强制配对反而破坏 App 联动（序列号读不到、绑定态无法恢复、反复弹配对、RSSI 收不到）。
+  **安全边界改由应用层 `BIND`+`AUTH`(HMAC) 承担**，详见 §3b-0。
+- 说明：FF01（RSSI/配置）本就**未**加 ENCRYPT。
 
 ### P0-6：定位从机主动加密请求 API（开放项补完）
 - [ ] 搜 `GAP_SLAVE_REQUESTED_SECURITY` / `SlaveSecurityReq` / `GAP_SecurityRequest`，确认从机在连接建立后主动发安全请求的函数名（当前头里只见到事件 `0x0C`，未确认发起函数）。
@@ -185,15 +194,25 @@
 ### 3b-1 新增文件
 - `APP/crypto_sha256.c` / `.h`：标准 **SHA-256 + HMAC-SHA256**（FIPS-180-4 / FIPS-198），带 `sha256_self_test()`（标准向量 `abc` 与 HMAC 向量），上电跑一次、串口 `PASS/FAIL`。SDK 无 SHA/HMAC，此为自实现。
 
+### 3b-0 ★ 安全边界决策（2026-07-10 联调后定稿）
+- **链路加密门控已移除**：FF03/FF04 改回纯 `GATT_PERMIT_WRITE` / `GATT_PERMIT_READ`（无 `ENCRYPT_*`）。
+  理由：无头设备（无屏无键）仅能 Just Works / LESC，**链路层无任何防中间人能力**；强制配对反而破坏 App 联动
+  （序列号读不到→绑定态无法恢复、配置页恒显"未绑定"、反复弹配对框、连接不稳致 FF02 状态/RSSI 收不到）。
+- **安全边界 = 应用层 `BIND` + `AUTH`(HMAC 挑战应答)**：
+  - 控制指令（UNLOCK/LOCK/…）须经会话鉴权（`s_sessionAuthed`，由 `BIND` 成功或 `AUTH` 成功置位，断连清零）；
+  - 未绑定设备 `Bonding_Count()==0` → `DENY:NOT_BOUND`；已绑定但未鉴权 → `DENY:AUTH_REQ:<nonce>`；
+  - 序列号(=MAC)明文可读，用于 KDF 派生 `bindKey`，但**无 bindCode 无法派生 key、无法 BIND/AUTH**，故无密钥泄露风险。
+- **Bond Manager 保留 `WAIT_FOR_REQ`**：仅当访问加密属性才由系统触发配对，现已不触发（等效休眠），便于将来若换带屏设备启用 LESC+MITM 时直接加回 `ENCRYPT_*` 权限即可。
+
 ### 3b-2 密钥派生（KDF，两端一致）
 ```
 bindKey[16] = SHA256( 绑定码ASCII || 序列号ASCII )[0:16]
 序列号      = FF04 读取的 MAC 十六进制串（12 字符，大写，如 "A1B2C3D4E5F6"）
 ```
 - 设备端：`Bonding_DeriveKey()` 用自身 MAC 构造序列号。
-- App 端：读 FF04（加密读）得到序列号，用用户输入的绑定码 + 序列号算出同一 `bindKey`，本地保存用于后续 AUTH。
+- App 端：读 FF04（**明文读**，已无加密门控）得到序列号，用用户输入的绑定码 + 序列号算出同一 `bindKey`，本地保存用于后续 AUTH。
 
-### 3b-3 FF03 指令协议（经加密链路）
+### 3b-3 FF03 指令协议（明文链路 + 应用层 AUTH 门控）
 | 手机→设备 | 说明 |
 |-----------|------|
 | `BIND:<绑定码>` | 首绑校验默认码 `123456`；owner 重绑可改码。成功回 `BIND:OK`，并置本连接会话鉴权 |
@@ -218,12 +237,13 @@ bindKey[16] = SHA256( 绑定码ASCII || 序列号ASCII )[0:16]
 
 ### 3b-6 验收（待用户烧录 + nRF Connect / App）
 - [ ] 上电串口见 `[CRYPTO] sha256 self-test: PASS`、`[BOND] init done, owners=0`。
-- [ ] nRF 配对 → `[BOND] bonded / bond saved`（同 P0-3/4）。
-- [ ] 未配对写 FF03 → `ATT_ERR_INSUFFICIENT_ENCRYPT (0x0f)`。
-- [ ] 配对后写 `BIND:123456` → 回 `BIND:OK`；串口 `owner added`。
+- [ ] **不再弹系统配对框**（已移除加密门控，链路纯明文；安全由应用层 AUTH 保证）。
+- [ ] 连上即读 FF04 拿到序列号（明文）→ App 恢复绑定态；配置页"未绑定"/"已绑定"正确显示。
+- [ ] 配置页「绑定设备」输 `123456` → 回 `BIND:OK`；串口 `owner added`；状态变「已绑定·本连接已验证」。
 - [ ] 写 `NONCE` → 回 `NONCE:<hex>`；用 key 算 HMAC 写 `AUTH:<hex>` → 回 `AUTH:OK`。
 - [ ] AUTH 后写 `UNLOCK` → 执行；未 AUTH 写 `UNLOCK` → `DENY:AUTH_REQ:<nonce>`。
-- [ ] 断连重连后写 `UNLOCK` → 再次 `DENY:AUTH_REQ`（会话态已清）。
+- [ ] 断连重连后 App `ensureSession` 自动重跑 AUTH（会话态已清）。
+- [ ] FF02 状态(RSSI)稳定刷新（连接不再被配对打断）。
 
 ---
 
