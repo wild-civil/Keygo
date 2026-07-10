@@ -5,6 +5,15 @@
  * 关闭逻辑：点「×」仅在本轮 App 运行期间隐藏（仅本次会话），杀进程重开即恢复显示，
  * 不写 storage，避免调试期误关后永久消失。后期移除面板时本文件可整体删除。
  */
+
+/**
+ * ★ DEV 调试面板总开关（唯一切换点）
+ *   true  = 显示调试浮窗（开发/调试期）
+ *   false = 完全隐藏：不渲染浮窗、不收集日志、不打印 console（发版或做其他开发时设 false）
+ * 只需改这一处，无需注释任何业务代码。
+ */
+export const DEV_PANEL_ENABLED = true
+
 import { reactive } from 'vue'
 
 export const debugState = reactive({
@@ -32,7 +41,8 @@ export const debugState = reactive({
 
 /** 初始化（无需读取 storage：关闭仅当前会话有效，重开即恢复） */
 export function initDebugPanel() {
-  // 仅本次会话关闭，故不读取历史关闭状态
+  // 总开关：关闭时不收集日志、不渲染浮窗（见 DEV_PANEL_ENABLED）
+  debugState.enabled = DEV_PANEL_ENABLED
 }
 
 /** 展开/收起 */

@@ -44,8 +44,8 @@
       </view>
     </view>
 
-    <!-- ★ v3.27-dev: 开发期调试浮动面板（真机不连电脑也能看状态） -->
-    <DebugFloatPanel />
+    <!-- ★ v3.27-dev: 开发期调试浮动面板（真机不连电脑也能看状态），总开关见 DEV_PANEL_ENABLED -->
+    <DebugFloatPanel v-if="DEV_PANEL_ENABLED" />
   </view>
 </template>
 
@@ -59,6 +59,7 @@ import ControlPage from '@/pages/control/control.vue'
 import ConfigPage from '@/pages/config/config.vue'
 import LoginPage from '@/pages/login/login.vue'
 import DebugFloatPanel from '@/components/DebugFloatPanel.vue'
+import { DEV_PANEL_ENABLED } from '@/utils/debug-panel.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
