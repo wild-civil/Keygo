@@ -43,6 +43,9 @@ void KeyGo_ProcessStateMachine(void);
 // JSON 状态通知 (FF02 Notify)
 void KeyGo_NotifyStatus(void);
 
+// ★ 绑定层回写报文（FF02 Notify）：BIND:/NONCE:/AUTH:/UNBIND:/DENY: 等短消息
+void KeyGo_SendRawNotify(const char *msg);
+
 // 命令处理 (NAME/TRUNK/UNLOCK/LOCK)
 void KeyGo_HandleCommand(const char *cmd, uint16_t len);
 

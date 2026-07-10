@@ -16,6 +16,7 @@
 #include "battery_service.h"
 #include "peripheral.h"
 #include "keygo_core.h"
+#include "bonding.h"       /* ★ KeyGo 绑定/授权模块（信任列表 + Bond Manager 回调） */
 #include "CH58x_common.h"  /* ★ v3.15-#18: SYS_ResetExecute() 用于 advertising 耗尽时复位 */
 #include <stdlib.h>
 #include <string.h>
@@ -257,6 +258,7 @@ void Peripheral_Init(void)
     KeyGo_GPIO_Init();
     KeyGo_ResetState();
     KeyGo_LoadConfig();   // ★ v3.5.1: 从 DataFlash 恢复上次保存的阈值
+    Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层）
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
     GAPRole_BroadcasterSetCB(&Broadcaster_BroadcasterCBs);
 
@@ -282,7 +284,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & SBP_START_DEVICE_EVT) {
-        GAPRole_PeripheralStartDevice(Peripheral_TaskID, NULL,
+        GAPRole_PeripheralStartDevice(Peripheral_TaskID, &Bonding_BondCBs,
                                        &Peripheral_PeripheralCBs);
         /* ★ v3.14: 电池检测上电即运行（不依赖连接） ；若注释此行，则，电池检测移到连接建立后再启动，不再开机即跑*/
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
@@ -485,6 +487,9 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         peripheralConnList.connInterval     = event->connInterval;
         peripheralConnList.connSlaveLatency = event->connLatency;
         peripheralConnList.connTimeout      = event->connTimeout;
+        /* ★ 记录对端地址，供绑定/鉴权判断使用 */
+        tmos_memcpy(peripheralConnList.peerAddr, event->devAddr, B_ADDR_LEN);
+        peripheralConnList.peerAddrType    = event->devAddrType;
         peripheralMTU                       = ATT_MTU_SIZE;
 
         g_deviceConnected        = 1;
@@ -520,6 +525,10 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         peripheralConnList.connInterval     = 0;
         peripheralConnList.connSlaveLatency = 0;
         peripheralConnList.connTimeout      = 0;
+        tmos_memset(peripheralConnList.peerAddr, 0, B_ADDR_LEN);
+        peripheralConnList.peerAddrType    = 0;
+        /* ★ 断连：清空绑定会话态（下次连接需重新 AUTH/BIND） */
+        Bonding_ConnTerminated();
 
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
@@ -632,9 +641,76 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
 }
 
 /*********************************************************************
+ * ────────────────────── FF03 命令路由（绑定/鉴权 + 门控）────────────
+ *   BIND:xxx   → 首绑/改码
+ *   NONCE      → 取挑战值
+ *   AUTH:xxxx  → HMAC 会话鉴权
+ *   UNBIND[:ALL] → 解绑
+ *   其余（UNLOCK/LOCK/TRUNK/STATUS/NAME/配置）→ 须经会话鉴权才执行
+ *********************************************************************/
+static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
+{
+    uint16_t copyLen = (len > SIMPLEPROFILE_CHAR3_LEN) ? SIMPLEPROFILE_CHAR3_LEN : len;
+    char cmd[SIMPLEPROFILE_CHAR3_LEN + 1];
+    tmos_memcpy(cmd, pValue, copyLen);
+    cmd[copyLen] = '\0';
+
+    uint16_t connHandle = peripheralConnList.connHandle;
+    uint8_t *peerAddr   = peripheralConnList.peerAddr;
+    uint8_t  peerType   = peripheralConnList.peerAddrType;
+
+    /* ── 绑定/鉴权类指令：不经会话门控 ── */
+    if (tmos_memcmp(cmd, "BIND:", 5) == 0) {
+        Bonding_HandleBindCmd(connHandle, peerAddr, peerType,
+                              (const uint8_t *)(cmd + 5), (uint16_t)(copyLen - 5));
+        KeyGo_NotifyStatus();
+        return;
+    }
+    if (tmos_memcmp(cmd, "AUTH:", 5) == 0) {
+        Bonding_HandleAuthResp(connHandle, peerAddr,
+                               (const uint8_t *)(cmd + 5), (uint8_t)(copyLen - 5));
+        KeyGo_NotifyStatus();
+        return;
+    }
+    if (tmos_memcmp(cmd, "NONCE", 5) == 0 && (copyLen == 5 || cmd[5] == ':')) {
+        Bonding_HandleNonceReq(connHandle);
+        KeyGo_NotifyStatus();
+        return;
+    }
+    if (tmos_memcmp(cmd, "UNBIND", 6) == 0) {
+        uint8_t mode = 0;
+        if (copyLen > 7 && cmd[6] == ':' && cmd[7] == 'A') mode = 1; /* UNBIND:ALL */
+        Bonding_HandleUnbindCmd(connHandle, peerAddr, mode);
+        KeyGo_NotifyStatus();
+        return;
+    }
+
+    /* ── 控制类指令：须经会话鉴权 ── */
+    if (Bonding_Count() == 0) {
+        KeyGo_SendRawNotify("DENY:NOT_BOUND");
+        PRINT("[CMD] rejected: device not bound\n");
+        KeyGo_NotifyStatus();
+        return;
+    }
+    if (!Bonding_IsSessionAuthed(connHandle)) {
+        char hex[33];
+        Bonding_IssueNonce(hex);
+        char msg[48];
+        snprintf(msg, sizeof(msg), "DENY:AUTH_REQ:%s", hex);
+        KeyGo_SendRawNotify(msg);
+        PRINT("[CMD] rejected: auth required, nonce issued\n");
+        KeyGo_NotifyStatus();
+        return;
+    }
+
+    KeyGo_HandleCommand(cmd, copyLen);
+    KeyGo_NotifyStatus();
+}
+
+/*********************************************************************
  * ────────────────────── GATT 写回调 ───────────────────────────────
  *   FF01 (RSSI)   → keygo_core
- *   FF03 (Command) → keygo_core
+ *   FF03 (Command) → Peripheral_HandleFF03（绑定/鉴权 + 门控）
  *********************************************************************/
 
 static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len)
@@ -723,15 +799,9 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
             break;
         }
 
-        case SIMPLEPROFILE_CHAR3:  // FF03: Command
+        case SIMPLEPROFILE_CHAR3:  // FF03: Command（绑定/鉴权/门控统一入口）
         {
-            char cmd[SIMPLEPROFILE_CHAR3_LEN + 1];
-            uint16_t copyLen = (len > SIMPLEPROFILE_CHAR3_LEN) ? SIMPLEPROFILE_CHAR3_LEN : len;
-            tmos_memcpy(cmd, pValue, copyLen);
-            cmd[copyLen] = '\0';
-
-            KeyGo_HandleCommand(cmd, copyLen);
-            KeyGo_NotifyStatus();
+            Peripheral_HandleFF03(pValue, len);
             break;
         }
 

@@ -206,6 +206,40 @@
         </view>
       </view>
 
+      <!-- ★ ② 设备绑定：应用层 BIND + AUTH challenge-response -->
+      <view class="divider"></view>
+      <view class="section-title">🔐 设备绑定（应用层鉴权）</view>
+
+      <view class="bind-status" :class="bindStatusClass">
+        <text class="bind-dot">●</text>
+        <text class="bind-text">{{ bindStatusText }}</text>
+      </view>
+
+      <!-- 未绑定：输入绑定码 -->
+      <view class="config-item" v-if="!bleStore.isBound">
+        <view class="config-desc">首次绑定请输入设备默认绑定码（机身标签）。绑定成功后本机将持有该设备的密钥，可正常控车；其他手机需先解绑才能绑定本机。</view>
+        <input class="bind-input" v-model="bindCode" placeholder="请输入绑定码" :password="true"
+          maxlength="32" :disabled="binding" />
+        <button class="btn-bind" :disabled="!bindCode || binding" @tap="handleBind">
+          {{ binding ? '绑定中...' : '绑定设备' }}
+        </button>
+      </view>
+
+      <!-- 已绑定：解绑操作 -->
+      <view class="config-item" v-else>
+        <view class="config-desc">本机已持有该设备的绑定密钥。解绑后需重新输入绑定码才能控车。</view>
+        <view class="bind-actions">
+          <button class="btn-unbind" :disabled="unbinding" @tap="handleUnbind(false)">
+            {{ unbinding && !unbindAll ? '解绑中...' : '解绑本机' }}
+          </button>
+          <button class="btn-unbind-all" :disabled="unbinding" @tap="handleUnbind(true)">
+            {{ unbinding && unbindAll ? '清空中...' : '恢复出厂(清空所有)' }}
+          </button>
+        </view>
+      </view>
+
+      <view class="bind-hint" v-if="bleStore.bindHint">{{ bleStore.bindHint }}</view>
+
       <!-- ★ v3.25: 未保存修改提示（草稿态） -->
       <view class="unsaved-tip" v-if="isDirty">
         <text class="unsaved-icon">⚠️</text>
@@ -442,6 +476,66 @@ async function handleSubmit() {
     toast.error('下发失败，请检查连接')
   }
 }
+
+// ★ ② 设备绑定 / 解绑
+const bindCode = ref('')
+const binding = ref(false)
+const unbinding = ref(false)
+const unbindAll = ref(false)
+
+const bindStatusText = computed(() => {
+  if (!bleStore.isBound) return '未绑定'
+  return bleStore.sessionAuthed ? '已绑定 · 本连接已验证' : '已绑定 · 连接待验证'
+})
+const bindStatusClass = computed(() => {
+  if (!bleStore.isBound) return 'unbound'
+  return bleStore.sessionAuthed ? 'authed' : 'bound'
+})
+
+async function handleBind() {
+  if (!bindCode.value || binding.value) return
+  binding.value = true
+  try {
+    const ok = await bleStore.bindDevice(bindCode.value)
+    if (ok) {
+      toast.success('绑定成功')
+      bindCode.value = ''
+    } else {
+      toast.error(bleStore.bindHint || '绑定失败')
+    }
+  } catch (e) {
+    toast.error(e && e.message ? e.message : '绑定失败')
+  } finally {
+    binding.value = false
+  }
+}
+
+async function handleUnbind(all) {
+  unbindAll.value = !!all
+  uni.showModal({
+    title: all ? '恢复出厂设置？' : '解绑本机？',
+    content: all
+      ? '将清除设备的全部绑定记录，所有手机都需重新绑定后才能控车。'
+      : '本机将失去对该设备的控制权，之后需重新输入绑定码才能控车。',
+    confirmText: '确认',
+    success: async (res) => {
+      if (!res.confirm) { unbindAll.value = false; return }
+      unbinding.value = true
+      try {
+        const ok = await bleStore.unbindDevice(all)
+        if (ok) toast.success(all ? '已恢复出厂' : '已解绑')
+        else toast.error(bleStore.bindHint || '解绑失败')
+      } catch (e) {
+        toast.error(e && e.message ? e.message : '解绑失败')
+      } finally {
+        unbinding.value = false
+        unbindAll.value = false
+      }
+    },
+    fail: () => { unbindAll.value = false },
+  })
+}
+
 </script>
 
 <style scoped>
@@ -834,4 +928,102 @@ async function handleSubmit() {
 .geofence-status-text.dim {
   color: var(--text-muted);
 }
+
+/* ===== ★ ② 设备绑定 ===== */
+.bind-status {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  background: var(--alpha-06);
+  border: 1rpx solid var(--border);
+  border-radius: 12rpx;
+  padding: 18rpx 22rpx;
+  margin-bottom: 20rpx;
+}
+
+.bind-dot {
+  font-size: 22rpx;
+}
+
+.bind-text {
+  font-size: 26rpx;
+  font-weight: 600;
+}
+
+.bind-status.unbound .bind-dot { color: var(--text-muted); }
+.bind-status.unbound .bind-text { color: var(--text-secondary); }
+.bind-status.bound .bind-dot { color: #e67e22; }
+.bind-status.bound .bind-text { color: #e67e22; }
+.bind-status.authed .bind-dot { color: #2ecc71; }
+.bind-status.authed .bind-text { color: #2ecc71; }
+
+.bind-input {
+  width: 100%;
+  background: var(--bg-card);
+  border: 2rpx solid var(--border);
+  border-radius: 12rpx;
+  padding: 20rpx 24rpx;
+  font-size: 28rpx;
+  color: var(--text-primary);
+  margin: 16rpx 0 20rpx;
+  box-sizing: border-box;
+}
+
+.btn-bind {
+  width: 100%;
+  background: var(--gradient-accent);
+  color: #fff;
+  font-size: 28rpx;
+  font-weight: 600;
+  padding: 24rpx 0;
+  border-radius: 14rpx;
+}
+
+.btn-bind:active { opacity: 0.8; }
+.btn-bind[disabled] { opacity: 0.3; }
+
+.bind-actions {
+  display: flex;
+  gap: 20rpx;
+  margin-top: 16rpx;
+}
+
+.btn-unbind,
+.btn-unbind-all {
+  flex: 1;
+  font-size: 26rpx;
+  font-weight: 600;
+  padding: 22rpx 0;
+  border-radius: 14rpx;
+  border: 2rpx solid;
+}
+
+.btn-unbind {
+  background: transparent;
+  color: var(--accent-orange);
+  border-color: var(--accent-orange);
+}
+
+.btn-unbind-all {
+  background: transparent;
+  color: #e74c3c;
+  border-color: #e74c3c;
+}
+
+.btn-unbind:active,
+.btn-unbind-all:active { opacity: 0.7; }
+.btn-unbind[disabled],
+.btn-unbind-all[disabled] { opacity: 0.3; }
+
+.bind-hint {
+  font-size: 22rpx;
+  color: var(--accent-orange);
+  background: rgba(230, 126, 34, 0.1);
+  border: 1rpx solid rgba(230, 126, 34, 0.3);
+  border-radius: 10rpx;
+  padding: 14rpx 18rpx;
+  margin-top: 16rpx;
+  line-height: 1.5;
+}
+
 </style>

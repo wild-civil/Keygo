@@ -45,7 +45,7 @@ extern "C" {
 //   ★ v3.5.1: FF01 从 20→80 — 需容纳配置字符串 "unlock=-39 lock=-46 uc=2 lc=3 dlock=5000" (~45 字节)
 #define SIMPLEPROFILE_CHAR1_LEN     80    // FF01: RSSI 注入 + 配置下发 (key=value 格式)
 #define SIMPLEPROFILE_CHAR2_LEN     200   // FF02: JSON 状态
-#define SIMPLEPROFILE_CHAR3_LEN     50    // FF03: 命令文本
+#define SIMPLEPROFILE_CHAR3_LEN     80    // FF03: 命令文本（含 AUTH:<64hex> ≈ 69 字节）
 #define SIMPLEPROFILE_CHAR4_LEN     12    // FF04: 序列号 (12 hex chars)
 
 /*********************************************************************

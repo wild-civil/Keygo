@@ -139,7 +139,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar3UUID},
-        GATT_PERMIT_WRITE,              // ★ 普通写入（无加密要求） 到时候需要配对再加密
+        GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE,  // ★ 命令通道：须加密链路（已配对）才能写（Phase0/1 门控）
         0,
         simpleProfileChar3
     },
@@ -158,7 +158,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar4UUID},
-        GATT_PERMIT_READ,               // ★ 普通读取（无加密要求） 到时候需要配对再加密
+        GATT_PERMIT_READ | GATT_PERMIT_ENCRYPT_READ,   // ★ 序列号（=MAC）须加密链路才能读，防泄露设备身份
         0,
         simpleProfileChar4
     },

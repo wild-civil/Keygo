@@ -482,6 +482,31 @@ void KeyGo_NotifyStatus(void)
     }
 }
 
+/*********************************************************************
+ * @fn      KeyGo_SendRawNotify
+ * @brief   绑定层回写短报文（FF02 Notify）：BIND:/NONCE:/AUTH:/UNBIND:/DENY: 等。
+ *          长度受 FF02 特征值容量限制（SIMPLEPROFILE_CHAR2_LEN）。
+ *********************************************************************/
+void KeyGo_SendRawNotify(const char *msg)
+{
+    if (!g_deviceConnected || peripheralConnList.connHandle == GAP_CONNHANDLE_INIT)
+        return;
+
+    uint16_t n = 0;
+    while (msg[n] && n < SIMPLEPROFILE_CHAR2_LEN) n++;
+    if (n == 0) return;
+
+    attHandleValueNoti_t noti;
+    noti.len    = n;
+    noti.pValue = GATT_bm_alloc(peripheralConnList.connHandle, ATT_HANDLE_VALUE_NOTI, n, NULL, 0);
+    if (noti.pValue) {
+        tmos_memcpy(noti.pValue, msg, n);
+        if (simpleProfile_Notify(peripheralConnList.connHandle, &noti) != SUCCESS) {
+            GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
+        }
+    }
+}
+
 /* ─────────────────────────────────────────────────────────────────
  * 命令处理 (NAME / TRUNK / UNLOCK / LOCK)
  * ───────────────────────────────────────────────────────────────── */

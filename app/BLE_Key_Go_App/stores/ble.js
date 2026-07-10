@@ -29,7 +29,16 @@ import {
   tryParseJSON,
   readSerialNumber,               // ★ v3.3: 读取设备序列号
   readBatteryLevel,               // ★ v3.14: 读取电池电量 (GATT Read)
+  sendCommand as rawSendCommand,  // ★ ②: 底层写指令（store 内 sendCommand action 包一层会话鉴权）
 } from '@/utils/ble.js'
+
+// ★ ②: 绑定层密码学（与固件 crypto_sha256.c 完全对齐：SHA256/HMAC/派生）
+import {
+  deriveBindKey,
+  hmacSha256Hex,
+  hexToBytes,
+  bytesToHex,
+} from '@/utils/crypto.js'
 
 import {
   startNativeBluetoothMonitor,
@@ -105,6 +114,19 @@ function _isGattConflict(err) {
   return /gatt\s*busy|status\s*11|10008|write\s*fail|already|busy|gatt/.test(msg)
 }
 
+// ★ ②: 绑定层模块级状态（非响应式，避免无谓重渲染）
+//   _bindKey: 本机持有的 bindKey（Uint8Array(16)），本地持久化于 uni storage（按序列号）
+let _bindKey = null
+
+// 绑定指令的异步等待器（NONCE/AUTH/BIND/UNBIND 的回应经 FF02 通知解析后 resolve）
+const _bindWaiters = { NONCE: null, AUTH: null, BIND: null, UNBIND: null }
+function _waitFor(type) { return new Promise((resolve) => { _bindWaiters[type] = resolve }) }
+function _resolveWaiter(type, val) {
+  const r = _bindWaiters[type]
+  _bindWaiters[type] = null
+  if (r) r(val)
+}
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -115,6 +137,11 @@ export const useBleStore = defineStore('ble', {
     customDeviceName: '',         // 设备自定义名称
     serialNumber: '',             // ★ v3.3: 设备序列号（永久唯一，FF04 读取）
     fingerprint: '',              // ★ v3.3: 扫描阶段指纹（MAC 后缀，来自广播包）
+
+    // ★ ②: 绑定/授权状态（UI 展示用）
+    isBound: false,               // 本机是否已持有该设备的 bindKey（本地持久化）
+    sessionAuthed: false,         // 当前连接是否已通过 AUTH challenge-response
+    bindHint: '',                 // 绑定相关提示文案（如「需要验证，请重试」）
 
     // 扫描状态
     scanning: false,
@@ -412,7 +439,13 @@ export const useBleStore = defineStore('ble', {
           //       this._handleStatusNotify(fullData)
           //     }, 200)
           if (this._notifyTimer) { clearTimeout(this._notifyTimer); this._notifyTimer = null }
-          if (this._notifyBuffer.trim().endsWith('}')) {
+          const _buf = this._notifyBuffer.trim()
+          // ★ ②: 绑定层短报文（BIND:/NONCE:/AUTH:/UNBIND:/DENY:）不按 JSON 处理
+          if (_buf.startsWith('BIND:') || _buf.startsWith('NONCE:') || _buf.startsWith('AUTH:') ||
+              _buf.startsWith('UNBIND:') || _buf.startsWith('DENY:')) {
+            this._notifyBuffer = ''
+            this._handleBindingNotify(_buf)
+          } else if (_buf.endsWith('}')) {
             // 完整包 → 立即解析刷新 UI（不再等 200ms）
             const fullData = this._notifyBuffer
             this._notifyBuffer = ''
@@ -1555,6 +1588,7 @@ export const useBleStore = defineStore('ble', {
      */
     _finalizeConnection(deviceId) {
       this.connected = true
+      this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
       this.lastDeviceId = deviceId
       if (!this.deviceName) {
         const macClean = this.deviceId.replace(/:/g, '')
@@ -1576,6 +1610,16 @@ export const useBleStore = defineStore('ble', {
         this._resolveDeviceName(sn)
         this._loadConfigForDevice(sn)
         this._syncConfigToDevice()
+        // ★ ②: 恢复本机已存的 bindKey；若本机曾绑定，则主动完成 AUTH 会话鉴权
+        if (sn) {
+          this._restoreBindKey(sn)
+          if (this._bindKey) {
+            this.ensureSession().then(ok => {
+              if (ok) console.log('[BIND] 自动会话鉴权成功')
+              else console.warn('[BIND] 自动会话鉴权失败（设备可能已解绑/重置）')
+            }).catch(e => console.warn('[BIND] 自动会话鉴权异常:', e?.message || e))
+          }
+        }
       }).catch(() => {})
 
       // 注册 notify（延迟 800ms，给 GATT 服务就绪时间）—— 抽成 _enableStatusNotify 复用
@@ -2600,9 +2644,205 @@ export const useBleStore = defineStore('ble', {
 
     async sendCommand(command) {
       if (!this.deviceId) throw new Error('未连接设备')
+      // ★ ②: 控制类指令（非绑定指令）需先完成会话鉴权（AUTH challenge-response）。
+      //   绑定/鉴权指令本身跳过，避免递归；鉴权用底层 rawSendCommand 直发。
+      if (!/^(BIND:|AUTH:|NONCE|UNBIND)/.test(command)) {
+        await this.ensureSession()
+      }
       // ★ v3.27-fix ②: 经模块级写队列串行化，保证「上一条 write 落地后再发下一条」，
       //   避免与配置下发并发抢 GATT 通道（从源头降低 GATT_BUSY / write failed）。
-      await enqueueWrite(() => sendCommand(this.deviceId, command))
+      await enqueueWrite(() => rawSendCommand(this.deviceId, command))
+    },
+
+    // ==================== ★ ② 绑定 / 授权 ====================
+
+    /**
+     * ★ ②: 确保当前连接已通过 AUTH challenge-response。
+     *   - 已鉴权 → 直接返回 true。
+     *   - 无本地 bindKey（本机从未绑定）→ 返回 false（设备将拒绝控制）。
+     *   - 有 key → NONCE → 计算 HMAC → AUTH，等待 FF02 回 AUTH:OK/FAIL。
+     *   注意：仅用底层 rawSendCommand 发 NONCE/AUTH，避免与 sendCommand 的 ensureSession 递归。
+     */
+    async ensureSession() {
+      if (this.sessionAuthed) return true
+      if (!this._bindKey) return false
+
+      const nonceHex = await this._requestNonce()
+      if (!nonceHex) { this.sessionAuthed = false; return false }
+
+      const hmac = hmacSha256Hex(hexToBytes(nonceHex), this._bindKey)
+      const p = _waitFor('AUTH')
+      let done = false
+      const timer = setTimeout(() => {
+        if (!done) { done = true; _resolveWaiter('AUTH', false) }
+      }, 4000)
+      try {
+        await rawSendCommand(this.deviceId, 'AUTH:' + hmac)
+      } catch (e) {
+        clearTimeout(timer)
+        _resolveWaiter('AUTH', false)
+        return false
+      }
+      const ok = await p
+      done = true
+      clearTimeout(timer)
+      return ok === true
+    },
+
+    /** 主动请求一次性 nonce，返回 32 hex 字符或 null */
+    async _requestNonce() {
+      const p = _waitFor('NONCE')
+      let done = false
+      const timer = setTimeout(() => {
+        if (!done) { done = true; _resolveWaiter('NONCE', null) }
+      }, 4000)
+      try {
+        await rawSendCommand(this.deviceId, 'NONCE')
+      } catch (e) {
+        clearTimeout(timer)
+        _resolveWaiter('NONCE', null)
+        return null
+      }
+      const hex = await p
+      done = true
+      clearTimeout(timer)
+      return hex || null
+    },
+
+    /**
+     * ★ ②: 解析 FF02 绑定层短报文（BIND:/NONCE:/AUTH:/UNBIND:/DENY:）
+     */
+    _handleBindingNotify(text) {
+      console.log('[BIND] notify:', text)
+      if (text.startsWith('NONCE:')) {
+        _resolveWaiter('NONCE', text.slice(6))
+      } else if (text === 'AUTH:OK') {
+        this.sessionAuthed = true
+        this.bindHint = ''
+        _resolveWaiter('AUTH', true)
+      } else if (text.startsWith('AUTH:FAIL')) {
+        this.sessionAuthed = false
+        this.bindHint = '验证失败，请重试'
+        _resolveWaiter('AUTH', false)
+      } else if (text === 'BIND:OK') {
+        this.isBound = true
+        this.bindHint = '绑定成功'
+        _resolveWaiter('BIND', true)
+      } else if (text.startsWith('BIND:FAIL')) {
+        this.bindHint = text.includes('NOT_OWNER') ? '需先由原主人绑定' : '绑定码错误'
+        _resolveWaiter('BIND', false)
+      } else if (text === 'UNBIND:OK') {
+        this.isBound = false
+        this.sessionAuthed = false
+        this._bindKey = null
+        this.bindHint = '已解绑'
+        _resolveWaiter('UNBIND', true)
+      } else if (text.startsWith('UNBIND:FAIL')) {
+        this.bindHint = '解绑失败：需先绑定'
+        _resolveWaiter('UNBIND', false)
+      } else if (text === 'DENY:NOT_BOUND') {
+        // 设备当前没有任何 owner（未绑定状态）
+        this.isBound = false
+        this.sessionAuthed = false
+      } else if (text.startsWith('DENY:AUTH_REQ:')) {
+        // 控制指令被拒且内联带 nonce → 用本地 key 直接回 AUTH（下一次控制即生效）
+        const nonceHex = text.slice('DENY:AUTH_REQ:'.length)
+        if (this._bindKey) {
+          const hmac = hmacSha256Hex(hexToBytes(nonceHex), this._bindKey)
+          rawSendCommand(this.deviceId, 'AUTH:' + hmac).catch(() => {})
+        } else {
+          this.bindHint = '设备未绑定，请先绑定'
+        }
+      }
+    },
+
+    /** 从本地存储恢复 bindKey；存在则置 isBound=true */
+    _restoreBindKey(sn) {
+      if (!sn) return
+      try {
+        const hex = uni.getStorageSync('keygo_bindkey_' + sn)
+        if (hex && hex.length === 32) {
+          _bindKey = hexToBytes(hex)
+          this.isBound = true
+        }
+      } catch (e) { /* 忽略 */ }
+    },
+    _saveBindKey(sn, keyBytes) {
+      try { uni.setStorageSync('keygo_bindkey_' + sn, bytesToHex(keyBytes)) } catch (e) { /* 忽略 */ }
+    },
+    _clearBindKey(sn) {
+      try { uni.removeStorageSync('keygo_bindkey_' + sn) } catch (e) { /* 忽略 */ }
+    },
+
+    /**
+     * ★ ②: 绑定设备（首绑用默认码；owner 重绑可改码）。
+     *   @param {string} code 绑定码（如 "123456"）
+     *   @returns {Promise<boolean>} true=绑定成功
+     */
+    async bindDevice(code) {
+      if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
+      let sn = this.serialNumber
+      if (!sn) {
+        try { sn = await readSerialNumber(this.deviceId, 5000) } catch (e) { sn = '' }
+      }
+      if (!sn) { const e = new Error('无法读取序列号'); e.code = 'NO_SERIAL'; throw e }
+
+      const key = deriveBindKey(code, sn)
+      const p = _waitFor('BIND')
+      let done = false
+      const timer = setTimeout(() => {
+        if (!done) { done = true; _resolveWaiter('BIND', false) }
+      }, 6000)
+      try {
+        await rawSendCommand(this.deviceId, 'BIND:' + code)
+      } catch (e) {
+        clearTimeout(timer)
+        _resolveWaiter('BIND', false)
+        throw e
+      }
+      const ok = await p
+      done = true
+      clearTimeout(timer)
+
+      if (ok === true) {
+        _bindKey = key
+        this._saveBindKey(sn, key)
+        this.isBound = true
+        this.sessionAuthed = true
+        this.bindHint = '绑定成功'
+      }
+      return ok === true
+    },
+
+    /**
+     * ★ ②: 解绑。mode='all' 清空设备信任列表（恢复出厂），否则仅解绑本机。
+     *   @returns {Promise<boolean>}
+     */
+    async unbindDevice(all = false) {
+      if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
+      const p = _waitFor('UNBIND')
+      let done = false
+      const timer = setTimeout(() => {
+        if (!done) { done = true; _resolveWaiter('UNBIND', false) }
+      }, 6000)
+      try {
+        await rawSendCommand(this.deviceId, all ? 'UNBIND:ALL' : 'UNBIND')
+      } catch (e) {
+        clearTimeout(timer)
+        _resolveWaiter('UNBIND', false)
+        throw e
+      }
+      const ok = await p
+      done = true
+      clearTimeout(timer)
+      if (ok === true) {
+        this.isBound = false
+        this.sessionAuthed = false
+        _bindKey = null
+        if (this.serialNumber) this._clearBindKey(this.serialNumber)
+        this.bindHint = '已解绑'
+      }
+      return ok === true
     },
 
     /**
@@ -2726,7 +2966,7 @@ export const useBleStore = defineStore('ble', {
       // ★ 可选：同步写入固件（供无本地记录的手机作为初始默认名）
       if (syncToDevice) {
         try {
-          await sendCommand(this.deviceId, `NAME:${name}`)
+          await rawSendCommand(this.deviceId, `NAME:${name}`)
           console.log('[Store] 设备名称已同步到固件 DataFlash d2:', name)
         } catch (e) {
           console.warn('[Store] 同步名称到固件失败:', e?.message || e)

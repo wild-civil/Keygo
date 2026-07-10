@@ -12,7 +12,7 @@
  *   false = 完全隐藏：不渲染浮窗、不收集日志、不打印 console（发版或做其他开发时设 false）
  * 只需改这一处，无需注释任何业务代码。
  */
-export const DEV_PANEL_ENABLED = true
+export const DEV_PANEL_ENABLED = false
 
 import { reactive } from 'vue'
 

@@ -121,6 +121,8 @@ typedef struct
     uint16_t connInterval;
     uint16_t connSlaveLatency;
     uint16_t connTimeout;
+    uint8_t  peerAddr[6];     // ★ 对端手机 BLE MAC（链路建立时填充，供绑定/鉴权使用）
+    uint8_t  peerAddrType;    // ★ ADDRTYPE_PUBLIC / ADDRTYPE_RANDOM
 } peripheralConnItem_t;
 
 // ── Kalman 滤波器 (1D) ──
