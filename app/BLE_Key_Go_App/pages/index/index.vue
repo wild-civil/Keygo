@@ -479,8 +479,8 @@ async function handleUnlock() {
   try {
     await bleStore.unlock()
     toast.success('解锁指令已发送')
-  } catch {
-    toast.error('发送失败')
+  } catch (err) {
+    toast.error((err && err.message) || '发送失败')
   }
 }
 
@@ -488,8 +488,8 @@ async function handleLock() {
   try {
     await bleStore.lock()
     toast.success('锁车指令已发送')
-  } catch {
-    toast.error('发送失败')
+  } catch (err) {
+    toast.error((err && err.message) || '发送失败')
   }
 }
 

@@ -225,7 +225,7 @@
         </button>
       </view>
 
-      <!-- 已绑定：解绑操作 -->
+      <!-- 已绑定：解绑操作 + 重新绑定 -->
       <view class="config-item" v-else>
         <view class="config-desc">本机已持有该设备的绑定密钥。解绑后需重新输入绑定码才能控车。</view>
         <view class="bind-actions">
@@ -236,6 +236,14 @@
             {{ unbinding && unbindAll ? '清空中...' : '恢复出厂(清空所有)' }}
           </button>
         </view>
+        <!-- ★ 2026-07-10：始终提供「重新绑定」入口，避免本地有密钥但设备端因 MAC 变化
+             拒连时用户无处可重新绑定（默认绑定码即可覆盖重绑/恢复） -->
+        <view class="config-desc" style="margin-top:16rpx;">若控车提示「未绑定/验证失败」，可重新输入默认绑定码恢复绑定：</view>
+        <input class="bind-input" v-model="bindCode" placeholder="重新绑定：请输入绑定码" :password="true"
+          maxlength="32" :disabled="binding" />
+        <button class="btn-bind" :disabled="!bindCode || binding" @tap="handleBind">
+          {{ binding ? '绑定中...' : '重新绑定' }}
+        </button>
       </view>
 
       <view class="bind-hint" v-if="bleStore.bindHint">{{ bleStore.bindHint }}</view>

@@ -1,10 +1,13 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : bonding.c
  * Author             : KeyGo (CH582M) — 绑定/授权模块
- * Version            : v1.0 (Phase 1: 真实密码学 + challenge-response)
+ * Version            : v3.30-fix (Phase 1: 真实密码学 + challenge-response)
  * Date               : 2026/07/10
  * Description        : 所有者绑定信任列表 + GAP Bond Manager 回调 + 应用层
  *                      bindKey 派生(KDF=SHA256) + HMAC challenge-response 会话鉴权。
+ *                      ★ 信任模型 = 基于共享密钥(bindKey)，NOT 对端 MAC：Android/iOS BLE
+ *                        地址随机化，每次连接都变，用 MAC 做 owner 身份会导致同一手机二次
+ *                        连接也 NOT_OWNER/AUTH:FAIL。默认绑定码(贴机身)即恢复凭证，可覆盖重绑。
  *                      详见 bonding.h 顶部说明与 docs 对应方案文档。
  *******************************************************************************/
 #include "bonding.h"
@@ -278,50 +281,51 @@ uint8_t Bonding_IsSessionAuthed(uint16_t connHandle)
 /*********************************************************************
  * @fn      Bonding_HandleBindCmd
  * @brief   处理 BIND 指令（payload = 绑定码明文字节）。
- *   首绑（信任列表空）：校验 == DEFAULT_BIND_CODE → 派生 key → 写入信任列表。
- *   已绑：发起方须为 owner（在信任列表）→ 重派生 key（改码）。
- *   回报文：BIND:OK / BIND:FAIL:NOT_OWNER / BIND:FAIL:CODE / BIND:FAIL:*
+ *   ★ v3.30-fix：改为「基于共享密钥」的信任模型，不再依赖对端 MAC 做 owner 判定。
+ *     原因：Android/iOS 的 BLE 地址是随机化私有地址，每次连接都变，
+ *           用 peerAddr 做 owner 会导致「同一台手机二次连接也 NOT_OWNER」的死锁。
+ *   默认绑定码（贴于机身）= 物理持有即视为可恢复。已知默认码即可：
+ *     - 首绑：校验 == DEFAULT_BIND_CODE → 派生 key 写入信任列表。
+ *     - 已绑：用默认码覆盖重绑（takeover/恢复出厂信任），彻底消除 NOT_OWNER 死锁。
+ *   回报文：BIND:OK / BIND:FAIL:SHORT / BIND:FAIL:CODE / BIND:FAIL:SAVE
  *********************************************************************/
 uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint8_t peerAddrType,
                               const uint8_t *payload, uint16_t len)
 {
-    (void)connHandle;
+    (void)connHandle; (void)peerAddr; (void)peerAddrType;  /* ★ 不再使用 MAC 做身份判定 */
     if (len < DEFAULT_BIND_CODE_LEN) {
         KeyGo_SendRawNotify("BIND:FAIL:SHORT");
         return 1;
     }
 
-    if (s_bondCount == 0) {
-        /* 首绑：校验默认码 */
-        if (tmos_memcmp(payload, DEFAULT_BIND_CODE, DEFAULT_BIND_CODE_LEN) != 0) {
-            PRINT("[BIND] first-bind code mismatch\n");
-            KeyGo_SendRawNotify("BIND:FAIL:CODE");
-            return 3;
-        }
-    } else {
-        /* 已绑：须为 owner 才能改/重绑 */
-        if (!Bonding_IsOwner(peerAddr)) {
-            PRINT("[BIND] reject: requester not owner\n");
-            KeyGo_SendRawNotify("BIND:FAIL:NOT_OWNER");
-            return 4;
-        }
+    /* 默认绑定码即所有权/恢复凭证：知道它即可首绑或覆盖重绑（无头设备实体在手） */
+    if (tmos_memcmp(payload, DEFAULT_BIND_CODE, DEFAULT_BIND_CODE_LEN) != 0) {
+        PRINT("[BIND] code mismatch\n");
+        KeyGo_SendRawNotify("BIND:FAIL:CODE");
+        return 3;
     }
 
-    /* 派生 bindKey = SHA256(code||serial)[0:16] */
+    /* 派生 bindKey = SHA256(code||serial)[0:16]（与 App 端同输入 → 同密钥） */
     char serial[13];
     Bonding_BuildSerial(serial);
     uint8_t key[BOND_KEY_LEN];
     Bonding_DeriveKey(payload, len, (uint8_t *)serial, 12, key);
 
-    uint8_t r = Bonding_AddOwner(peerAddr, peerAddrType, key);
-    if (r != 0) {
+    /* 单 owner：覆盖写入 slot0（MAC 无关，密钥即身份）。
+     * 仍写入 peerAddr 仅作「非空槽」标记（Bonding_Load 靠 peerAddr 全 0xFF 判空），
+     * 该地址不再参与鉴权逻辑。 */
+    tmos_memcpy(s_bondTbl[0].peerAddr, peerAddr, 6);
+    s_bondTbl[0].peerAddrType = peerAddrType;
+    tmos_memcpy(s_bondTbl[0].bindKey, key, BOND_KEY_LEN);
+    s_bondCount = 1;
+    if (Bonding_Save() != 0) {
         KeyGo_SendRawNotify("BIND:FAIL:SAVE");
-        return r;
+        return 5;
     }
-    /* BIND 成功即视为本连接已会话鉴权（首绑/改码都证明了码知识） */
+    /* BIND 成功即视为本连接已会话鉴权（证明了码知识） */
     s_sessionAuthed = 1;
     s_nonceValid    = 0;
-    PRINT("[BIND] owner added/updated, count=%d\n", s_bondCount);
+    PRINT("[BIND] owner set (key-based, MAC-independent), count=%d\n", s_bondCount);
     KeyGo_SendRawNotify("BIND:OK");
     return 0;
 }
@@ -350,15 +354,14 @@ void Bonding_HandleNonceReq(uint16_t connHandle)
 uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
                                const uint8_t *payload, uint8_t len)
 {
-    (void)connHandle;
+    (void)connHandle; (void)peerAddr;  /* ★ 不再用 MAC 查找 owner，改用密钥本身校验 */
+    if (s_bondCount == 0) {
+        KeyGo_SendRawNotify("AUTH:FAIL:NO_PEER");  /* 设备尚未绑定 */
+        return 2;
+    }
     if (!s_nonceValid) {
         KeyGo_SendRawNotify("AUTH:FAIL:NO_NONCE");
         return 1;
-    }
-    int8_t idx = Bonding_Find(peerAddr);
-    if (idx < 0) {
-        KeyGo_SendRawNotify("AUTH:FAIL:NO_PEER");
-        return 2;
     }
 
     uint8_t resp[SHA256_DIGEST_LEN];
@@ -367,8 +370,9 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
         return 3;
     }
 
+    /* ★ 密钥即身份：用存储的 bindKey 校验 HMAC(nonce, bindKey)，与对端 MAC 无关 */
     uint8_t expect[SHA256_DIGEST_LEN];
-    hmac_sha256(s_bondTbl[idx].bindKey, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
+    hmac_sha256(s_bondTbl[0].bindKey, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
 
     if (tmos_memcmp(expect, resp, SHA256_DIGEST_LEN) != 0) {
         PRINT("[AUTH] mismatch\n");
@@ -379,33 +383,36 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     s_sessionAuthed = 1;
     s_nonceValid    = 0;   /* 一次性 */
     tmos_memset(s_nonce, 0, BOND_NONCE_LEN);
-    PRINT("[AUTH] session authed (peer in trust list)\n");
+    PRINT("[AUTH] session authed (key-based, MAC-independent)\n");
     KeyGo_SendRawNotify("AUTH:OK");
     return 0;
 }
 
 /*********************************************************************
  * @fn      Bonding_HandleUnbindCmd
- * @brief   mode=0 解绑自己(peerAddr)；mode=1 清空全部（恢复出厂信任列表）。
- *   解绑自己须为 owner；清空全部须为 owner（且会令本连接会话失效）。
- *   回报文：UNBIND:OK / UNBIND:FAIL:NOT_OWNER
+ * @brief   mode=0 解绑自己；mode=1 清空全部（恢复出厂信任列表）。
+ *   解绑须先经 AUTH 会话鉴权（证明持有密钥），MAC 不可靠故不依赖地址。
+ *   回报文：UNBIND:OK / UNBIND:FAIL:NO_AUTH
  *********************************************************************/
 uint8_t Bonding_HandleUnbindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint8_t mode)
 {
-    (void)connHandle;
+    (void)connHandle; (void)peerAddr;  /* peerAddr 不再用于身份判定 */
     if (s_bondCount == 0) {
         KeyGo_SendRawNotify("UNBIND:OK"); /* 本来就是空的 */
         return 0;
     }
-    if (!Bonding_IsOwner(peerAddr)) {
-        KeyGo_SendRawNotify("UNBIND:FAIL:NOT_OWNER");
+    /* ★ 解绑须先经 AUTH 会话鉴权（证明持有密钥），MAC 不可靠故不依赖地址。
+     *   若尚未鉴权，App 会先走 NONCE/AUTH 握手再发 UNBIND。 */
+    if (!s_sessionAuthed) {
+        KeyGo_SendRawNotify("UNBIND:FAIL:NO_AUTH");
         return 1;
     }
     if (mode == 1) {
         Bonding_EraseAll();
         PRINT("[UNBIND] all owners erased (factory trust list)\n");
     } else {
-        Bonding_RemoveOwner(peerAddr);
+        s_bondCount = 0;
+        Bonding_Save();
         PRINT("[UNBIND] owner removed\n");
     }
     s_sessionAuthed = 0;

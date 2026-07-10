@@ -140,6 +140,8 @@ function cmdErrorMsg(err) {
   if (code === 'NO_CONN') return '未连接，请先连接设备'
   if (code === 'TOO_FAST') return '操作太频繁，请稍候'
   if (code === 'CONFLICT') return '指令冲突，请重试'
+  if (code === 'NOT_BOUND') return '设备未绑定，请先到「设置」绑定'
+  if (code === 'AUTH_FAIL') return '设备验证失败，请重新绑定'
   return '发送失败，请检查连接'
 }
 

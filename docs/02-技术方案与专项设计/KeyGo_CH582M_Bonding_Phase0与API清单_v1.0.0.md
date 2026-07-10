@@ -204,6 +204,18 @@
   - 序列号(=MAC)明文可读，用于 KDF 派生 `bindKey`，但**无 bindCode 无法派生 key、无法 BIND/AUTH**，故无密钥泄露风险。
 - **Bond Manager 保留 `WAIT_FOR_REQ`**：仅当访问加密属性才由系统触发配对，现已不触发（等效休眠），便于将来若换带屏设备启用 LESC+MITM 时直接加回 `ENCRYPT_*` 权限即可。
 
+> ⚠️ **2026-07-10 二次修复（v3.30-fix）：信任模型从「基于 MAC」改为「基于共享密钥」**。
+> 现象：烧录 v3.30 后 `BIND:FAIL:NOT_OWNER`、控制无反应。根因：**Android/iOS 的 BLE 地址是随机化私有地址，每次连接都变**，
+> 而原实现用 `peerAddr`(MAC) 做 owner 身份与 `AUTH` 查找（`Bonding_IsOwner`/`Bonding_Find`），导致**同一台手机二次连接也找不到 owner**
+> → `BIND:FAIL:NOT_OWNER`、`AUTH:FAIL:NO_PEER`，命令被拒。
+> 修复（`APP/bonding.c` 三个处理函数）：
+> - `BIND:<code>`：默认绑定码（贴机身）即所有权/恢复凭证，**已知默认码即可首绑或覆盖重绑**，去除 NOT_OWNER 死锁；
+> - `AUTH:<hmac>`：用存储的 `bindKey` 校验 `HMAC(nonce, bindKey)`，**不再按 MAC 查找 owner**，与对端地址无关；
+> - `UNBIND[:ALL]`：门控改为「须先 AUTH 会话鉴权（证明持有密钥）」，不再依赖 MAC 身份；
+> - 绑定落盘时仍写 `peerAddr` 仅作「非空槽」标记（`Bonding_Load` 靠全 0xFF 判空，否则绑定会丢）；
+> - 单 owner 模型，密钥即身份，彻底规避 MAC 随机化问题。
+> App 侧配套修复（`stores/ble.js`、`control.vue`、`index.vue`、`config.vue`）：`sendCommand` 校验 `ensureSession()` 结果，未绑定/鉴权失败即抛 `NOT_BOUND`/`AUTH_FAIL` 错误（杜绝"解锁成功"假成功）；配置页"已绑定"分支也提供"重新绑定"输入框。
+
 ### 3b-2 密钥派生（KDF，两端一致）
 ```
 bindKey[16] = SHA256( 绑定码ASCII || 序列号ASCII )[0:16]

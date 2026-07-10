@@ -2647,7 +2647,14 @@ export const useBleStore = defineStore('ble', {
       // ★ ②: 控制类指令（非绑定指令）需先完成会话鉴权（AUTH challenge-response）。
       //   绑定/鉴权指令本身跳过，避免递归；鉴权用底层 rawSendCommand 直发。
       if (!/^(BIND:|AUTH:|NONCE|UNBIND)/.test(command)) {
-        await this.ensureSession()
+        const authed = await this.ensureSession()
+        // ★ 2026-07-10 修复：必须校验鉴权结果！否则未绑定/鉴权失败时仍照发控制指令，
+        //   设备静默拒绝（DENY），但 App 误以为成功 → 用户看到「解锁成功」设备却没反应。
+        if (!authed) {
+          const e = new Error(this._bindKey ? '设备验证失败，请重新绑定' : '设备未绑定，请先绑定')
+          e.code = this._bindKey ? 'AUTH_FAIL' : 'NOT_BOUND'
+          throw e
+        }
       }
       // ★ v3.27-fix ②: 经模块级写队列串行化，保证「上一条 write 落地后再发下一条」，
       //   避免与配置下发并发抢 GATT 通道（从源头降低 GATT_BUSY / write failed）。
@@ -2820,6 +2827,13 @@ export const useBleStore = defineStore('ble', {
      */
     async unbindDevice(all = false) {
       if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
+      // ★ 2026-07-10 修复：固件要求 UNBIND 前须会话鉴权（证明持有密钥），故先 AUTH。
+      const authed = await this.ensureSession()
+      if (!authed) {
+        const e = new Error(this._bindKey ? '设备验证失败，请重新绑定' : '设备未绑定，请先绑定')
+        e.code = this._bindKey ? 'AUTH_FAIL' : 'NOT_BOUND'
+        throw e
+      }
       const p = _waitFor('UNBIND')
       let done = false
       const timer = setTimeout(() => {
