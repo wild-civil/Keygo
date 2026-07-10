@@ -51,6 +51,8 @@ public class BleScanEventBus {
             } catch (Exception e) {
                 android.util.Log.w("KeygoBleScanSvc", "emitScreenEvent fail", e);
             }
+        } else {
+            android.util.Log.w("KeygoBleScanSvc", "emitScreenEvent: 无屏幕监听（JS 未注册屏幕转发 /已被清空），丢弃 type=" + type);
         }
     }
 

@@ -3,12 +3,14 @@
     "configurations" : [
         {
             "customPlaygroundType" : "local",
-            "localRepoPath" : "",
-            "packageName" : "",
+            "localRepoPath" : "D:/Documents/HBuilderProjects/HbuilderX _sdk/Android/5.14/Android-SDK@5.14.82649_20260630/Android-SDK@5.14.82649_20260630/HBuilder-Integrate-AS/simpleDemo",
+            "openVueDevtools" : false,
+            "packageName" : "com.keygo.app",
             "playground" : "custom",
             "type" : "uni-app:app-android"
         },
         {
+            "openVueDevtools" : false,
             "playground" : "standard",
             "type" : "uni-app:app-ios"
         }

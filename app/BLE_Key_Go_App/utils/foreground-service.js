@@ -736,56 +736,23 @@ let _screenReceiver = null
 let _screenCallback = null
 let _nativeScreenOnCallback = null
 let _screenOnViaNative = false
+// ★ 方案2：原生路径下叠加的 JS 级兜底监听标记（原生服务静默起不来时仍可前台收屏幕事件）
+let _screenJsFallbackActive = false
 
 /**
- * 注册亮屏广播接收器
- *
- * @param {Function} callback 亮屏时的回调 (action: string) => void
- * @returns {boolean} 是否成功注册（非 Android 平台返回 false，调用方应据此降级）
+ * 注册 JS 级亮屏广播接收器（plus.android 实现，前台可靠、后台 WebView 冻结时失效）。
+ * 抽成独立函数，供「纯 JS 无插件」与「原生路径并行兜底」两种场景复用。
+ * 回调统一传入原生风格 type：'screen_on' | 'screen_off' | 'user_present'（与 _onScreenOn 比较一致）。
+ * @returns {boolean} 是否成功注册
  */
-export function registerScreenOnReceiver(callback) {
-  if (!isAndroidApp()) {
-    console.log(`${TAG} 📱 非 Android 环境，跳过亮屏广播`)
-    return false
-  }
-
-  // ★ 优先路径：原生插件（不依赖 WebView，后台可靠）
-  const plugin = getNativePlugin()
-  if (plugin && typeof plugin.startScreenOnReceiver === 'function') {
-    _nativeScreenOnCallback = callback
-    _screenOnViaNative = true
-    try {
-      plugin.startScreenOnReceiver((res) => {
-        if (!res || typeof res !== 'object') return
-        if (res.event === 'screen' && _nativeScreenOnCallback) {
-          const type = res.type || 'unknown'
-          const action = type === 'screen_off' ? 'android.intent.action.SCREEN_OFF'
-                       : type === 'user_present' ? 'android.intent.action.USER_PRESENT'
-                       : 'android.intent.action.SCREEN_ON'
-          addDebugLog(`原生屏幕事件: ${type}`)
-          try { _nativeScreenOnCallback(action) }
-          catch (e) { console.error(`${TAG} 📱 原生屏幕回调异常:`, e?.message || e) }
-        }
-      })
-      console.log(`${TAG} 📱 亮屏广播已注册（原生插件，SCREEN_ON + USER_PRESENT）`)
-      return true
-    } catch (e) {
-      console.error(`${TAG} 📱 原生亮屏注册失败，回退 JS:`, e?.message || e)
-      _nativeScreenOnCallback = null
-      _screenOnViaNative = false
-    }
-  }
-
-  // ★ 回退路径：纯 JS（标准基座 / 无插件）。注意 WebView 冻结时可能失效。
+function _registerJsScreenReceiver(callback) {
   if (_screenReceiver) {
     // 已注册，仅更新回调
     _screenCallback = callback
-    console.log(`${TAG} 📱 亮屏广播已注册，仅更新回调`)
+    console.log(`${TAG} 📱 亮屏广播已注册，仅更新回调（JS）`)
     return true
   }
-
   _screenCallback = callback
-
   try {
     const main = getMainActivity()
     if (!main) {
@@ -804,12 +771,14 @@ export function registerScreenOnReceiver(callback) {
         onReceive: function(ctx, intent) {
           const action = intent.getAction()
           if (action === Intent.ACTION_SCREEN_ON || action === Intent.ACTION.USER_PRESENT || action === Intent.ACTION.SCREEN_OFF) {
-            const label = action === Intent.ACTION_SCREEN_OFF ? 'SCREEN_OFF(屏幕关闭)' : action === Intent.ACTION_USER_PRESENT ? 'USER_PRESENT(已解锁)' : 'SCREEN_ON'
+            const type = action === Intent.ACTION.SCREEN_OFF ? 'screen_off'
+                       : action === Intent.ACTION.USER_PRESENT ? 'user_present' : 'screen_on'
+            const label = action === Intent.ACTION.SCREEN_OFF ? 'SCREEN_OFF(屏幕关闭)' : action === Intent.ACTION.USER_PRESENT ? 'USER_PRESENT(已解锁)' : 'SCREEN_ON'
             console.log(`${TAG} 📱 屏幕事件: ${label}`)
-            addDebugLog(`JS回退屏幕事件: ${label}`)
+            addDebugLog(`JS回退屏幕事件: ${type}`)
             if (_screenCallback) {
               try {
-                _screenCallback(action)
+                _screenCallback(type)
               } catch (e) {
                 console.error(`${TAG} 📱 亮屏回调异常:`, e?.message || e)
               }
@@ -822,11 +791,11 @@ export function registerScreenOnReceiver(callback) {
     _screenReceiver = ReceiverImpl
     const filter = new IntentFilter()
     filter.addAction(Intent.ACTION_SCREEN_ON)
-    filter.addAction(Intent.ACTION_USER_PRESENT)
-    filter.addAction(Intent.ACTION_SCREEN_OFF)
+    filter.addAction(Intent.ACTION.USER_PRESENT)
+    filter.addAction(Intent.ACTION.SCREEN_OFF)
     ctx.registerReceiver(_screenReceiver, filter)
 
-    console.log(`${TAG} 📱 亮屏广播已注册 (SCREEN_ON + USER_PRESENT)`)
+    console.log(`${TAG} 📱 亮屏广播已注册 (SCREEN_ON + USER_PRESENT) [JS]`)
     return true
   } catch (e) {
     console.error(`${TAG} 📱 亮屏广播注册失败:`, e?.message || e)
@@ -835,6 +804,64 @@ export function registerScreenOnReceiver(callback) {
     return false
   }
 }
+
+/**
+ * 注册亮屏广播接收器
+ *
+ * @param {Function} callback 亮屏时的回调 (type: string) => void，type ∈ 'screen_on'|'screen_off'|'user_present'
+ * @returns {boolean} 是否成功注册（非 Android 平台返回 false，调用方应据此降级）
+ *
+ * ★ 方案2 关键修复：
+ *   旧逻辑「走原生路径就跳过 JS 兜底」→ 一旦原生前台服务因 getAppContext() 失败等静默起不来，
+ *   屏幕事件总线监听永远收不到 → DEV「屏幕事件」恒为 --。
+ *   现改为：原生路径之后【并行叠加】一个 JS 级兜底监听（前台一定生效），二者 2s 去重互不冲突；
+ *   原生服务正常时后台也可靠，原生异常时前台仍可验证探针链路。
+ */
+export function registerScreenOnReceiver(callback) {
+  if (!isAndroidApp()) {
+    console.log(`${TAG} 📱 非 Android 环境，跳过亮屏广播`)
+    return false
+  }
+
+  // ★ 优先路径：原生插件（不依赖 WebView，后台可靠）
+  const plugin = getNativePlugin()
+  if (plugin && typeof plugin.startScreenOnReceiver === 'function') {
+    _nativeScreenOnCallback = callback
+    _screenOnViaNative = true
+    try {
+      plugin.startScreenOnReceiver((res) => {
+        if (!res || typeof res !== 'object') return
+        if (res.event === 'screen' && _nativeScreenOnCallback) {
+          // ★ 直接透传原生 type，不再翻译成 Android 意图字符串：
+          //   _onScreenOn 按 'screen_off'/'user_present' 比较，翻译反而导致标签永远“亮屏”。
+          const type = res.type || 'unknown'
+          addDebugLog(`原生屏幕事件: ${type}`)
+          try { _nativeScreenOnCallback(type) }
+          catch (e) { console.error(`${TAG} 📱 原生屏幕回调异常:`, e?.message || e) }
+        }
+      })
+      console.log(`${TAG} 📱 亮屏广播已注册（原生插件，SCREEN_ON + USER_PRESENT）`)
+    } catch (e) {
+      console.error(`${TAG} 📱 原生亮屏注册失败，回退 JS:`, e?.message || e)
+      _nativeScreenOnCallback = null
+      _screenOnViaNative = false
+    }
+    // ★ 并行兜底：原生服务可能因 getAppContext 失败等静默起不来（部分 uni-app SDK 版本常见），
+    //   此时原生广播收不到 → DEV「屏幕事件」永远 --。前台运行时额外挂一个 JS 级 BroadcastReceiver
+    //   作为并行兜底（仅前台有效，但足以验证探针链路），与原生 2s 去重互不冲突。
+    try {
+      if (_registerJsScreenReceiver(callback)) {
+        _screenJsFallbackActive = true
+        console.log(`${TAG} 📱 已叠加 JS 级亮屏兜底监听（前台有效，后台仍依赖原生）`)
+      }
+    } catch (e) { /* ignore */ }
+    return true
+  }
+
+  // ★ 无原生插件：纯 JS（标准基座 / 离线工程未含插件）
+  return _registerJsScreenReceiver(callback)
+}
+
 
 /**
  * 注销亮屏广播接收器
@@ -849,22 +876,23 @@ export function unregisterScreenOnReceiver() {
     _nativeScreenOnCallback = null
     _screenOnViaNative = false
     console.log(`${TAG} 📱 亮屏广播已注销（原生插件）`)
-    return
   }
-  // JS 回退路径
-  if (!_screenReceiver) return
-  try {
-    const main = getMainActivity()
-    if (main) {
-      const ctx = (typeof main.getApplicationContext === 'function') ? main.getApplicationContext() : main
-      ctx.unregisterReceiver(_screenReceiver)
+  // JS 兜底路径（含纯 JS 无插件场景；与原生并行时分别清理）
+  if (_screenJsFallbackActive && _screenReceiver) {
+    try {
+      const main = getMainActivity()
+      if (main) {
+        const ctx = (typeof main.getApplicationContext === 'function') ? main.getApplicationContext() : main
+        ctx.unregisterReceiver(_screenReceiver)
+      }
+    } catch (e) {
+      // 可能已被系统注销
     }
-  } catch (e) {
-    // 可能已被系统注销
+    _screenReceiver = null
+    _screenCallback = null
+    _screenJsFallbackActive = false
+    console.log(`${TAG} 📱 亮屏广播已注销（JS 兜底）`)
   }
-  _screenReceiver = null
-  _screenCallback = null
-  console.log(`${TAG} 📱 亮屏广播已注销`)
 }
 
 // ==================== ★ v3.24: 原生后台扫描（真正后台重连的核心） ====================

@@ -88,20 +88,25 @@ public class KeygoForegroundModule extends UniModule {
                 pushEvent("devicefound", mac, name, rssi, null);
             }
         });
-        // ★ v3.26: 服务（重）启动时，若曾请求亮屏转发，重新挂上屏幕亮事件监听
-        if (screenOnForwardReady) {
-            BleScanEventBus.getInstance().setScreenEventListener(new BleScanEventBus.OnScreenEventListener() {
-                @Override
-                public void onScreenEvent(String type) {
-                    Log.i(TAG, "亮屏事件(经总线) → 推送 JS");
-                    pushScreenEvent(type);
-                }
-            });
-        }
+        // ★ v3.27: 每次 startScan 都确保屏幕事件总线监听已挂载（不再依赖 screenOnForwardReady），
+        //   配合 onDestroy 不清空屏幕监听，保证前台服务重建后亮屏事件仍能送达 JS。
+        BleScanEventBus.getInstance().setScreenEventListener(new BleScanEventBus.OnScreenEventListener() {
+            @Override
+            public void onScreenEvent(String type) {
+                Log.i(TAG, "亮屏事件(经总线) → 推送 JS");
+                pushScreenEvent(type);
+            }
+        });
 
         String targetName = (options != null) ? options.optString("targetName", "") : "";
         Context ctx = getAppContext();
-        if (ctx == null) { Log.e(TAG, "getAppContext 失败，无法启动服务"); return; }
+        if (ctx == null) {
+            Log.e(TAG, "getAppContext 失败，无法启动服务");
+            // ★ v3.27: 静默失败诊断 —— 前台服务根本没起来，但 JS 仍认为已启动，
+            //   会导致「无任何原生日志 + DEV 屏幕事件一直 --」。显式报错让 JS/DEV 可见。
+            pushEvent("error", null, null, 0, "getAppContext失败，前台服务未启动（屏幕/扫描监听均不生效）");
+            return;
+        }
         try {
             Intent intent = new Intent(ctx, KeygoBleScanService.class);
             intent.putExtra("targetName", targetName == null ? "" : targetName);
@@ -185,7 +190,10 @@ public class KeygoForegroundModule extends UniModule {
 
     /** 推送屏幕事件给 JS（keepAlive 保证可多次调用）。type: screen_on / screen_off / user_present */
     private void pushScreenEvent(String type) {
-        if (screenOnCallback == null) return;
+        if (screenOnCallback == null) {
+            Log.w(TAG, "pushScreenEvent: screenOnCallback 为 null（JS 未调用 startScreenOnReceiver），丢弃 type=" + type);
+            return;
+        }
         JSONObject o = new JSONObject();
         try {
             o.put("event", "screen");

@@ -18,6 +18,8 @@ export const debugState = reactive({
   logs: [],
   // 最后亮屏时间戳
   lastScreenOnTime: null,
+  // ★ 探针：最近一次屏幕事件（锁屏/亮屏/已解锁），用于确认原生插件真在收广播（无论连没连）
+  lastScreenEvent: null,
   // 最后发现的设备 { name, mac, rssi, time }
   lastDeviceFound: null,
   // 最后重连结果 { ok, text, time }
@@ -67,6 +69,17 @@ export function setDebugScreenOn(label = '亮屏/解锁') {
   if (!debugState.enabled) return
   debugState.lastScreenOnTime = Date.now()
   addDebugLog(`${label} → 触发扫描`, 'screen')
+}
+
+/** ★ 探针：记录最近一次屏幕事件（无论连没连），用于确认原生插件真在收广播 */
+export function recordScreenEvent(action = '', label = '未知') {
+  if (!debugState.enabled) return
+  debugState.lastScreenEvent = {
+    action: String(action),
+    label: String(label),
+    time: Date.now(),
+  }
+  addDebugLog(`屏幕事件: ${label}`, 'screen')
 }
 
 /** 记录发现设备 */

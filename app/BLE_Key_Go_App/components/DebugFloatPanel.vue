@@ -42,6 +42,10 @@
           <text class="debug-val">{{ fmtAgo(state.lastScreenOnTime) }}</text>
         </view>
         <view class="debug-row">
+          <text class="debug-label">屏幕事件</text>
+          <text class="debug-val" :class="state.lastScreenEvent ? 'ok' : 'off'">{{ screenEventText }}</text>
+        </view>
+        <view class="debug-row">
           <text class="debug-label">发现设备</text>
           <text class="debug-val">{{ lastFoundText }}</text>
         </view>
@@ -156,6 +160,12 @@ const lastReconnectText = computed(() => {
 const lastReconnectClass = computed(() => {
   const r = state.lastReconnectResult
   return r?.ok ? 'ok' : (r ? 'error' : '')
+})
+
+const screenEventText = computed(() => {
+  const e = state.lastScreenEvent
+  if (!e) return '--'
+  return `${e.label} (${fmtAgo(e.time)})`
 })
 </script>
 

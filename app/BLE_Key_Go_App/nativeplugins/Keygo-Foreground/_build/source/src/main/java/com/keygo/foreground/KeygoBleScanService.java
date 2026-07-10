@@ -323,15 +323,19 @@ public class KeygoBleScanService extends Service {
         stopScan();
         if (tickReceiver != null) {
             try { unregisterReceiver(tickReceiver); } catch (Exception e) { /* ignore */ }
+            tickReceiver = null;
         }
         if (screenOnReceiver != null) {
             try { unregisterReceiver(screenOnReceiver); } catch (Exception e) { /* ignore */ }
+            screenOnReceiver = null;
         }
         if (alarmMgr != null && tickPi != null) {
             try { alarmMgr.cancel(tickPi); } catch (Exception e) { /* ignore */ }
         }
         BleScanEventBus.getInstance().clearListener();
-        BleScanEventBus.getInstance().clearScreenOn();
+        // ★ v3.27: 故意不清除屏幕总线监听（clearScreenOn）——
+        //   该监听属于 Module 进程，必须跨前台服务销毁/重建存活；
+        //   否则服务被系统或自重启逻辑销毁后，亮屏广播仍在发，但总线无监听，JS 永远收不到。
 
         // ★ 抗被杀：安排 15s 后自重启。Android 12+ 通过 PendingIntent 启动前台服务属豁免场景。
         try {

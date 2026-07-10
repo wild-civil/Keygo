@@ -23,3 +23,11 @@ Thumbs.db
 .workbuddy/
 .codebuddy/
 $null
+
+# 参考 / 剪藏文档（非项目源码，外部博客下载或本地整理，不纳入版本管理）
+Android 屏幕监控_wx6505c81b27679的技术博客.md
+docs/Android屏幕检测方案参考.md
+
+
+# 包含自己账号等信息的
+docs/自己看

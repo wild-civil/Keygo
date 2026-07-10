@@ -56,6 +56,7 @@ import {
   setDebugDeviceFound,
   setDebugReconnectResult,
   setDebugForegroundStatus,
+  recordScreenEvent,
 } from '@/utils/debug-panel.js'
 
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
@@ -675,6 +676,7 @@ export const useBleStore = defineStore('ble', {
           this._foregroundServiceFailCount = 0
           setDebugForegroundStatus(true, true, knownId)
           console.log('[Store] 🔒 原生前台服务 + 后台扫描已启动（已知设备:', knownId, '）')
+          this._registerScreenOnListener() // ★ 探针：前台服务启动即挂屏幕监听，无论连没连都能收广播
           return
         }
       } else {
@@ -690,6 +692,7 @@ export const useBleStore = defineStore('ble', {
           this._foregroundServiceFailCount = 0
           setDebugForegroundStatus(true, false)
           console.log('[Store] 🔒 前台服务已启动（纯 JS 回退，通知栏应可见）')
+          this._registerScreenOnListener() // ★ 探针：前台服务启动即挂屏幕监听
         } else {
           this._foregroundServiceFailCount++
           // ★ v3.17.1: 打印诊断信息帮助定位失败原因
@@ -704,6 +707,11 @@ export const useBleStore = defineStore('ble', {
       } catch (e) {
         this._foregroundServiceFailCount++
         console.warn('[Store] 前台服务启动异常:', e?.message || e)
+      }
+      // ★ 探针解耦：无论前台服务起没起（原生 getAppContext 失败 / 纯JS 前台服务失败都不影响），
+      //   都确保屏幕监听已注册（JS 兜底前台可靠），用于确认屏幕事件链路是否通。
+      if (!this._screenOnReceiverActive) {
+        this._registerScreenOnListener()
       }
     },
 
@@ -1340,7 +1348,13 @@ export const useBleStore = defineStore('ble', {
     },
 
     _onScreenOn(action) {
-      if (action === 'android.intent.action.SCREEN_OFF') {
+      // ★ 探针：无论连接/模式，先记录最近一次屏幕事件（可视化确认原生插件在收广播）
+      // 注意：action 是原生透传的 type（'screen_on' / 'screen_off' / 'user_present'），
+      // 不是 Android 原始意图字符串，故此处按 type 比较（旧代码误用 android.intent.action.* 比对，永远不成立）。
+      const _probeLabel = action === 'screen_off' ? '锁屏'
+        : action === 'user_present' ? '已解锁' : '亮屏'
+      recordScreenEvent(action, _probeLabel)
+      if (action === 'screen_off') {
         console.log('[Store] 📱 屏幕关闭事件（不触发重连）')
         setDebugScreenOn('屏幕关闭')
         return
@@ -1358,7 +1372,7 @@ export const useBleStore = defineStore('ble', {
         return
       }
       this._lastScreenOnTrigger = now
-      const label = action === 'android.intent.action.USER_PRESENT' ? '\u5df2\u89e3\u9501' : '\u5c4f\u5e55\u4eae\u8d77'
+      const label = action === 'user_present' ? '\u5df2\u89e3\u9501' : '\u5c4f\u5e55\u4eae\u8d77'
       console.log(`[Store] \ud83d\udcf1 \u4eae\u5c4f\u89e6\u53d1\uff08${label}\uff09\u2192 \u542f\u52a8\u626b\u63cf`)
       setDebugScreenOn(label)
       this._doScreenOnScan()
@@ -1410,7 +1424,6 @@ export const useBleStore = defineStore('ble', {
               this.reconnectAttempt = 0
               this.reconnectNextDelay = 0
               this._stopDormantPoll()
-              this._unregisterScreenOnListener()
               this._stopGeofenceMonitor()
               this._stopHeartbeat()
               this._ensureForegroundService()
@@ -1552,7 +1565,6 @@ export const useBleStore = defineStore('ble', {
       this.reconnectAttempt = 0
       this.reconnectNextDelay = 0
       this._stopDormantPoll()
-      this._unregisterScreenOnListener()
       this._stopGeofenceMonitor()
       this._stopHeartbeat()
       this._ensureForegroundService()
@@ -2088,7 +2100,6 @@ export const useBleStore = defineStore('ble', {
         this.reconnectNextDelay = 0
         // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳 + 亮屏监听器
         this._stopDormantPoll()
-        this._unregisterScreenOnListener()
         this._stopGeofenceMonitor()
         this._stopHeartbeat()
         // ★ v3.17: 连接成功后启动前台服务（Android 保活）
