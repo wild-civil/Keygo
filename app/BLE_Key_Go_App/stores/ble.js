@@ -119,6 +119,8 @@ function _isGattConflict(err) {
 let _bindKey = null
 // ★ 2026-07-10: 绑定进行中标志——防止连接时自动 ensureSession 的并发 AUTH 干扰 BIND 流程
 let _bindInProgress = false
+// ★ 2026-07-12: 自动 AUTH（重连恢复会话）进行中标志——防止 _maybeAutoAuth 被多路径并发触发导致重复 NONCE
+let _autoAuthRunning = false
 
 // 绑定指令的异步等待器（NONCE/AUTH/BIND/UNBIND 的回应经 FF02 通知解析后 resolve）
 const _bindWaiters = { NONCE: null, AUTH: null, BIND: null, UNBIND: null, SETCODE: null }
@@ -165,6 +167,7 @@ export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
     connected: false,
+    _statusNotifyReady: false,       // ★ 2026-07-12: FF02/Battery Notify 是否已成功订阅（自动 AUTH 的前置条件）
     deviceId: '',
     deviceName: '',
 
@@ -1665,6 +1668,7 @@ export const useBleStore = defineStore('ble', {
     _finalizeConnection(deviceId) {
       this.connected = true
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
+      this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this.lastDeviceId = deviceId
       if (!this.deviceName) {
         const macClean = this.deviceId.replace(/:/g, '')
@@ -1686,17 +1690,15 @@ export const useBleStore = defineStore('ble', {
         this._resolveDeviceName(sn)
         this._loadConfigForDevice(sn)
         this._syncConfigToDevice()
-        // ★ ②: 恢复本机已存的 bindKey；若本机曾绑定，则主动完成 AUTH 会话鉴权
+        // ★ ②: 恢复本机已存的 bindKey（isBound 复原）。若本机曾绑定，则在 FF02 Notify
+        //   订阅就绪后自动重做 AUTH 握手恢复会话（见 _maybeAutoAuth）。
+        //   ★ 2026-07-12 修复（bug ①）：此前「阶段1 明文绑定」临时注释掉了连接时的自动 AUTH，
+        //   导致重连后 sessionAuthed 永远 false → UI 恒显「已绑定·连接待验证」、且手动控制指令
+        //   被 sendCommand 的 sessionAuthed 门控挡成「设备未绑定，请先绑定」，逼用户每次手动重验证。
+        //   固件 Bonding_ConnTerminated 本就在每连接清零会话态，故重连必须重 AUTH——自动补上即可。
         if (sn) {
           this._restoreBindKey(sn)
-          // ★ 阶段1(明文绑定): 注释掉连接时的自动 AUTH 加密握手（原函数 ensureSession 保留未删，阶段3 恢复）。
-          //   阶段1 不做加密自动重连，由用户手动 BIND 重建会话。
-          // if (_bindKey) {
-          //   this.ensureSession().then(ok => {
-          //     if (ok) console.log('[BIND] 自动会话鉴权成功')
-          //     else console.warn('[BIND] 自动会话鉴权失败（设备可能已解绑/重置）')
-          //   }).catch(e => console.warn('[BIND] 自动会话鉴权异常:', e?.message || e))
-          // }
+          this._maybeAutoAuth()
         }
       }).catch(() => {})
 
@@ -1724,6 +1726,10 @@ export const useBleStore = defineStore('ble', {
         await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
         notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
         this._fetchBatteryLevel(targetId).catch(() => {})
+        // ★ 2026-07-12: FF02 Notify 已订阅 → 标记就绪并触发自动 AUTH（恢复会话态）。
+        //   必须在订阅之后（NONCE/AUTH 回包走 FF02），否则回包丢失会超时失败。
+        this._statusNotifyReady = true
+        this._maybeAutoAuth()
       } catch (_) {}
     },
 
@@ -2799,6 +2805,28 @@ export const useBleStore = defineStore('ble', {
       done = true
       clearTimeout(timer)
       return ok === true
+    },
+
+    /**
+     * ★ 2026-07-12 修复（bug ①）：重连后自动恢复会话鉴权。
+     *   仅在「本连接已订阅 FF02 Notify(_statusNotifyReady) + 本机持有 bindKey(_bindKey)
+     *   + 尚未鉴权(sessionAuthed=false) + 无 BIND 进行中 + 仍连接」时触发 ensureSession。
+     *   由序列号读取完成 与 _enableStatusNotify(FF02 订阅就绪) 双路径调用，
+     *   经 _statusNotifyReady 与 _autoAuthRunning 双重闸门保证「订阅后才发 NONCE、不重复触发」。
+     *   设备端 Bonding_ConnTerminated 每连接清零会话态，故重连必须重 AUTH——此方法让该过程全自动，
+     *   消除「重进 APP 还得手动验证绑定」的体验问题。
+     */
+    _maybeAutoAuth() {
+      if (!this._statusNotifyReady) return   // ★ FF02 未订阅，NONCE 回包收不到，必须等订阅就绪
+      if (this.sessionAuthed || _bindInProgress || !_bindKey || !this.connected) return
+      if (_autoAuthRunning) return
+      _autoAuthRunning = true
+      this.ensureSession().then(ok => {
+        if (ok) console.log('[BIND] 自动会话鉴权成功（重连恢复）')
+        else console.warn('[BIND] 自动会话鉴权失败（设备可能已解绑/重置，请手动验证）')
+      }).catch(e => {
+        console.warn('[BIND] 自动会话鉴权异常:', e?.message || e)
+      }).finally(() => { _autoAuthRunning = false })
     },
 
     /** 主动请求一次性 nonce，返回 32 hex 字符或 null */
