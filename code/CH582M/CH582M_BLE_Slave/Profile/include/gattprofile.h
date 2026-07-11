@@ -78,6 +78,10 @@ extern bStatus_t simpleProfile_Notify(uint16_t connHandle, attHandleValueNoti_t 
 
 extern uint16_t simpleProfile_GetHandle(uint8_t charID);
 
+// ★ 2026-07-11: 命令交付环形缓冲 —— 在 GATT 写到达时刻快照 FF03 命令，
+//   应用侧按 FIFO 弹出处理，隔离 simpleProfileChar3 被后续写/射频中断重入覆盖。
+extern uint8_t  SimpleProfile_PopCmd(uint8_t *out, uint16_t *outLen);
+
 /*********************************************************************
 *********************************************************************/
 

@@ -765,14 +765,21 @@ function _registerJsScreenReceiver(callback) {
     const Intent = plus.android.importClass('android.content.Intent')
     const IntentFilter = plus.android.importClass('android.content.IntentFilter')
 
+    // ★ 2026-07-10 修复：某些 DCloud/uni-app 运行时 `Intent.ACTION` 未暴露 USER_PRESENT 常量
+    //   （报 Cannot read property 'USER_PRESENT' of undefined），且 ACTION_SCREEN_ON/OFF 也未必齐全。
+    //   广播 action 本就是字符串，故统一改用字面值，不再依赖 Intent.ACTION.* 常量表。
+    const ACTION_SCREEN_ON = 'android.intent.action.SCREEN_ON'
+    const ACTION_SCREEN_OFF = 'android.intent.action.SCREEN_OFF'
+    const ACTION_USER_PRESENT = 'android.intent.action.USER_PRESENT'
+
     const ReceiverImpl = plus.android.implements(
       'io.dcloud.feature.internal.reflect.BroadcastReceiver',
       {
         onReceive: function(ctx, intent) {
           const action = intent.getAction()
-          if (action === Intent.ACTION_SCREEN_ON || action === Intent.ACTION.USER_PRESENT || action === Intent.ACTION.SCREEN_OFF) {
+          if (action === ACTION_SCREEN_ON || action === ACTION_USER_PRESENT || action === ACTION_SCREEN_OFF) {
             const type = action === Intent.ACTION.SCREEN_OFF ? 'screen_off'
-                       : action === Intent.ACTION.USER_PRESENT ? 'user_present' : 'screen_on'
+                       : action === ACTION_USER_PRESENT ? 'user_present' : 'screen_on'
             const label = action === Intent.ACTION.SCREEN_OFF ? 'SCREEN_OFF(屏幕关闭)' : action === Intent.ACTION.USER_PRESENT ? 'USER_PRESENT(已解锁)' : 'SCREEN_ON'
             console.log(`${TAG} 📱 屏幕事件: ${label}`)
             addDebugLog(`JS回退屏幕事件: ${type}`)
@@ -790,9 +797,9 @@ function _registerJsScreenReceiver(callback) {
 
     _screenReceiver = ReceiverImpl
     const filter = new IntentFilter()
-    filter.addAction(Intent.ACTION_SCREEN_ON)
-    filter.addAction(Intent.ACTION.USER_PRESENT)
-    filter.addAction(Intent.ACTION.SCREEN_OFF)
+    filter.addAction(ACTION_SCREEN_ON)
+    filter.addAction(ACTION_USER_PRESENT)
+    filter.addAction(ACTION_SCREEN_OFF)
     ctx.registerReceiver(_screenReceiver, filter)
 
     console.log(`${TAG} 📱 亮屏广播已注册 (SCREEN_ON + USER_PRESENT) [JS]`)

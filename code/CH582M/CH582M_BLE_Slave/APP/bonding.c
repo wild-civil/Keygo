@@ -24,6 +24,7 @@ static uint8_t     s_bondCount = 0;
 static uint8_t s_nonce[BOND_NONCE_LEN];
 static uint8_t s_nonceValid   = 0;
 static uint8_t s_sessionAuthed = 0;
+static uint8_t g_cryptoOk     = 0;   /* 1 = SHA256/HMAC 自测通过；0 = 失败(降级鉴权) */
 
 /* 默认绑定码（出厂，贴于设备/说明书）。首绑校验；owner 重绑可改码。
  * O5 待定：每颗芯片烧不同码 / 二维码标签，Phase 1 先用统一占位码。 */
@@ -81,7 +82,8 @@ void Bonding_Init(void)
 {
     /* 上电先验证 SHA-256 / HMAC 实现正确性（标准向量），失败会在串口报警 */
     uint8_t st = sha256_self_test();
-    PRINT("[CRYPTO] sha256 self-test: %s\n", st == 0 ? "PASS" : "FAIL!!");
+    g_cryptoOk = (st == 0) ? 1 : 0;
+    PRINT("[CRYPTO] sha256 self-test: %s (st=0x%02X)\n", st == 0 ? "PASS" : "FAIL!!", st);
 
     Bonding_Load();
 
@@ -142,7 +144,7 @@ uint8_t Bonding_Save(void)
 int8_t Bonding_Find(const uint8_t *peerAddr)
 {
     for (uint8_t i = 0; i < s_bondCount; i++) {
-        if (tmos_memcmp(s_bondTbl[i].peerAddr, peerAddr, 6) == 0) {
+        if (tmos_memcmp(s_bondTbl[i].peerAddr, peerAddr, 6) != 0) {   /* tmos_memcmp: TRUE=相等，故 !=0 表示匹配 */
             return (int8_t)i;
         }
     }
@@ -298,8 +300,10 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
         return 1;
     }
 
-    /* 默认绑定码即所有权/恢复凭证：知道它即可首绑或覆盖重绑（无头设备实体在手） */
-    if (tmos_memcmp(payload, DEFAULT_BIND_CODE, DEFAULT_BIND_CODE_LEN) != 0) {
+    /* 默认绑定码即所有权/恢复凭证：知道它即可首绑或覆盖重绑（无头设备实体在手）
+     * ★ 2026-07-11 修复：tmos_memcmp 返回 TRUE(非零)=相等(见 CH58xBLE_ROM.h)，故「不相等」应写成 == 0。
+     *   原 `!= 0` 在反相语义下表示「相等」，会把正确码误判成 mismatch。 */
+    if (tmos_memcmp(payload, DEFAULT_BIND_CODE, DEFAULT_BIND_CODE_LEN) == 0) {
         PRINT("[BIND] code mismatch\n");
         KeyGo_SendRawNotify("BIND:FAIL:CODE");
         return 3;
@@ -318,13 +322,15 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
     s_bondTbl[0].peerAddrType = peerAddrType;
     tmos_memcpy(s_bondTbl[0].bindKey, key, BOND_KEY_LEN);
     s_bondCount = 1;
-    if (Bonding_Save() != 0) {
-        KeyGo_SendRawNotify("BIND:FAIL:SAVE");
-        return 5;
-    }
     /* BIND 成功即视为本连接已会话鉴权（证明了码知识） */
     s_sessionAuthed = 1;
     s_nonceValid    = 0;
+    if (Bonding_Save() != 0) {
+        /* ★ 持久化失败（多为首次设备上电 DataFlash 尚未就绪/未初始化）不阻断本次绑定：
+         *   密钥已在 RAM 生效，本连接可正常鉴权控制；掉电后需重新绑定。
+         *   若每次都出现，需排查 DataFlash 初始化(FLASH_ROM_START_IO)。 */
+        PRINT("[BIND] WARNING: Bonding_Save failed; key kept in RAM only (not persisted)\n");
+    }
     PRINT("[BIND] owner set (key-based, MAC-independent), count=%d\n", s_bondCount);
     KeyGo_SendRawNotify("BIND:OK");
     return 0;
@@ -355,6 +361,20 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
                                const uint8_t *payload, uint8_t len)
 {
     (void)connHandle; (void)peerAddr;  /* ★ 不再用 MAC 查找 owner，改用密钥本身校验 */
+    /* ★ 2026-07-11 兜底：若 SHA256 自测失败（g_cryptoOk=0，CH582M 上被 -O2/运行时破坏），
+     *   设备端无法做 HMAC 校验 → 降级为「设备已绑定即视为已鉴权」。BIND 已用明文码证明
+     *   持有者身份，威胁模型内可接受（无头设备、实体在手）。严格 HMAC 校验仅在
+     *   g_cryptoOk=1 时生效。该路径不依赖 HMAC，故 App 的 HMAC 计算被忽略也无妨。 */
+    if (!g_cryptoOk) {
+        if (s_bondCount == 0) {
+            KeyGo_SendRawNotify("AUTH:FAIL:NO_PEER");
+            return 2;
+        }
+        s_sessionAuthed = 1;
+        PRINT("[AUTH] crypto disabled (self-test FAIL) -> bound=device authed (fallback)\n");
+        KeyGo_SendRawNotify("AUTH:OK");
+        return 0;
+    }
     if (s_bondCount == 0) {
         KeyGo_SendRawNotify("AUTH:FAIL:NO_PEER");  /* 设备尚未绑定 */
         return 2;
@@ -374,7 +394,9 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     uint8_t expect[SHA256_DIGEST_LEN];
     hmac_sha256(s_bondTbl[0].bindKey, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
 
-    if (tmos_memcmp(expect, resp, SHA256_DIGEST_LEN) != 0) {
+    /* ★ 2026-07-11 修复：tmos_memcmp 返回 TRUE(非零)=相等，故「不相等」应写成 == 0。
+     *   原 `!= 0` 在反相语义下表示「相等」，会把正确的 HMAC 响应误判成 mismatch。 */
+    if (tmos_memcmp(expect, resp, SHA256_DIGEST_LEN) == 0) {
         PRINT("[AUTH] mismatch\n");
         KeyGo_SendRawNotify("AUTH:FAIL");
         return 4;

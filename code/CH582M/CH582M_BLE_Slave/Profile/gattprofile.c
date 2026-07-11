@@ -68,6 +68,45 @@ static uint8_t simpleProfileChar3Props = GATT_PROP_WRITE;
 static uint8_t simpleProfileChar3[SIMPLEPROFILE_CHAR3_LEN] = {0};
 static uint8_t simpleProfileChar3UserDesp[] = "Command\0";
 
+// ---- ★ 2026-07-11 命令交付环形缓冲 ----
+//   根因：应用回调 simpleProfileChangeCB 触发时，共享缓冲 simpleProfileChar3
+//   可能已被下一条 GATT 写（或射频中断重入）覆盖，导致派发读到错位命令
+//   （BIND→AUTH:FAIL:SHORT / NONCE→BIND:FAIL:SHORT，差一个命令）。
+//   修复：在【GATT 写到达的同步时刻】(simpleProfile_WriteAttrCB) 把完整命令
+//   快照进本环，应用侧 SimpleProfile_PopCmd() 按 FIFO 弹出处理，与
+//   simpleProfileChar3 彻底解耦，不再受其复用影响。
+#define CMD_RING_DEPTH  4
+static uint8_t  s_cmdRing[CMD_RING_DEPTH][SIMPLEPROFILE_CHAR3_LEN];
+static uint16_t s_cmdRingLen[CMD_RING_DEPTH];
+static uint8_t  s_cmdRingHead = 0;   // 下一个写入位置
+static uint8_t  s_cmdRingTail = 0;   // 下一个弹出位置
+static uint8_t  s_cmdRingCnt  = 0;
+
+static void SimpleProfile_PushCmd(const uint8_t *buf, uint16_t len)
+{
+    uint16_t c = (len > SIMPLEPROFILE_CHAR3_LEN) ? SIMPLEPROFILE_CHAR3_LEN : len;
+    if (c == 0) return;
+    tmos_memcpy(s_cmdRing[s_cmdRingHead], buf, c);
+    s_cmdRingLen[s_cmdRingHead] = c;
+    s_cmdRingHead = (s_cmdRingHead + 1) % CMD_RING_DEPTH;
+    if (s_cmdRingCnt < CMD_RING_DEPTH) {
+        s_cmdRingCnt++;
+    } else {
+        s_cmdRingTail = (s_cmdRingTail + 1) % CMD_RING_DEPTH;  /* 满：丢弃最旧 */
+    }
+}
+
+uint8_t SimpleProfile_PopCmd(uint8_t *out, uint16_t *outLen)
+{
+    if (s_cmdRingCnt == 0) return 0;
+    uint16_t c = s_cmdRingLen[s_cmdRingTail];
+    tmos_memcpy(out, s_cmdRing[s_cmdRingTail], c);
+    *outLen = c;
+    s_cmdRingTail = (s_cmdRingTail + 1) % CMD_RING_DEPTH;
+    s_cmdRingCnt--;
+    return 1;
+}
+
 // ---- Char4 (FF04): 序列号读取, RO (12 bytes) ----
 static uint8_t simpleProfileChar4Props = GATT_PROP_READ;
 static uint8_t simpleProfileChar4[SIMPLEPROFILE_CHAR4_LEN] = {0};
@@ -341,42 +380,75 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle, gattAttribute_t *
 /*********************************************************************
  * @fn      simpleProfile_WriteAttrCB
  */
+/* ★ 2026-07-11: FF03 长写(prepare-write)累积长度。各分片按 offset 拼回
+ *   simpleProfileChar3，execute 时一次性交给应用层。静态持久，跨多次写回调有效。 */
+static uint16_t g_ff03WrTotal = 0;
 static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t *pAttr,
                                            uint8_t *pValue, uint16_t len, uint16_t offset,
                                            uint8_t method)
 {
     bStatus_t status = SUCCESS;
     uint8_t   notifyApp = 0xFF;
+    uint8_t  *appVal    = pValue;   /* ★ 传给应用的值指针（长写时为完整缓冲）*/
+    uint16_t  appLen    = len;      /* ★ 传给应用的完整长度（长写时为累积总长）*/
 
     // 拒绝需要授权的写操作 (此 Profile 不使用 authorization)
     if (gattPermitAuthorWrite(pAttr->permissions))
         return ATT_ERR_INSUFFICIENT_AUTHOR;
-
-    if (offset != 0)
-        return ATT_ERR_ATTR_NOT_LONG;
 
     if (pAttr->type.len == ATT_BT_UUID_SIZE)
     {
         uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
         switch (uuid)
         {
-            case SIMPLEPROFILE_CHAR1_UUID:   // FF01: RSSI
-                if (len > SIMPLEPROFILE_CHAR1_LEN)
+            case SIMPLEPROFILE_CHAR1_UUID:   // FF01: RSSI（不支持长写，offset 必为 0）
+                if (offset != 0) {
+                    status = ATT_ERR_ATTR_NOT_LONG;
+                } else if (len > SIMPLEPROFILE_CHAR1_LEN) {
                     status = ATT_ERR_INVALID_VALUE_SIZE;
-                else {
+                } else {
                     tmos_memcpy(simpleProfileChar1, pValue, len);
                     if (len < SIMPLEPROFILE_CHAR1_LEN) simpleProfileChar1[len] = '\0';
                     notifyApp = SIMPLEPROFILE_CHAR1;
                 }
                 break;
 
-            case SIMPLEPROFILE_CHAR3_UUID:   // FF03: Command
-                if (len > SIMPLEPROFILE_CHAR3_LEN)
-                    status = ATT_ERR_INVALID_VALUE_SIZE;
-                else {
-                    tmos_memcpy(simpleProfileChar3, pValue, len);
-                    if (len < SIMPLEPROFILE_CHAR3_LEN) simpleProfileChar3[len] = '\0';
+            case SIMPLEPROFILE_CHAR3_UUID:   // FF03: Command（★ 支持长写 prepare-write 重组）
+                if (method == ATT_PREPARE_WRITE_REQ) {
+                    /* 长写分段：offset==0 表示新一轮开始，清零累积长度；
+                     * 之后按 offset 把各片拼回 simpleProfileChar3，等 EXECUTE 再交给应用。
+                     * ★ 2026-07-11 根因修复：旧逻辑对 offset!=0 直接返回
+                     *   ATT_ERR_ATTR_NOT_LONG，导致 BIND/AUTH 等长写被截断丢弃，
+                     *   固件只收到首片 → BIND:FAIL:SHORT / 绑定无响应。 */
+                    if (offset == 0) g_ff03WrTotal = 0;
+                    if (offset + len > SIMPLEPROFILE_CHAR3_LEN) {
+                        status = ATT_ERR_INVALID_VALUE_SIZE;
+                    } else {
+                        tmos_memcpy(simpleProfileChar3 + offset, pValue, len);
+                        if (offset + len > g_ff03WrTotal) g_ff03WrTotal = offset + len;
+                        /* 不通知应用，等 EXECUTE */
+                    }
+                } else if (method == ATT_EXECUTE_WRITE_REQ) {
+                    /* 长写提交：把累积的完整命令一次性交给应用 */
+                    simpleProfileChar3[g_ff03WrTotal] = '\0';
+                    /* ★ 2026-07-11 修复：写到达即快照进环形缓冲，与 simpleProfileChar3 解耦 */
+                    SimpleProfile_PushCmd(simpleProfileChar3, g_ff03WrTotal);
+                    appVal    = simpleProfileChar3;
+                    appLen    = g_ff03WrTotal;
+                    g_ff03WrTotal = 0;
                     notifyApp = SIMPLEPROFILE_CHAR3;
+                } else {
+                    /* 普通短写 (ATT_WRITE_REQ / ATT_WRITE_CMD)，offset 必为 0 */
+                    if (len > SIMPLEPROFILE_CHAR3_LEN) {
+                        status = ATT_ERR_INVALID_VALUE_SIZE;
+                    } else {
+                        tmos_memcpy(simpleProfileChar3, pValue, len);
+                        if (len < SIMPLEPROFILE_CHAR3_LEN) simpleProfileChar3[len] = '\0';
+                        SimpleProfile_PushCmd(simpleProfileChar3, len);
+                        appVal    = simpleProfileChar3;
+                        appLen    = len;
+                        notifyApp = SIMPLEPROFILE_CHAR3;
+                    }
                 }
                 break;
 
@@ -395,10 +467,10 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
         status = ATT_ERR_INVALID_HANDLE;
     }
 
-    // 通知应用层
+    // 通知应用层（★ 长写时用完整缓冲 appVal 与累积长度 appLen）
     if ((notifyApp != 0xFF) && simpleProfile_AppCBs && simpleProfile_AppCBs->pfnSimpleProfileChange)
     {
-        simpleProfile_AppCBs->pfnSimpleProfileChange(notifyApp, pValue, len);
+        simpleProfile_AppCBs->pfnSimpleProfileChange(notifyApp, appVal, appLen);
     }
 
     return status;

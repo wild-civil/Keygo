@@ -45,6 +45,7 @@ void KeyGo_NotifyStatus(void);
 
 // ★ 绑定层回写报文（FF02 Notify）：BIND:/NONCE:/AUTH:/UNBIND:/DENY: 等短消息
 void KeyGo_SendRawNotify(const char *msg);
+void KeyGo_FlushRawNotify(void);   // ★ 2026-07-11: 延迟发送队列消费（SBP_DEFERRED_RAW_EVT 任务内调用）
 
 // 命令处理 (NAME/TRUNK/UNLOCK/LOCK)
 void KeyGo_HandleCommand(const char *cmd, uint16_t len);

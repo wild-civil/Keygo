@@ -209,6 +209,8 @@
       <!-- ★ ② 设备绑定：应用层 BIND + AUTH challenge-response -->
       <view class="divider"></view>
       <view class="section-title">🔐 设备绑定（应用层鉴权）</view>
+      <view class="config-desc">已连接设备固件版本：<text class="fw-ver">{{ bleStore.fwVersion || '未知' }}</text>
+        <text v-if="bleStore.fwVersion && bleStore.fwVersion !== '3.30.1'">（仍显示旧版本 → 烧录未生效，设备跑的是旧固件）</text></view>
 
       <view class="bind-status" :class="bindStatusClass">
         <text class="bind-dot">●</text>
@@ -218,10 +220,15 @@
       <!-- 未绑定：输入绑定码 -->
       <view class="config-item" v-if="!bleStore.isBound">
         <view class="config-desc">首次绑定请输入设备默认绑定码（机身标签）。绑定成功后本机将持有该设备的密钥，可正常控车；其他手机需先解绑才能绑定本机。</view>
-        <input class="bind-input" v-model="bindCode" placeholder="请输入绑定码" :password="true"
+        <input class="bind-input" v-model="bindCode" placeholder="请输入绑定码" type="text"
           maxlength="32" :disabled="binding" />
         <button class="btn-bind" :disabled="!bindCode || binding" @tap="handleBind">
           {{ binding ? '绑定中...' : '绑定设备' }}
+        </button>
+        <!-- ★ 2026-07-10：输入框在部分 Android 自定义基座上无法弹键盘/聚焦，
+             提供「默认码一键绑定」兜底入口，绕过输入框焦点问题即可完成首绑 -->
+        <button class="btn-bind-default" :disabled="binding" @tap="handleBindDefault">
+          {{ binding ? '绑定中...' : '使用默认码 123456 绑定' }}
         </button>
       </view>
 
@@ -239,7 +246,7 @@
         <!-- ★ 2026-07-10：始终提供「重新绑定」入口，避免本地有密钥但设备端因 MAC 变化
              拒连时用户无处可重新绑定（默认绑定码即可覆盖重绑/恢复） -->
         <view class="config-desc" style="margin-top:16rpx;">若控车提示「未绑定/验证失败」，可重新输入默认绑定码恢复绑定：</view>
-        <input class="bind-input" v-model="bindCode" placeholder="重新绑定：请输入绑定码" :password="true"
+        <input class="bind-input" v-model="bindCode" placeholder="重新绑定：请输入绑定码" type="text"
           maxlength="32" :disabled="binding" />
         <button class="btn-bind" :disabled="!bindCode || binding" @tap="handleBind">
           {{ binding ? '绑定中...' : '重新绑定' }}
@@ -507,6 +514,25 @@ async function handleBind() {
     const ok = await bleStore.bindDevice(bindCode.value)
     if (ok) {
       toast.success('绑定成功')
+      bindCode.value = ''
+    } else {
+      toast.error(bleStore.bindHint || '绑定失败')
+    }
+  } catch (e) {
+    toast.error(e && e.message ? e.message : '绑定失败')
+  } finally {
+    binding.value = false
+  }
+}
+
+// ★ 2026-07-10：默认码一键绑定（绕过输入框焦点问题）
+async function handleBindDefault() {
+  if (binding.value) return
+  binding.value = true
+  try {
+    const ok = await bleStore.bindDevice('123456')
+    if (ok) {
+      toast.success('绑定成功（默认码）')
       bindCode.value = ''
     } else {
       toast.error(bleStore.bindHint || '绑定失败')
@@ -989,6 +1015,20 @@ async function handleUnbind(all) {
 
 .btn-bind:active { opacity: 0.8; }
 .btn-bind[disabled] { opacity: 0.3; }
+
+.btn-bind-default {
+  width: 100%;
+  background: transparent;
+  color: var(--accent);
+  border: 2rpx solid var(--accent);
+  font-size: 26rpx;
+  font-weight: 600;
+  padding: 22rpx 0;
+  border-radius: 14rpx;
+  margin-top: 16rpx;
+}
+.btn-bind-default:active { opacity: 0.7; }
+.btn-bind-default[disabled] { opacity: 0.3; }
 
 .bind-actions {
   display: flex;

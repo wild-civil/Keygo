@@ -6,9 +6,13 @@
  *********************************************************************************/
 
 #include "keygo_core.h"
+#include "bonding.h"
 #include "gattprofile.h"
+#include "peripheral.h"   // ★ 2026-07-11: 引用 SBP_DEFERRED_RAW_EVT 事件常量
 #include <stdlib.h>   /* atoi */
 #include "CH58x_common.h"  /* EEPROM_READ / EEPROM_WRITE / EEPROM_ERASE */
+
+extern uint8_t Peripheral_TaskID;   // ★ 2026-07-11: 跨文件启动延迟发送任务（定义在 peripheral.c）
 
 /* ─────────────────────────────────────────────────────────────────
  * 宏定义 (模块内部)
@@ -23,7 +27,7 @@
 #define STATUS_JSON_MAX_LEN         200  // ★ 加了 cd 字段，json 更长，从 180 扩到 200
 /* ★ v3.16-#26: 固件版本号 — 通过 FF02 Notify JSON 字段 "v" 上报
  *   App 可据此做兼容性检查，提示用户升级固件 */
-#define KEYGO_FW_VERSION           "3.16"
+#define KEYGO_FW_VERSION           "3.30.4-rc5"    // ★ 2026-07-11: 修复 DataFlash 持久化——Peripheral_Init 调用 FLASH_ROM_START_IO() 使能 I/O，配置/绑定重启不再丢失
 
 /* ★ v3.15: TMOS 时间转换常量
  *   TMOS tick ≈ 0.625ms = 5/8 ms → ms = ticks × 5 ÷ 8, ticks = ms × 8 ÷ 5 */
@@ -153,6 +157,11 @@ uint32_t Peripheral_GetSystemMs(void)
 
 void KeyGo_GPIO_Init(void)
 {
+    /* ★ 2026-07-11: 开机即打印固件版本号，作为"新固件是否真正烧入"的硬探针。
+     *   与 [FF03] 同一串口窗口。若上电后看不到 "FW Version: 3.30.4-rc5"，
+     *   说明烧的是旧 hex（Clean+Rebuild 未生效），与 App 控制台 fwVersion= 互证。 */
+    PRINT("[INIT] FW Version: %s\n", KEYGO_FW_VERSION);
+
     GPIOA_ModeCfg(PIN_UNLOCK_GPIO, GPIO_ModeOut_PP_5mA);
     GPIOA_ModeCfg(PIN_LOCK_GPIO, GPIO_ModeOut_PP_5mA);
     GPIOA_ModeCfg(PIN_TRUNK_GPIO, GPIO_ModeOut_PP_5mA);
@@ -395,6 +404,11 @@ void KeyGo_ProcessStateMachine(void)
     //   解决露营等贴身场景 RSSI 抖动导致车锁反复解锁/上锁的问题
     if (!g_cfgAutoLockEnable) return;
 
+    // ★ 2026-07-10 修复：未绑定的设备不响应 RSSI 自动解锁/上锁。
+    //   否则任何靠近的手机都能触发解锁，绑定形同虚设——必须先 BIND（默认码）建立信任。
+    //   手动 UNLOCK/LOCK 命令仍有独立会话鉴权门控（见 Peripheral_HandleFF03）。
+    if (Bonding_Count() == 0) return;
+
     // ★ 只在有新 Kalman 样本时才计数（每 ~500ms 一次，而非每 125ms）
     if (!g_rssiUpdated) return;
     g_rssiUpdated = 0;
@@ -430,6 +444,8 @@ void KeyGo_ProcessStateMachine(void)
  * JSON 状态通知 (FF02 Notify)
  * ───────────────────────────────────────────────────────────────── */
 
+static uint8_t s_statusRetry = 0;  // ★ 2026-07-11 fix2: 状态通知发送失败重试计数
+
 void KeyGo_NotifyStatus(void)
 {
     if (!g_deviceConnected || peripheralConnList.connHandle == GAP_CONNHANDLE_INIT)
@@ -451,7 +467,7 @@ void KeyGo_NotifyStatus(void)
     }
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"v\":\"%s\"}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\"}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
@@ -460,6 +476,7 @@ void KeyGo_NotifyStatus(void)
         (int)g_cfgManualCooldownMs,  // ★ v3.7: 上报当前冷却时间，App 端同步
         (int)g_cfgKalmanR,           // ★ v3.13: 上报 kalmanR，App 同步 kalmanR
         (int)g_cfgAutoLockEnable,    // ★ v3.24: 上报自动锁使能状态，App 可显示/调试
+        (int)(Bonding_Count() > 0 ? 1 : 0),  // ★ 2026-07-10: 已绑定标志，作为 BIND:OK 的兜底确证（status 可靠送达）
         KEYGO_FW_VERSION);           /* ★ v3.16-#26: 固件版本号上报，App 可做兼容性检查 */
 
     if (n > 0 && n < (int)sizeof(json)) {
@@ -471,6 +488,16 @@ void KeyGo_NotifyStatus(void)
             tmos_memcpy(noti.pValue, json, noti.len);
             if (simpleProfile_Notify(peripheralConnList.connHandle, &noti) != SUCCESS) {
                 GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
+                /* ★ 2026-07-11 fix2：状态通知发送失败（写事务忙 / bm_alloc 失败）也重试，
+                 *   否则绑定后紧跟的 status(bn=1) 可能丢失 → App 的 bn 兜底确认失效。
+                 *   重排 SBP_DEFERRED_STATUS_EVT 再发一次（上限防死循环）。 */
+                if (s_statusRetry < 6) {
+                    s_statusRetry++;
+                    tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+                    PRINT("[STATUS] notify fail, retry=%d\n", s_statusRetry);
+                }
+            } else {
+                s_statusRetry = 0;
             }
         }
     }
@@ -487,23 +514,94 @@ void KeyGo_NotifyStatus(void)
  * @brief   绑定层回写短报文（FF02 Notify）：BIND:/NONCE:/AUTH:/UNBIND:/DENY: 等。
  *          长度受 FF02 特征值容量限制（SIMPLEPROFILE_CHAR2_LEN）。
  *********************************************************************/
+/* ─────────────────────────────────────────────────────────────────
+ * ★ 2026-07-11 修复：绑定层短报文延迟发送队列
+ *   原实现 KeyGo_SendRawNotify 在 FF03 写回调里【同步】调用 GATT_bm_alloc +
+ *   simpleProfile_Notify 发送通知。在 CH582M BLE 协议栈下，写回调执行时 ATT 事务
+ *   缓冲区仍被占用（且 BIND 紧跟 Bonding_Save() Flash 写，会关中断/占总线），
+ *   导致 GATT_bm_alloc 偶发失败或通知被丢弃 —— 表现为 App 侧 BIND:OK / NONCE /
+ *   AUTH 回包时有时无（status 走 SBP_DEFERRED_STATUS_EVT 延迟任务，所以稳）。
+ *   改为：写回调内只【入队】并启动 SBP_DEFERRED_RAW_EVT（TMOS 任务，写回调之外），
+ *   由 KeyGo_FlushRawNotify 在任务里逐个发送，与 status 走同一可靠通道。
+ * ───────────────────────────────────────────────────────────────── */
+#define RAW_Q_SLOTS   6           // 短报文频率极低，6 槽足够
+#define RAW_Q_MAXLEN  48          // NONCE: + 32hex=38；DENY:AUTH_REQ: + 32hex=46；留余量
+static char    s_rawQ[RAW_Q_SLOTS][RAW_Q_MAXLEN];
+static uint8_t s_rawQHead   = 0;  // 下一个入队位置
+static uint8_t s_rawQTail   = 0;  // 下一个出队位置
+static uint8_t s_rawQPending = 0;
+static uint8_t s_rawRetry   = 0;  // ★ 失败重试计数（防死循环）
+
 void KeyGo_SendRawNotify(const char *msg)
 {
     if (!g_deviceConnected || peripheralConnList.connHandle == GAP_CONNHANDLE_INIT)
         return;
 
     uint16_t n = 0;
-    while (msg[n] && n < SIMPLEPROFILE_CHAR2_LEN) n++;
+    while (msg[n] && n < RAW_Q_MAXLEN - 1) { s_rawQ[s_rawQHead][n] = msg[n]; n++; }
     if (n == 0) return;
+    s_rawQ[s_rawQHead][n] = 0;
 
-    attHandleValueNoti_t noti;
-    noti.len    = n;
-    noti.pValue = GATT_bm_alloc(peripheralConnList.connHandle, ATT_HANDLE_VALUE_NOTI, n, NULL, 0);
-    if (noti.pValue) {
-        tmos_memcpy(noti.pValue, msg, n);
-        if (simpleProfile_Notify(peripheralConnList.connHandle, &noti) != SUCCESS) {
-            GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
+    // 入队并启动延迟发送任务（写回调之外再发，避开 ATT 缓冲区占用 / Flash 写关中断）
+    if (s_rawQPending < RAW_Q_SLOTS) {
+        s_rawQHead = (s_rawQHead + 1) % RAW_Q_SLOTS;
+        s_rawQPending++;
+        /* ★ 2026-07-11 fix2：首踢延迟 8(≈5ms) 先试，若 ATT 事务仍忙被拒，
+         *    FlushRawNotify 会以 32(≈20ms，与状态通知同档) 退避重试，直到成功。 */
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_RAW_EVT, 8);
+        PRINT("[RAW] enqueue '%s' pending=%d\n", msg, s_rawQPending);
+    }
+    // 队列满则丢弃最旧未发（极低概率，绑定类报文频率极低）
+}
+
+/** ★ 2026-07-11: 由 SBP_DEFERRED_RAW_EVT 任务调用，消费一个延迟短报文。
+ *   ★ fix2：发送失败（ATT 事务忙 / bm_alloc 失败）不再静默丢弃，
+ *   保留在队首并以更大延迟重试（上限 6 次，避免死循环）。并打印发送结果便于定位。 */
+void KeyGo_FlushRawNotify(void)
+{
+    if (!g_deviceConnected || peripheralConnList.connHandle == GAP_CONNHANDLE_INIT)
+        return;
+    if (s_rawQPending == 0) return;
+
+    char *m = s_rawQ[s_rawQTail];
+    uint16_t n = 0;
+    while (m[n]) n++;
+
+    bStatus_t st = 0xFF;  // 0xFF = 失败（非 SUCCESS）
+    if (n > 0) {
+        attHandleValueNoti_t noti;
+        noti.len    = n;
+        noti.pValue = GATT_bm_alloc(peripheralConnList.connHandle, ATT_HANDLE_VALUE_NOTI, n, NULL, 0);
+        if (noti.pValue) {
+            tmos_memcpy(noti.pValue, m, n);
+            st = simpleProfile_Notify(peripheralConnList.connHandle, &noti);
+            if (st != SUCCESS) {
+                GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
+            }
+        } else {
+            st = 0xFE;  // bm_alloc 失败
         }
+    }
+    PRINT("[RAW] flush '%s' st=%d retry=%d pending=%d\n", m, (int)st, s_rawRetry, s_rawQPending);
+
+    if (st == SUCCESS) {
+        s_rawRetry = 0;
+        s_rawQTail = (s_rawQTail + 1) % RAW_Q_SLOTS;
+        s_rawQPending--;
+    } else {
+        /* 发送失败：保留在队首重试；超过上限则丢弃，避免占满队列/死循环 */
+        s_rawRetry++;
+        if (s_rawRetry >= 6) {
+            PRINT("[RAW] drop after %d retries: %s\n", s_rawRetry, m);
+            s_rawRetry = 0;
+            s_rawQTail = (s_rawQTail + 1) % RAW_Q_SLOTS;
+            s_rawQPending--;
+        }
+    }
+
+    // 队列还有剩余 → 再排一次任务（失败重试用 32≈20ms 退避，成功续发也用此档，稳妥）
+    if (s_rawQPending > 0) {
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_RAW_EVT, 32);
     }
 }
 

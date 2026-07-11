@@ -119,6 +119,11 @@ uint8_t  Peripheral_TaskID    = INVALID_TASK_ID;
 static uint8_t advRestartRetryCount = 0;  // ★ v3.13: advertising 重启重试计数器
 static uint16_t peripheralMTU        = ATT_MTU_SIZE;
 
+/* ★ 2026-07-11: FF03 写累积缓冲（文件级静态，供 Peripheral_HandleFF03 追加解析、
+ *   并在 Peripheral_LinkTerminated 断连时清空，防止旧残片跨连接误解析）。声明置于
+ *   所有使用它的函数之前，满足 C 先声明后使用。 */
+
+
 /* ─────────────────────────────────────────────────────────────────
  * 前向声明 (模块内部)
  * ───────────────────────────────────────────────────────────────── */
@@ -257,6 +262,14 @@ void Peripheral_Init(void)
     // ── 硬件 & 外设 ──
     KeyGo_GPIO_Init();
     KeyGo_ResetState();
+    /* ★ 2026-07-11: 启用 DataFlash I/O 接口（CH58x 必需，且只需调用一次）。
+     *   任何 EEPROM_READ/WRITE/ERASE 之前都必须先 FLASH_ROM_START_IO()，
+     *   否则所有 DataFlash 操作返回失败 —— 表现为：
+     *     - [CONFIG] EEPROM_READ failed（配置无法恢复）
+     *     - BIND 时 Bonding_Save 失败（信任列表不落盘）
+     *     - 重启后 Bonding_Load 读不到 → 设备显示「未绑定」
+     *   这是此前「重启即丢失绑定 / 配置」的根因。BLE 栈的 SNV 内部也会用同一机制。 */
+    FLASH_ROM_START_IO();
     KeyGo_LoadConfig();   // ★ v3.5.1: 从 DataFlash 恢复上次保存的阈值
     Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层）
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
@@ -300,6 +313,24 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         }
         return (events ^ SBP_PERIODIC_EVT);
     }
+
+    /* ★ 2026-07-10: 延迟状态上报——绑定层短报文(BIND:OK/AUTH:OK 等)后立即发 status 会与
+     *   短报文抢同一通知队列，浅队列下短报文(BIND:OK)可能被丢弃 → App 收不到回包。
+     *   改为延迟 ~20ms(32 tick)再发 status，给 BLE 栈时间先把 BIND:OK 发出去。 */
+    if (events & SBP_DEFERRED_STATUS_EVT) {
+        if (g_deviceConnected) {
+            KeyGo_NotifyStatus();
+        }
+        return (events ^ SBP_DEFERRED_STATUS_EVT);
+    }
+
+    if (events & SBP_DEFERRED_RAW_EVT) {
+        // ★ 2026-07-11: 写回调之外消费绑定层短报文队列（BIND:/NONCE:/AUTH:/DENY:），
+        //   避免在 FF03 写回调内同步发通知导致 ATT 缓冲区占用/Flash 写关中断而丢包。
+        KeyGo_FlushRawNotify();
+        return (events ^ SBP_DEFERRED_RAW_EVT);
+    }
+
 
     if (events & SBP_PARAM_UPDATE_EVT) {
         GAPRole_PeripheralConnParamUpdateReq(peripheralConnList.connHandle,
@@ -648,64 +679,99 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
  *   UNBIND[:ALL] → 解绑
  *   其余（UNLOCK/LOCK/TRUNK/STATUS/NAME/配置）→ 须经会话鉴权才执行
  *********************************************************************/
+/* ★ 2026-07-11: FF03 写累积解析（详见文件顶部 g_ff03Buf 注释）。
+ *   现象：绑定返回 "BIND:FAIL:SHORT"，但 App 明确写了 "BIND:123456"(11 字节)。
+ *   根因：固件侧收到的写 len < 11（写被拆分/截断，或 Android BLE 栈把一条写
+ *   拆成多片下发），原逻辑按单次写判定 → payload 不足 6 → 误报 SHORT。
+ *   修复：累积多次写进 g_ff03Buf，再按各命令固定长度逐条提取分发：
+ *     - BIND:  前缀 5 + 码 6 = 11 字节
+ *     - AUTH:  前缀 5 + HMAC(64hex) = 69 字节
+ *     - NONCE  固定 5 字节
+ *     - UNBIND 6 字节（或 UNBIND:ALL = 11）
+ *   通用控制命令（UNLOCK/LOCK/config/NAME 等）为变长且本就单条发送，整段交给原门控逻辑。
+ *   若以绑定前缀开头但长度不足，则 break 等待后续写补齐，绝不误吞残片。 */
+/*********************************************************************
+ * ────────────────────── FF03 命令派发 ─────────────────────────────
+ *   GATT 层(gattprofile.c)已对 prepare-write 做完整重组（offset==0
+ *   即重置累积），本函数收到的 pValue/len 即「一条完整命令」，
+ *   直接按前缀解析派发即可。
+ *   ★ 2026-07-11 重构：移除旧版的 App 层累加缓冲 g_ff03Buf。
+ *     旧版在派发后若 Bonding_HandleBindCmd 未返回（如卡在 Flash 写），
+ *     缓冲不会被清空，下一条命令会被拼到前一条后面
+ *     (BIND:123456NONCE)，且因无 BIND:OK 回包导致绑定无响应。
+ *     改为「每条 GATT 交付 = 一条完整命令」后，命令之间彻底隔离，
+ *     任何单条命令的处理异常都不会污染后续命令。
+ *********************************************************************/
 static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
 {
-    uint16_t copyLen = (len > SIMPLEPROFILE_CHAR3_LEN) ? SIMPLEPROFILE_CHAR3_LEN : len;
-    char cmd[SIMPLEPROFILE_CHAR3_LEN + 1];
-    tmos_memcpy(cmd, pValue, copyLen);
-    cmd[copyLen] = '\0';
+    if (len == 0) return;
+
+    /* 诊断：打印收到的完整命令（与 [INIT] 同窗口） */
+    PRINT("[FF03] cmd len=%d :", len);
+    uint16_t _d = (len > 24) ? 24 : len;
+    for (uint16_t _i = 0; _i < _d; _i++) PRINT(" %02X", (uint8_t)pValue[_i]);
+    PRINT("  str='%.*s'\n", (int)len, (const char *)pValue);
 
     uint16_t connHandle = peripheralConnList.connHandle;
     uint8_t *peerAddr   = peripheralConnList.peerAddr;
     uint8_t  peerType   = peripheralConnList.peerAddrType;
 
-    /* ── 绑定/鉴权类指令：不经会话门控 ── */
-    if (tmos_memcmp(cmd, "BIND:", 5) == 0) {
-        Bonding_HandleBindCmd(connHandle, peerAddr, peerType,
-                              (const uint8_t *)(cmd + 5), (uint16_t)(copyLen - 5));
-        KeyGo_NotifyStatus();
+    /* 以绑定前缀开头但长度不足 → 直接报错，绝不误吞/误拼
+     * ★ 2026-07-11 修复：tmos_memcmp 返回 TRUE(非零)=相等 / FALSE(零)=不相等（CH58xBLE_ROM.h），
+     *   与标准 memcmp 相反。原代码误用 `== 0` 当作"前缀匹配"，导致所有命令前缀判断反相：
+     *   BIND:123456 被当 AUTH → AUTH:FAIL:SHORT；NONCE 被当 BIND → BIND:FAIL:SHORT。
+     *   现改为直接用返回值（真值=匹配），去掉错误的 `== 0`。 */
+    if (len >= 5 && tmos_memcmp(pValue, "BIND:", 5) && len < 11) {
+        KeyGo_SendRawNotify("BIND:FAIL:SHORT");
+        PRINT("[BIND] too short\n");
         return;
     }
-    if (tmos_memcmp(cmd, "AUTH:", 5) == 0) {
-        Bonding_HandleAuthResp(connHandle, peerAddr,
-                               (const uint8_t *)(cmd + 5), (uint8_t)(copyLen - 5));
-        KeyGo_NotifyStatus();
+    if (len >= 5 && tmos_memcmp(pValue, "AUTH:", 5) && len < 69) {
+        KeyGo_SendRawNotify("AUTH:FAIL:SHORT");
+        PRINT("[AUTH] too short\n");
         return;
     }
-    if (tmos_memcmp(cmd, "NONCE", 5) == 0 && (copyLen == 5 || cmd[5] == ':')) {
+    if (len >= 5 && tmos_memcmp(pValue, "NONCE", 5) && !(len == 5 || pValue[5] == ':')) {
+        KeyGo_SendRawNotify("AUTH:FAIL:BAD_CMD");
+        return;
+    }
+
+    if (len >= 11 && tmos_memcmp(pValue, "BIND:", 5)) {
+        PRINT("[BIND] enter\n");
+        uint8_t r = Bonding_HandleBindCmd(connHandle, peerAddr, peerType, pValue + 5, 6);
+        PRINT("[BIND] exit r=%d\n", r);
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 69 && tmos_memcmp(pValue, "AUTH:", 5)) {
+        Bonding_HandleAuthResp(connHandle, peerAddr, pValue + 5, 64);
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 5 && tmos_memcmp(pValue, "NONCE", 5) && (len == 5 || pValue[5] == ':')) {
         Bonding_HandleNonceReq(connHandle);
-        KeyGo_NotifyStatus();
-        return;
-    }
-    if (tmos_memcmp(cmd, "UNBIND", 6) == 0) {
-        uint8_t mode = 0;
-        if (copyLen > 7 && cmd[6] == ':' && cmd[7] == 'A') mode = 1; /* UNBIND:ALL */
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 6 && tmos_memcmp(pValue, "UNBIND", 6)) {
+        uint8_t mode = (len > 7 && pValue[6] == ':' && pValue[7] == 'A') ? 1 : 0; /* UNBIND:ALL */
         Bonding_HandleUnbindCmd(connHandle, peerAddr, mode);
-        KeyGo_NotifyStatus();
-        return;
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else {
+        /* ── 通用控制命令（UNLOCK/LOCK/config/NAME 等）── */
+        if (Bonding_Count() == 0) {
+            KeyGo_SendRawNotify("DENY:NOT_BOUND");
+            PRINT("[CMD] rejected: device not bound\n");
+            tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+        } else if (!Bonding_IsSessionAuthed(connHandle)) {
+            char hex[33];
+            Bonding_IssueNonce(hex);
+            char msg[48];
+            snprintf(msg, sizeof(msg), "DENY:AUTH_REQ:%s", hex);
+            KeyGo_SendRawNotify(msg);
+            PRINT("[CMD] rejected: auth required, nonce issued\n");
+            tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+        } else {
+            KeyGo_HandleCommand((const char *)pValue, len);
+            KeyGo_NotifyStatus();
+        }
     }
-
-    /* ── 控制类指令：须经会话鉴权 ── */
-    if (Bonding_Count() == 0) {
-        KeyGo_SendRawNotify("DENY:NOT_BOUND");
-        PRINT("[CMD] rejected: device not bound\n");
-        KeyGo_NotifyStatus();
-        return;
-    }
-    if (!Bonding_IsSessionAuthed(connHandle)) {
-        char hex[33];
-        Bonding_IssueNonce(hex);
-        char msg[48];
-        snprintf(msg, sizeof(msg), "DENY:AUTH_REQ:%s", hex);
-        KeyGo_SendRawNotify(msg);
-        PRINT("[CMD] rejected: auth required, nonce issued\n");
-        KeyGo_NotifyStatus();
-        return;
-    }
-
-    KeyGo_HandleCommand(cmd, copyLen);
-    KeyGo_NotifyStatus();
 }
+
 
 /*********************************************************************
  * ────────────────────── GATT 写回调 ───────────────────────────────
@@ -801,7 +867,15 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
 
         case SIMPLEPROFILE_CHAR3:  // FF03: Command（绑定/鉴权/门控统一入口）
         {
-            Peripheral_HandleFF03(pValue, len);
+            /* ★ 2026-07-11 修复：命令已在 GATT 写到达时刻由 simpleProfile_WriteAttrCB
+             *   快照进环形缓冲 SimpleProfile_PopCmd()，此处仅按 FIFO 弹出处理，
+             *   不再读共享的 simpleProfileChar3（会被后续写/射频中断重入覆盖 → 错位）。
+             *   HandleFF03 全程用弹出的私有副本，命令之间彻底隔离。 */
+            uint8_t cmdBuf[SIMPLEPROFILE_CHAR3_LEN];
+            uint16_t cmdLen = 0;
+            if (SimpleProfile_PopCmd(cmdBuf, &cmdLen)) {
+                Peripheral_HandleFF03(cmdBuf, cmdLen);
+            }
             break;
         }
 
