@@ -166,7 +166,7 @@ uint8_t sha256_self_test(void)
         0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
     };
     sha256((const uint8_t *)"abc", 3, d);
-    if (tmos_memcmp(d, exp_abc, SHA256_DIGEST_LEN) != 0) r |= 1;
+    if (tmos_memcmp(d, exp_abc, SHA256_DIGEST_LEN) == 0) r |= 1;  /* tmos_memcmp: TRUE=相等，故相等不报错，不相等才置位 */
 
     /* 向量 2: HMAC-SHA256("key", "The quick brown fox jumps over the lazy dog") */
     static const uint8_t exp_hmac[SHA256_DIGEST_LEN] = {
@@ -175,7 +175,7 @@ uint8_t sha256_self_test(void)
     };
     hmac_sha256((const uint8_t *)"key", 4,
                 (const uint8_t *)"The quick brown fox jumps over the lazy dog", 43, d);
-    if (tmos_memcmp(d, exp_hmac, SHA256_DIGEST_LEN) != 0) r |= 2;
+    if (tmos_memcmp(d, exp_hmac, SHA256_DIGEST_LEN) == 0) r |= 2; /* 同上 */
 
     return r;
 }

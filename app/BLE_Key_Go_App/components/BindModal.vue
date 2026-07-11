@@ -11,17 +11,28 @@
         <text class="bind-close" @tap="close">✕</text>
       </view>
 
-      <text class="bind-fw">已连接设备固件版本：<text class="fw-ver">{{ bleStore.fwVersion || '未知' }}</text>
-        <text v-if="bleStore.fwVersion && bleStore.fwVersion !== '3.30.1'">（旧版本→烧录未生效）</text></text>
+      <!-- ★ 固件版本徽标：判定逻辑已更新为「≥3.30.2 即含延迟发送回包修复，可绑定」 -->
+      <view class="fw-badge" :class="fwBadge.cls">
+        <text class="fw-badge-ver">固件版本：{{ bleStore.fwVersion || '未知' }}</text>
+        <text class="fw-badge-tip">{{ fwBadge.text }}</text>
+      </view>
 
       <view class="bind-status" :class="bindStatusClass">
         <text class="bind-dot">●</text>
         <text class="bind-text">{{ bindStatusText }}</text>
       </view>
 
-      <!-- 未绑定：输入绑定码 -->
-      <block v-if="!bleStore.isBound">
-        <text class="bind-desc">首次绑定请输入设备默认绑定码（机身标签）。绑定成功后本机将持有该设备的密钥，可正常控车；其他手机需先解绑才能绑定本机。</text>
+      <!-- ★ 诊断区：真机验证用（版本状态 / 绑定态 / 验证态 / 最近回包）。始终可见。 -->
+      <view class="diag">
+        <text class="diag-row">绑定态：{{ bleStore.isBound ? '已持有密钥' : '未绑定' }} | 设备端：{{ bleStore.deviceBound ? '已绑' : '未绑' }}</text>
+        <text class="diag-row">本连接验证：{{ bleStore.sessionAuthed ? '已通过 AUTH' : '待验证' }}</text>
+        <text class="diag-row diag-result" v-if="bleStore.bindHint">最近结果：{{ bleStore.bindHint }}</text>
+      </view>
+
+
+      <!-- 设备无 owner（全新 / 已恢复出厂）：首绑，可直接用自定义码 -->
+      <block v-if="!showBoundMode">
+        <text class="bind-desc">首次绑定可直接输入<text class="hl">你自定义的绑定码</text>（任意非空即可，绑定后该码即生效）；也可使用默认码 123456。绑定成功后本机将持有该设备的密钥，可正常控车。</text>
         <!-- ★ 字段即触发器：点一下弹出系统原生输入框（webview input 在该基座弹不出键盘，故不用 <input>） -->
         <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','请输入绑定码')">
           <text v-if="fields.bindCode">{{ fields.bindCode }}</text>
@@ -32,45 +43,70 @@
         </button>
         <!-- ★ 一键默认码：绕过输入直接首绑（基座上最省事） -->
         <button class="btn-bind-default" :disabled="binding" @tap="handleBindDefault">
-          {{ binding ? '绑定中...' : '使用默认码 123456 绑定' }}
+          {{ binding ? '绑定中...' : '或：使用默认码 123456 绑定' }}
         </button>
+        <text class="bind-warn">⚠ 若提示「设备已绑定」，说明该设备此前已绑定过：请先用<text class="hl">当前绑定码</text>(默认123456) 绑定以接管，再在下方『修改绑定码』换成你的自定义码；或先解绑/恢复出厂。</text>
       </block>
 
-      <!-- 已绑定：解绑 / 重新绑定 / 修改绑定码 -->
+      <!-- 设备有 owner -->
       <block v-else>
-        <text class="bind-desc">本机已持有该设备的绑定密钥。解绑后需重新输入绑定码才能控车。</text>
-        <view class="bind-actions">
-          <button class="btn-unbind" :disabled="unbinding" @tap="handleUnbind(false)">
-            {{ unbinding && !unbindAll ? '解绑中...' : '解绑本机' }}
-          </button>
-          <button class="btn-unbind-all" :disabled="unbinding" @tap="handleUnbind(true)">
-            {{ unbinding && !unbindAll ? '清空中...' : '恢复出厂(清空所有)' }}
-          </button>
-        </view>
+        <!-- 本机持有密钥：完整主人界面 -->
+        <block v-if="hasLocalKey">
+          <text class="bind-desc">本机已持有该设备的绑定密钥。解绑后需重新输入绑定码才能控车。</text>
+          <view class="bind-actions">
+            <button class="btn-unbind" :disabled="unbinding" @tap="handleUnbind(false)">
+              {{ unbinding && !unbindAll ? '解绑中...' : '解绑本机' }}
+            </button>
+            <button class="btn-unbind-all" :disabled="unbinding" @tap="handleUnbind(true)">
+              {{ unbinding && !unbindAll ? '清空中...' : '恢复出厂(清空所有)' }}
+            </button>
+          </view>
 
-        <!-- ★ 始终提供「重新绑定」入口，避免本地有密钥但设备端因 MAC 变化拒连时无处可重绑 -->
-        <text class="bind-desc bind-mt">若控车提示「未绑定/验证失败」，可重新输入默认绑定码恢复绑定：</text>
-        <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','重新绑定：请输入绑定码')">
-          <text v-if="fields.bindCode">{{ fields.bindCode }}</text>
-          <text v-else class="bind-ph">重新绑定：请输入绑定码</text>
-        </view>
-        <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">
-          {{ binding ? '绑定中...' : '重新绑定' }}
-        </button>
+          <!-- ★ 重新验证：用当前码重建会话（应对持久化丢失/换机后本地无 key 的兜底） -->
+          <text class="bind-desc bind-mt">若控车提示「未绑定/验证失败」，可重新输入<text class="hl">当前绑定码</text>恢复绑定：</text>
+          <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','重新验证：请输入当前绑定码')">
+            <text v-if="fields.bindCode" class="secure">••••••</text>
+            <text v-else class="bind-ph">重新验证：请输入当前绑定码</text>
+          </view>
+          <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">
+            {{ binding ? '绑定中...' : '重新绑定' }}
+          </button>
 
-        <!-- ★ 修改绑定码（SETCODE 指令，已绑定且已验证时可用） -->
-        <text class="bind-desc bind-mt">🔑 <text class="hl">修改绑定码</text>：可把绑定码改成你自己的码。修改后须用<text class="hl">新码</text>重新绑定/验证；旧码（含默认 123456）将失效。忘记新码可执行「恢复出厂」重置回 123456。</text>
-        <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('newBindCode','请输入新绑定码')">
-          <text v-if="fields.newBindCode">{{ fields.newBindCode }}</text>
-          <text v-else class="bind-ph">请输入新绑定码</text>
-        </view>
-        <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('confirmBindCode','请再次输入新绑定码')">
-          <text v-if="fields.confirmBindCode">{{ fields.confirmBindCode }}</text>
-          <text v-else class="bind-ph">请再次输入新绑定码</text>
-        </view>
-        <button class="btn-bind" :disabled="!fields.newBindCode || fields.newBindCode !== fields.confirmBindCode || changing" @tap="handleChangeBindCode">
-          {{ changing ? '修改中...' : '修改绑定码' }}
-        </button>
+          <view class="bind-divider"></view>
+
+          <!-- ★ 修改绑定码（SETCODE 指令）：切换成「你的自定义码」的主路径 -->
+          <text class="bind-desc bind-mt">🔑 <text class="hl">修改绑定码（换成你的自定义码）</text>：为安全起见，须先输入<text class="hl">当前绑定码</text>核对身份。改完后须用<text class="hl">新码</text>控车；旧码（含默认 123456）将失效。忘记新码可执行「恢复出厂」重置回 123456。</text>
+          <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('oldBindCode','请输入当前绑定码（验证身份）')">
+            <text v-if="fields.oldBindCode" class="secure">••••••</text>
+            <text v-else class="bind-ph">请输入当前绑定码（验证身份）</text>
+          </view>
+          <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('newBindCode','请输入新绑定码')">
+            <text v-if="fields.newBindCode">{{ fields.newBindCode }}</text>
+            <text v-else class="bind-ph">请输入新绑定码</text>
+          </view>
+          <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('confirmBindCode','请再次输入新绑定码')">
+            <text v-if="fields.confirmBindCode" class="secure">••••••</text>
+            <text v-else class="bind-ph">请再次输入新绑定码</text>
+          </view>
+          <text class="bind-warn">⚠ 提交时会先用「当前绑定码」自动完成一次验证，再将绑定码切换为新码；验证失败则说明当前码输错。</text>
+          <text class="bind-warn" v-if="fields.newBindCode && fields.confirmBindCode && fields.newBindCode !== fields.confirmBindCode">⚠ 两次输入的新绑定码不一致</text>
+          <text class="bind-warn" v-if="fields.oldBindCode && fields.newBindCode && fields.newBindCode === fields.oldBindCode">⚠ 新绑定码不能与当前绑定码相同</text>
+          <button class="btn-bind" :disabled="!fields.oldBindCode || !fields.newBindCode || !fields.confirmBindCode || fields.newBindCode !== fields.confirmBindCode || changing" @tap="handleChangeBindCode">
+            {{ changing ? '修改中...' : '修改绑定码' }}
+          </button>
+        </block>
+
+        <!-- 设备已绑但本机无密钥：先接管，再切换自定义码 -->
+        <block v-else>
+          <text class="bind-desc">此设备<text class="hl">已被绑定</text>（当前手机未持有密钥）。若你就是主人：请输入<text class="hl">当前绑定码</text>(默认123456) 绑定以接管，接管后便可在『修改绑定码』换成你的自定义码。若不是主人，需先解绑/恢复出厂（同样需当前码）。</text>
+          <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','接管：请输入当前绑定码')">
+            <text v-if="fields.bindCode">{{ fields.bindCode }}</text>
+            <text v-else class="bind-ph">接管：请输入当前绑定码</text>
+          </view>
+          <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">
+            {{ binding ? '绑定中...' : '用当前码接管绑定' }}
+          </button>
+        </block>
       </block>
 
       <text class="bind-hint" v-if="bleStore.bindHint">{{ bleStore.bindHint }}</text>
@@ -91,7 +127,7 @@ const bleStore = useBleStore()
 // ★ 字段值统一放 reactive。模板里输入框改为「点一下弹系统原生输入框」(见 promptField)。
 //   原因：该自定义 Android 基座上 webview <input> 弹不出键盘（与之前 config 页同病），
 //   而 uni.showModal({editable:true}) 是系统原生对话框，键盘 100% 可靠。字段即触发器，不堆按钮。
-const fields = reactive({ bindCode: '', newBindCode: '', confirmBindCode: '' })
+const fields = reactive({ bindCode: '', newBindCode: '', confirmBindCode: '', oldBindCode: '' })
 
 const binding = ref(false)
 const unbinding = ref(false)
@@ -119,6 +155,24 @@ const bindStatusText = computed(() => {
 const bindStatusClass = computed(() => {
   if (!bleStore.isBound) return 'unbound'
   return bleStore.sessionAuthed ? 'authed' : 'bound'
+})
+
+// ★ 三态判定：设备端是否已有 owner（deviceBound，设备权威）或本机已持密钥 → 进入「已绑定」分支。
+//   这样即便本机清过缓存/换手机（无本地 key），只要设备端仍绑定，也能看到『修改绑定码/解绑』入口，
+//   不再卡在首绑分支反复输自定义码 FAIL。
+const showBoundMode = computed(() => bleStore.isBound || bleStore.deviceBound)
+const hasLocalKey   = computed(() => bleStore.isBound)
+
+// ★ 固件版本判定：已知支持「延迟发送回包」(绑定可用的关键修复) 的最低版本是 3.30.2。
+//   含 rc/预发布后缀也按主版本号判定（如 3.30.4-rc5 → 4 ≥ 2 → 新固件）。
+const fwBadge = computed(() => {
+  const v = bleStore.fwVersion || ''
+  if (!v) return { text: '未知（未读到版本，先连接设备）', cls: 'unknown' }
+  const m = /^3\.30\.(\d+)/.exec(v)
+  if (m && parseInt(m[1], 10) >= 2) {
+    return { text: '✅ 新固件（支持延迟发送回包，可正常绑定）', cls: 'ok' }
+  }
+  return { text: '⚠️ 旧固件（BIND:OK/NONCE/AUTH 回包易丢失，绑定多半失败，请烧录 ≥3.30.2）', cls: 'old' }
 })
 
 function close() {
@@ -162,12 +216,38 @@ async function handleBindDefault() {
 }
 
 async function handleChangeBindCode() {
-  if (!fields.newBindCode || fields.newBindCode !== fields.confirmBindCode || changing.value) return
+  // ★ 前置校验：所有失败都要给用户准确 toast，不能静默 return
+  //   （之前静默 return 会被陈旧 bindHint「BIND:OK」误导成"固件拒答"）
+  if (changing.value) return
+  if (!fields.oldBindCode) { toast.error('请输入当前绑定码'); return }
+  if (!fields.newBindCode) { toast.error('请输入新绑定码'); return }
+  if (fields.newBindCode !== fields.confirmBindCode) {
+    toast.error('两次输入的新绑定码不一致')
+    return
+  }
+  if (fields.newBindCode === fields.oldBindCode) {
+    toast.error('新绑定码不能与当前绑定码相同')
+    return
+  }
+  if (!bleStore.sessionAuthed) {
+    toast.error('请先在「重新验证」区域用当前绑定码完成 AUTH，再改码')
+    return
+  }
+  // ★ 安全验证：本地比对「旧码派生的 key」是否等于本机 _bindKey（瞬时，无需 BLE 往返）。
+  //   证明持有旧码后直接 SETCODE；避免先走 bindDevice 导致 isBound 抖动 → UI 分支切换 → 按钮消失。
+  const verified = await bleStore.verifyBindCode(fields.oldBindCode)
+  if (!verified) {
+    toast.error('当前绑定码错误，无法改码')
+    return
+  }
+  // ★ 进入 store 操作前清空 bindHint，避免「BIND:OK」陈旧回显误导
+  bleStore.bindHint = ''
   changing.value = true
   try {
     const ok = await bleStore.changeBindCode(fields.newBindCode)
     if (ok) {
       toast.success('绑定码已修改，请牢记新码')
+      fields.oldBindCode = ''
       fields.newBindCode = ''
       fields.confirmBindCode = ''
     } else {
@@ -212,23 +292,25 @@ async function handleUnbind(all) {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
   background: var(--bg-overlay);
+  overflow-y: auto;                    /* ★ 外层滚动，不依赖 flex 子元素 overflow */
+  -webkit-overflow-scrolling: touch;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
   align-items: center;
+  padding: 4vh 0 6vh;                  /* ★ 上下留白，底部 6vh 确保最后一个按钮完整可见 */
   z-index: 1000;
 }
 
 .bind-dialog {
   width: 600rpx;
-  max-height: 86vh;
-  overflow-y: auto;
+  flex-shrink: 0;                      /* ★ 不被父 flex 压缩 */
   background: var(--bg-card);
   border-radius: 24rpx;
-  padding: 40rpx 36rpx;
+  padding: 32rpx 30rpx;
   border: 1rpx solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 18rpx;
+  gap: 14rpx;
 }
 
 .bind-head {
@@ -254,7 +336,34 @@ async function handleUnbind(all) {
   color: var(--text-muted);
   line-height: 1.5;
 }
-.fw-ver { color: var(--accent); }
+/* ★ 固件版本徽标 */
+.fw-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+  border-radius: 12rpx;
+  padding: 16rpx 22rpx;
+  background: var(--alpha-06);
+  border: 1rpx solid var(--border);
+}
+.fw-badge-ver { font-size: 24rpx; font-weight: 600; color: var(--text-primary); }
+.fw-badge-tip { font-size: 20rpx; line-height: 1.5; }
+.fw-badge.ok .fw-badge-tip { color: #2ecc71; }
+.fw-badge.old .fw-badge-tip { color: #e74c3c; }
+.fw-badge.unknown .fw-badge-tip { color: var(--text-muted); }
+
+/* ★ 诊断区 */
+.diag {
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+  background: var(--alpha-06);
+  border: 1rpx solid var(--border);
+  border-radius: 12rpx;
+  padding: 16rpx 22rpx;
+}
+.diag-row { font-size: 22rpx; color: var(--text-secondary); line-height: 1.5; }
+.diag-result { color: var(--accent-orange); font-weight: 600; }
 
 .bind-status {
   display: flex;
@@ -281,6 +390,28 @@ async function handleUnbind(all) {
 }
 .bind-desc .hl { color: var(--text-primary); font-weight: 600; }
 .bind-desc.bind-mt { margin-top: 16rpx; }
+
+/* ★ 警告提示（易踩坑说明） */
+.bind-warn {
+  font-size: 21rpx;
+  color: #e67e22;
+  line-height: 1.6;
+  background: rgba(230, 126, 34, 0.08);
+  border: 1rpx solid rgba(230, 126, 34, 0.25);
+  border-radius: 10rpx;
+  padding: 14rpx 18rpx;
+}
+.bind-warn .hl { color: #e67e22; font-weight: 700; }
+
+/* ★ 遮罩显示（如当前绑定码已输入但不应明文呈现） */
+.secure { letter-spacing: 4rpx; color: var(--text-primary); }
+
+/* ★ 分隔线（"重新验证" 与 "修改绑定码" 之间） */
+.bind-divider {
+  height: 1rpx;
+  background: var(--border);
+  margin: 10rpx 0 4rpx;
+}
 
 /* ★ 字段即触发器：外观仍是输入框，但点一下弹系统原生输入框（见 promptField） */
 .bind-input {

@@ -348,25 +348,46 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
                               const uint8_t *payload, uint16_t len)
 {
     (void)connHandle; (void)peerAddr; (void)peerAddrType;  /* ★ 不再使用 MAC 做身份判定 */
-    /* ★ 支持自定义码：校验对比「当前有效绑定码」(g_curBindCode) 而非固定常量。
-     *   长度须一致且逐字节相等。tmos_memcmp 返回 TRUE(非零)=相等(见 CH58xBLE_ROM.h)，
-     *   故「不相等」写成 == 0 → FAIL:CODE。 */
-    if (len < 1) {
-        KeyGo_SendRawNotify("BIND:FAIL:SHORT");
-        return 1;
-    }
-    if (len != g_curBindCodeLen ||
-        tmos_memcmp(payload, (const uint8_t *)g_curBindCode, g_curBindCodeLen) == 0) {
-        PRINT("[BIND] code mismatch (want len=%d)\n", g_curBindCodeLen);
-        KeyGo_SendRawNotify("BIND:FAIL:CODE");
-        return 3;
+
+    /* ★ 首绑即「自定码」模型（业界常见：出厂/恢复出厂后的首次配对即确立 owner 凭证）：
+     *   - 设备未绑定(Bonding_Count()==0)：用户提供的任意非空码直接成为本机绑定码，
+     *     并持久化到 KEYGO_BINDCODE_ADDR（否则重启后 g_curBindCode 回退默认，重绑会 FAIL:CODE）。
+     *     这样用户无需先输 123456 再改码，开箱即可用自己设定的码绑定。
+     *   - 设备已绑定（覆盖/接管重绑）：必须匹配当前有效码 g_curBindCode，否则 FAIL:CODE。
+     *   tmos_memcmp 返回 TRUE(非零)=相等(见 CH58xBLE_ROM.h)，故「不相等」写成 == 0 → FAIL。 */
+    const uint8_t *effCode = (const uint8_t *)g_curBindCode;
+    uint8_t        effLen  = g_curBindCodeLen;
+
+    if (Bonding_Count() == 0) {
+        /* 首次绑定：接受任意 1..BOND_CODE_MAXLEN 字节作为新码 */
+        if (len < 1 || len > BOND_CODE_MAXLEN) {
+            KeyGo_SendRawNotify("BIND:FAIL:SHORT");
+            return 1;
+        }
+        tmos_memcpy(g_curBindCode, payload, len);
+        g_curBindCode[len] = 0;
+        g_curBindCodeLen   = (uint8_t)len;
+        Bonding_SaveBindCode();   /* ★ 关键：首绑的自定义码须跨重启保留 */
+        effCode = (const uint8_t *)g_curBindCode;
+        effLen  = g_curBindCodeLen;
+    } else {
+        /* 已绑定：必须匹配当前有效码（覆盖/接管重绑） */
+        if (len != g_curBindCodeLen ||
+            tmos_memcmp(payload, (const uint8_t *)g_curBindCode, g_curBindCodeLen) == 0) {
+            PRINT("[BIND] code mismatch (want len=%d)\n", g_curBindCodeLen);
+            /* ★ 区分「设备已有人绑定」与「纯码错误」：返回 ALREADY_BOUND，
+             *   让 App 给出精确指引（先接管/解绑，再改用『修改绑定码』切换成自定义码），
+             *   避免用户误以为「自定义码功能坏了」。 */
+            KeyGo_SendRawNotify("BIND:FAIL:ALREADY_BOUND");
+            return 3;
+        }
     }
 
     /* 派生 bindKey = SHA256(code||serial)[0:16]（与 App 端同输入 → 同密钥） */
     char serial[13];
     Bonding_BuildSerial(serial);
     uint8_t key[BOND_KEY_LEN];
-    Bonding_DeriveKey(payload, len, (uint8_t *)serial, 12, key);
+    Bonding_DeriveKey(effCode, effLen, (uint8_t *)serial, 12, key);
 
     /* 单 owner：覆盖写入 slot0（MAC 无关，密钥即身份）。
      * 仍写入 peerAddr 仅作「非空槽」标记（Bonding_Load 靠 peerAddr 全 0xFF 判空），
@@ -430,6 +451,11 @@ uint8_t Bonding_HandleSetCodeCmd(uint16_t connHandle, const uint8_t *payload, ui
     /* 持久化：绑定码页 + 信任列表（含新 key） */
     Bonding_SaveBindCode();
     Bonding_Save();
+
+    /* ★ 2026-07-11: SETCODE 完成后强制让外层在下一个任务 tick 推一次 status，
+     *   确保 App 收到的最新 status.bn=1、key 已用新码派生（与新 session 一致），
+     *   避免 App 端基于旧 bn/旧 key 误判"未绑定"。 */
+    tmos_set_event(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT);
 
     PRINT("[SETCODE] code updated len=%d, key rederived\n", len);
     KeyGo_SendRawNotify("SETCODE:OK");
