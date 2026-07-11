@@ -138,7 +138,7 @@
           </view>
           <view class="mgmt-row" @tap="openBindModal">
             <text class="mgmt-label">🔐 设备绑定</text>
-            <text class="mgmt-val" v-if="bleStore.isBound">{{ bleStore.sessionAuthed ? '已验证' : '已绑定·待验证' }}</text>
+            <text class="mgmt-val" v-if="bleStore.isBound">{{ bindLabel }}</text>
             <text class="mgmt-val name-hint" v-else>未绑定·点击绑定</text>
             <text class="mgmt-arrow">›</text>
           </view>
@@ -203,6 +203,14 @@ import BindModal from '@/components/BindModal.vue'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
+
+// ★ 2026-07-12: 绑定态文案——区分"已验证/自动验证中/验证失败需手动"，避免"待验证"像报错
+const bindLabel = computed(() => {
+  if (bleStore.sessionAuthed) return '已验证'
+  if (bleStore._autoAuthState === 'running') return '已绑定·验证中…'
+  if (bleStore._autoAuthState === 'failed') return '已绑定·验证失败'
+  return '已绑定·待验证'
+})
 
 // ★ v3.25: 极速模式距离显示 — 停车时间相对描述
 const parkingTimeAgo = computed(() => {

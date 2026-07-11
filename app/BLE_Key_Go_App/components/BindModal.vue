@@ -25,7 +25,7 @@
       <!-- ★ 诊断区：真机验证用（版本状态 / 绑定态 / 验证态 / 最近回包）。始终可见。 -->
       <view class="diag">
         <text class="diag-row">绑定态：{{ bleStore.isBound ? '已持有密钥' : '未绑定' }} | 设备端：{{ bleStore.deviceBound ? '已绑' : '未绑' }}</text>
-        <text class="diag-row">本连接验证：{{ bleStore.sessionAuthed ? '已通过 AUTH' : '待验证' }}</text>
+        <text class="diag-row">本连接验证：{{ bleStore.sessionAuthed ? '已通过 AUTH' : (bleStore._autoAuthState === 'running' ? '自动验证中…' : (bleStore._autoAuthState === 'failed' ? '失败·需手动验证' : '待验证')) }}</text>
         <text class="diag-row diag-result" v-if="bleStore.bindHint">最近结果：{{ bleStore.bindHint }}</text>
       </view>
 
@@ -150,11 +150,16 @@ function promptField(key, placeholder) {
 
 const bindStatusText = computed(() => {
   if (!bleStore.isBound) return '未绑定'
-  return bleStore.sessionAuthed ? '已绑定 · 本连接已验证' : '已绑定 · 连接待验证'
+  if (bleStore.sessionAuthed) return '已绑定 · 本连接已验证'
+  if (bleStore._autoAuthState === 'running') return '已绑定 · 自动验证中…'
+  if (bleStore._autoAuthState === 'failed') return '已绑定 · 验证失败，请重绑'
+  return '已绑定 · 连接待验证'
 })
 const bindStatusClass = computed(() => {
   if (!bleStore.isBound) return 'unbound'
-  return bleStore.sessionAuthed ? 'authed' : 'bound'
+  if (bleStore.sessionAuthed) return 'authed'
+  if (bleStore._autoAuthState === 'failed') return 'bound-failed'
+  return 'bound'
 })
 
 // ★ 三态判定：设备端是否已有 owner（deviceBound，设备权威）或本机已持密钥 → 进入「已绑定」分支。

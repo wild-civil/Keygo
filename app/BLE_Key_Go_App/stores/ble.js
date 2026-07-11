@@ -180,6 +180,7 @@ export const useBleStore = defineStore('ble', {
     isBound: false,               // 本机是否已持有该设备的 bindKey（本地持久化）
     deviceBound: false,           // ★ 设备端是否已有 owner（由 status.bn 回灌，设备权威；与本地是否存 key 无关）
     sessionAuthed: false,         // 当前连接是否已通过 AUTH challenge-response
+    _autoAuthState: 'idle',       // ★ 2026-07-12: 自动 AUTH 状态机 idle/running/failed（驱动 UI 文案，区分"验证中"与"需手动"）
     bindHint: '',                 // 绑定相关提示文案（如「需要验证，请重试」）
 
     // 扫描状态
@@ -1669,6 +1670,7 @@ export const useBleStore = defineStore('ble', {
       this.connected = true
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
+      this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
       if (!this.deviceName) {
         const macClean = this.deviceId.replace(/:/g, '')
@@ -2816,17 +2818,48 @@ export const useBleStore = defineStore('ble', {
      *   设备端 Bonding_ConnTerminated 每连接清零会话态，故重连必须重 AUTH——此方法让该过程全自动，
      *   消除「重进 APP 还得手动验证绑定」的体验问题。
      */
-    _maybeAutoAuth() {
-      if (!this._statusNotifyReady) return   // ★ FF02 未订阅，NONCE 回包收不到，必须等订阅就绪
-      if (this.sessionAuthed || _bindInProgress || !_bindKey || !this.connected) return
+    _maybeAutoAuth(attempt = 1) {
+      if (this.sessionAuthed) { this._autoAuthState = 'idle'; return }
+      if (_bindInProgress || !_bindKey || !this.connected) return
       if (_autoAuthRunning) return
       _autoAuthRunning = true
-      this.ensureSession().then(ok => {
-        if (ok) console.log('[BIND] 自动会话鉴权成功（重连恢复）')
-        else console.warn('[BIND] 自动会话鉴权失败（设备可能已解绑/重置，请手动验证）')
-      }).catch(e => {
-        console.warn('[BIND] 自动会话鉴权异常:', e?.message || e)
-      }).finally(() => { _autoAuthRunning = false })
+      const MAX_TRIES = 4
+      const run = async () => {
+        try {
+          // ★ 自愈：FF02 未订阅则先订阅（订阅成功会置 _statusNotifyReady）。
+          //   原 800ms 订阅若因 GATT 未就绪静默失败，这里补订阅，避免自动 AUTH 永远不触发。
+          if (!this._statusNotifyReady) {
+            await this._enableStatusNotify()
+            if (!this._statusNotifyReady) {
+              if (attempt < MAX_TRIES) { _autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
+              this._autoAuthState = 'failed'
+              console.warn('[BIND] FF02 订阅失败，自动会话鉴权无法进行（请手动验证）')
+              return
+            }
+          }
+          this._autoAuthState = 'running'
+          const ok = await this.ensureSession()
+          if (ok) {
+            this._autoAuthState = 'idle'
+            console.log('[BIND] 自动会话鉴权成功（重连恢复）')
+          } else if (attempt < MAX_TRIES) {
+            // ★ 一次性短报文被丢弃等瞬时失败 → 重试，避免永久卡"待验证"
+            _autoAuthRunning = false
+            setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500)
+            return
+          } else {
+            this._autoAuthState = 'failed'
+            console.warn('[BIND] 自动会话鉴权失败（设备可能已解绑/重置，请手动验证）')
+          }
+        } catch (e) {
+          if (attempt < MAX_TRIES) { _autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
+          this._autoAuthState = 'failed'
+          console.warn('[BIND] 自动会话鉴权异常:', e?.message || e)
+        } finally {
+          _autoAuthRunning = false
+        }
+      }
+      run()
     },
 
     /** 主动请求一次性 nonce，返回 32 hex 字符或 null */
@@ -2859,6 +2892,7 @@ export const useBleStore = defineStore('ble', {
         _resolveWaiter('NONCE', text.slice(6))
       } else if (text === 'AUTH:OK') {
         this.sessionAuthed = true
+        this._autoAuthState = 'idle'   // ★ 2026-07-12: 会话已建立，自动 AUTH 状态机归位
         this.bindHint = ''
         _resolveWaiter('AUTH', true)
       } else if (text.startsWith('AUTH:FAIL')) {

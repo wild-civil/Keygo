@@ -480,11 +480,16 @@ async function handleSubmit() {
 
 const bindStatusText = computed(() => {
   if (!bleStore.isBound) return '未绑定'
-  return bleStore.sessionAuthed ? '已绑定 · 本连接已验证' : '已绑定 · 连接待验证'
+  if (bleStore.sessionAuthed) return '已绑定 · 本连接已验证'
+  if (bleStore._autoAuthState === 'running') return '已绑定 · 自动验证中…'
+  if (bleStore._autoAuthState === 'failed') return '已绑定 · 验证失败，请重绑'
+  return '已绑定 · 连接待验证'
 })
 const bindStatusClass = computed(() => {
   if (!bleStore.isBound) return 'unbound'
-  return bleStore.sessionAuthed ? 'authed' : 'bound'
+  if (bleStore.sessionAuthed) return 'authed'
+  if (bleStore._autoAuthState === 'failed') return 'bound-failed'
+  return 'bound'   // running / 待验证 用中性色，避免"待验证"像报错需手动
 })
 
 
