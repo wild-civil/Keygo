@@ -102,9 +102,18 @@ void sha256(const uint8_t *data, uint32_t len, uint8_t out[SHA256_DIGEST_LEN])
     } else {
         while (j < 56) buf[j++] = 0;
     }
-    for (i = 0; i < 8; i++) {
-        buf[56 + i] = (uint8_t)(totalBits >> (56 - 8 * i));
-    }
+    /* ★ 2026-07-12 fix4：修正 64 位位长写入。
+     *   totalBits 是 uint32_t（低 32 位）。64 位大端位长的高 32 位恒为 0
+     *   （本应用输入远 < 2^29 字节，不会出现高位），必须显式写 0；
+     *   低 32 位用安全移位 24/16/8/0 写入。
+     *   旧代码 totalBits >> (56 - 8*i) 在 i=0..3 时移位量 56/48/40/32 全部 ≥ 32，
+     *   对 uint32_t 属于 C 未定义行为(UB)：-O2 下被优化器乱改、-O0 下按 mod32 移位
+     *   导致 buf[59] 误写 0x18，两者都使哈希结果错误（自测 FAIL 的真凶）。 */
+    buf[56] = 0; buf[57] = 0; buf[58] = 0; buf[59] = 0;
+    buf[60] = (uint8_t)(totalBits >> 24);
+    buf[61] = (uint8_t)(totalBits >> 16);
+    buf[62] = (uint8_t)(totalBits >> 8);
+    buf[63] = (uint8_t)(totalBits);
     sha256_transform(state, buf);
 
     for (i = 0; i < 8; i++) {
@@ -155,10 +164,23 @@ void hmac_sha256(const uint8_t *key, uint32_t keyLen,
     sha256(blk, 64 + SHA256_DIGEST_LEN, out);
 }
 
+/* 显式逐字节比较，避开 tmos_memcmp 返回值语义歧义（不同版本 TRUE/FALSE 定义不一） */
+static uint8_t bytes_eq(const uint8_t *a, const uint8_t *b, uint16_t n)
+{
+    uint16_t i;
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+/* 返回 1 = 全部自测向量通过；0 = 有失败。不再用位掩码，避免与判定侧语义错配。
+ * 失败时通过 PRINT 打印实际算出的哈希值，便于真机定位（避免反复烧录猜谜）。 */
 uint8_t sha256_self_test(void)
 {
     uint8_t d[SHA256_DIGEST_LEN];
-    uint8_t r = 0;
+    uint8_t n;
+    uint8_t ok = 1;
 
     /* 向量 1: SHA256("abc") */
     static const uint8_t exp_abc[SHA256_DIGEST_LEN] = {
@@ -166,7 +188,12 @@ uint8_t sha256_self_test(void)
         0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
     };
     sha256((const uint8_t *)"abc", 3, d);
-    if (tmos_memcmp(d, exp_abc, SHA256_DIGEST_LEN) == 0) r |= 1;  /* tmos_memcmp: TRUE=相等，故相等不报错，不相等才置位 */
+    if (!bytes_eq(d, exp_abc, SHA256_DIGEST_LEN)) {
+        ok = 0;
+        PRINT("[CRYPTO] V1 SHA256(\"abc\") FAIL: got ");
+        for (n = 0; n < SHA256_DIGEST_LEN; n++) PRINT("%02X", d[n]);
+        PRINT("\n");
+    }
 
     /* 向量 2: HMAC-SHA256("key", "The quick brown fox jumps over the lazy dog") */
     static const uint8_t exp_hmac[SHA256_DIGEST_LEN] = {
@@ -175,9 +202,14 @@ uint8_t sha256_self_test(void)
     };
     hmac_sha256((const uint8_t *)"key", 4,
                 (const uint8_t *)"The quick brown fox jumps over the lazy dog", 43, d);
-    if (tmos_memcmp(d, exp_hmac, SHA256_DIGEST_LEN) == 0) r |= 2; /* 同上 */
+    if (!bytes_eq(d, exp_hmac, SHA256_DIGEST_LEN)) {
+        ok = 0;
+        PRINT("[CRYPTO] V2 HMAC FAIL: got ");
+        for (n = 0; n < SHA256_DIGEST_LEN; n++) PRINT("%02X", d[n]);
+        PRINT("\n");
+    }
 
-    return r;
+    return ok;
 }
 
 /******************************** endfile @ crypto_sha256 **********************/

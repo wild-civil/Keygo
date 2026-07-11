@@ -304,6 +304,8 @@ void KeyGo_ResetKalman(void)
     g_latestRSSI       = RSSI_UNINITIALIZED;
 }
 
+static void KeyGo_ClearRawQueue(void);  // 前向声明：清空 raw 短报文队列（定义见下方）
+
 /*
  * 重置全部运行时状态 (连接建立 / 断开时调用)
  */
@@ -321,6 +323,11 @@ void KeyGo_ResetState(void)
      *   断连/重连时不应改变 LED (锁车=灭, 解锁=亮 已反映真实状态) [LED_END] */
     g_ledBlinkLocked  = 0;
     g_ledTrunkBlinkToggle = 0;
+
+    /* ★ 2026-07-12 fix3：清空 raw 短报文队列。断连/重连都调本函数，
+     *   若不清理，上一条连接未发完的 AUTH:OK/NONCE 会残留到新连接 flush，
+     *   导致 App 误置 sessionAuthed 或 _requestNonce 拿到旧 nonce → 首轮 AUTH:FAIL。 */
+    KeyGo_ClearRawQueue();
 }
 
 static float UpdateKalman(float measurement)
@@ -603,6 +610,21 @@ void KeyGo_FlushRawNotify(void)
     if (s_rawQPending > 0) {
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_RAW_EVT, 32);
     }
+}
+
+/* ★ 2026-07-12 fix3：清空 raw 短报文延迟发送队列。
+ *   在 KeyGo_ResetState()（连接建立/断开/Init 均调用）末尾调用，确保新连接从一个
+ *   干净的队列开始，杜绝跨连接残留报文 flush 给新连接（隐患 A）。
+ *   注意：只清队列变量、不调用 tmos_stop_task —— 残留的 SBP_DEFERRED_RAW_EVT 任务
+ *   在队列清空后会被 FlushRawNotify 的 (s_rawQPending==0) 早返回安全吸收；而 Init 阶段
+ *   调 tmos_stop_task 会破坏该延迟发送任务的后续启动/执行，导致 BIND:OK/NONCE/AUTH
+ *   全部发不出（验证失败回归，已弃用）。 */
+static void KeyGo_ClearRawQueue(void)
+{
+    s_rawQHead    = 0;
+    s_rawQTail    = 0;
+    s_rawQPending = 0;
+    s_rawRetry    = 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────

@@ -88,10 +88,12 @@ gapBondCBs_t Bonding_BondCBs = {
  *********************************************************************/
 void Bonding_Init(void)
 {
-    /* 上电先验证 SHA-256 / HMAC 实现正确性（标准向量），失败会在串口报警 */
+    /* 上电先验证 SHA-256 / HMAC 实现正确性（标准向量），失败会在串口报警。
+     * sha256_self_test() 现返回 1=全部通过 / 0=失败（见 crypto_sha256.c），
+     * 直接作为 g_cryptoOk，避免旧版位掩码判定写反（把通过的 0x03 误判成失败）。 */
     uint8_t st = sha256_self_test();
-    g_cryptoOk = (st == 0) ? 1 : 0;
-    PRINT("[CRYPTO] sha256 self-test: %s (st=0x%02X)\n", st == 0 ? "PASS" : "FAIL!!", st);
+    g_cryptoOk = st;
+    PRINT("[CRYPTO] sha256 self-test: %s (g_cryptoOk=%d)\n", st ? "PASS" : "FAIL!!", g_cryptoOk);
 
     Bonding_Load();
     Bonding_LoadBindCode();   /* 载入已存自定义码（无则回退默认 123456） */
