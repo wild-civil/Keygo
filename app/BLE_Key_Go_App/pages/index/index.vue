@@ -129,14 +129,20 @@
     <!-- ★ 设备管理 -->
     <view class="password-mgmt" v-if="bleStore.connected">
       <text class="section-title mgmt-title">⚙️ 设备管理</text>
-      <view class="mgmt-rows">
-        <view class="mgmt-row" @tap="showNameDialog">
-          <text class="mgmt-label">设备名称</text>
-          <text class="mgmt-val" v-if="bleStore.customDeviceName">{{ bleStore.customDeviceName }}</text>
-          <text class="mgmt-val name-hint" v-else>点击设置（如车牌号）</text>
-          <text class="mgmt-arrow">›</text>
+        <view class="mgmt-rows">
+          <view class="mgmt-row" @tap="showNameDialog">
+            <text class="mgmt-label">设备名称</text>
+            <text class="mgmt-val" v-if="bleStore.customDeviceName">{{ bleStore.customDeviceName }}</text>
+            <text class="mgmt-val name-hint" v-else>点击设置（如车牌号）</text>
+            <text class="mgmt-arrow">›</text>
+          </view>
+          <view class="mgmt-row" @tap="openBindModal">
+            <text class="mgmt-label">🔐 设备绑定</text>
+            <text class="mgmt-val" v-if="bleStore.isBound">{{ bleStore.sessionAuthed ? '已验证' : '已绑定·待验证' }}</text>
+            <text class="mgmt-val name-hint" v-else>未绑定·点击绑定</text>
+            <text class="mgmt-arrow">›</text>
+          </view>
         </view>
-      </view>
     </view>
 
     <!-- ★ 快捷操作 -->
@@ -180,16 +186,20 @@
         </view>
       </view>
     </view>
+
+    <!-- ★ 设备绑定弹窗（fixed 覆盖层，脱离 swiper，input 可靠） -->
+    <BindModal :visible="bindModalVisible" @close="bindModalVisible = false" />
   </view>
 </template>
 
 
 <script setup>
-import { reactive, computed } from 'vue' // import { reactive, computed, watch } from 'vue'
+import { reactive, computed, ref } from 'vue' // import { reactive, computed, watch } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
+import BindModal from '@/components/BindModal.vue'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
@@ -246,6 +256,16 @@ const pwModal = reactive({
   mode: '',
   onConfirm: () => {}
 })
+
+// ★ 设备绑定弹窗（fixed 覆盖层，脱离 swiper/scroll-view 文档流，input 可靠）
+const bindModalVisible = ref(false)
+function openBindModal() {
+  if (!bleStore.connected) {
+    toast.info('请先连接设备')
+    return
+  }
+  bindModalVisible.value = true
+}
 
 onShow(async () => {
   themeStore.applyNavBar()

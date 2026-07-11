@@ -121,7 +121,7 @@ let _bindKey = null
 let _bindInProgress = false
 
 // 绑定指令的异步等待器（NONCE/AUTH/BIND/UNBIND 的回应经 FF02 通知解析后 resolve）
-const _bindWaiters = { NONCE: null, AUTH: null, BIND: null, UNBIND: null }
+const _bindWaiters = { NONCE: null, AUTH: null, BIND: null, UNBIND: null, SETCODE: null }
 // ★ 2026-07-10: 记录 BIND 流程中固件最后回包原文，便于失败时给出确切原因
 let _lastBindRaw = ''
 function _waitFor(type) { return new Promise((resolve) => { _bindWaiters[type] = resolve }) }
@@ -2732,7 +2732,7 @@ export const useBleStore = defineStore('ble', {
       if (!this.deviceId) throw new Error('未连接设备')
       // ★ ②: 控制类指令（非绑定指令）需先完成会话鉴权（AUTH challenge-response）。
       //   绑定/鉴权指令本身跳过，避免递归；鉴权用底层 rawSendCommand 直发。
-      if (!/^(BIND:|AUTH:|NONCE|UNBIND)/.test(command)) {
+      if (!/^(BIND:|AUTH:|NONCE|UNBIND|SETCODE:)/.test(command)) {
         const authed = await this.ensureSession()
         // ★ 2026-07-10 修复：必须校验鉴权结果！否则未绑定/鉴权失败时仍照发控制指令，
         //   设备静默拒绝（DENY），但 App 误以为成功 → 用户看到「解锁成功」设备却没反应。
@@ -2841,6 +2841,13 @@ export const useBleStore = defineStore('ble', {
       } else if (text.startsWith('UNBIND:FAIL')) {
         this.bindHint = '解绑失败：需先绑定'
         _resolveWaiter('UNBIND', false)
+      } else if (text === 'SETCODE:OK') {
+        this.bindHint = '绑定码已修改'
+        _resolveWaiter('SETCODE', true)
+      } else if (text.startsWith('SETCODE:FAIL')) {
+        this.bindHint = '修改绑定码失败' + (text.includes('NO_AUTH') ? '：需先验证' :
+          text.includes('NOT_BOUND') ? '：设备未绑定' : '：码长度不合法')
+        _resolveWaiter('SETCODE', false)
       } else if (text === 'DENY:NOT_BOUND') {
         // 设备当前没有任何 owner（未绑定状态）
         this.isBound = false
@@ -3030,6 +3037,63 @@ export const useBleStore = defineStore('ble', {
         throw e
       }
       return false
+      } finally { _release() }
+    },
+
+    /**
+     * ★ 自定义绑定码：修改当前设备的绑定码（SETCODE 指令）。
+     *   流程：先 ensureSession（证明持有旧密钥）→ 发 SETCODE:<newCode> →
+     *   收到 SETCODE:OK 后用新码重派生本地 bindKey 并持久化。
+     *   此后本机与新连接均用新码派生密钥；旧码（含默认 123456）在设备端失效，
+     *   除非执行「恢复出厂(UNBIND:ALL)」重置回 123456。
+     *   @param {string} newCode 新绑定码
+     *   @returns {Promise<boolean>}
+     */
+    async changeBindCode(newCode) {
+      const _release = await _acquireBindLock()
+      try {
+        if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
+        if (!this._bindKey) {
+          const e = new Error('设备未绑定，请先绑定'); e.code = 'NOT_BOUND'; throw e
+        }
+        // 确保当前连接已通过会话鉴权（持有旧密钥的证明；改码前置条件）
+        const authed = await this.ensureSession()
+        if (!authed) {
+          const e = new Error(this._bindKey ? '设备验证失败，请重新绑定' : '设备未绑定，请先绑定')
+          e.code = this._bindKey ? 'AUTH_FAIL' : 'NOT_BOUND'
+          throw e
+        }
+        const p = _waitFor('SETCODE')
+        let done = false
+        const timer = setTimeout(() => {
+          if (!done) { done = true; _resolveWaiter('SETCODE', false) }
+        }, 6000)
+        try {
+          await enqueueWrite(() => rawSendCommand(this.deviceId, 'SETCODE:' + newCode))
+        } catch (e) {
+          clearTimeout(timer)
+          _resolveWaiter('SETCODE', false)
+          throw e
+        }
+        const ok = await p
+        done = true
+        clearTimeout(timer)
+        if (ok === true) {
+          // 用新码重派生本地 bindKey 并覆盖持久化
+          let sn = this.serialNumber
+          if (!sn) { try { sn = await readSerialNumber(this.deviceId, 5000) } catch (e) { sn = '' } }
+          if (!sn) { this.bindHint = '修改成功，但读取序列号失败，请重连以刷新密钥'; return true }
+          const key = deriveBindKey(newCode, sn)
+          _bindKey = key
+          this._saveBindKey(sn, key)
+          this.sessionAuthed = true
+          this.bindHint = '绑定码已修改，请牢记新码'
+          return true
+        }
+        this.bindHint = _lastBindRaw
+          ? ('修改失败，固件回包: ' + _lastBindRaw)
+          : '修改绑定码失败'
+        return false
       } finally { _release() }
     },
 

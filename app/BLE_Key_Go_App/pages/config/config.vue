@@ -206,7 +206,8 @@
         </view>
       </view>
 
-      <!-- ★ ② 设备绑定：应用层 BIND + AUTH challenge-response -->
+      <!-- ★ 设备绑定：抽出为独立 BindModal 弹窗（fixed 覆盖层，脱离 swiper/scroll-view
+           文档流，input 可靠）。配置页此处仅显示状态与入口，实际操作在弹窗内完成。 -->
       <view class="divider"></view>
       <view class="section-title">🔐 设备绑定（应用层鉴权）</view>
       <view class="config-desc">已连接设备固件版本：<text class="fw-ver">{{ bleStore.fwVersion || '未知' }}</text>
@@ -217,43 +218,9 @@
         <text class="bind-text">{{ bindStatusText }}</text>
       </view>
 
-      <!-- 未绑定：输入绑定码 -->
-      <view class="config-item" v-if="!bleStore.isBound">
-        <view class="config-desc">首次绑定请输入设备默认绑定码（机身标签）。绑定成功后本机将持有该设备的密钥，可正常控车；其他手机需先解绑才能绑定本机。</view>
-        <input class="bind-input" v-model="bindCode" placeholder="请输入绑定码" type="text"
-          maxlength="32" :disabled="binding" />
-        <button class="btn-bind" :disabled="!bindCode || binding" @tap="handleBind">
-          {{ binding ? '绑定中...' : '绑定设备' }}
-        </button>
-        <!-- ★ 2026-07-10：输入框在部分 Android 自定义基座上无法弹键盘/聚焦，
-             提供「默认码一键绑定」兜底入口，绕过输入框焦点问题即可完成首绑 -->
-        <button class="btn-bind-default" :disabled="binding" @tap="handleBindDefault">
-          {{ binding ? '绑定中...' : '使用默认码 123456 绑定' }}
-        </button>
-      </view>
-
-      <!-- 已绑定：解绑操作 + 重新绑定 -->
-      <view class="config-item" v-else>
-        <view class="config-desc">本机已持有该设备的绑定密钥。解绑后需重新输入绑定码才能控车。</view>
-        <view class="bind-actions">
-          <button class="btn-unbind" :disabled="unbinding" @tap="handleUnbind(false)">
-            {{ unbinding && !unbindAll ? '解绑中...' : '解绑本机' }}
-          </button>
-          <button class="btn-unbind-all" :disabled="unbinding" @tap="handleUnbind(true)">
-            {{ unbinding && unbindAll ? '清空中...' : '恢复出厂(清空所有)' }}
-          </button>
-        </view>
-        <!-- ★ 2026-07-10：始终提供「重新绑定」入口，避免本地有密钥但设备端因 MAC 变化
-             拒连时用户无处可重新绑定（默认绑定码即可覆盖重绑/恢复） -->
-        <view class="config-desc" style="margin-top:16rpx;">若控车提示「未绑定/验证失败」，可重新输入默认绑定码恢复绑定：</view>
-        <input class="bind-input" v-model="bindCode" placeholder="重新绑定：请输入绑定码" type="text"
-          maxlength="32" :disabled="binding" />
-        <button class="btn-bind" :disabled="!bindCode || binding" @tap="handleBind">
-          {{ binding ? '绑定中...' : '重新绑定' }}
-        </button>
-      </view>
-
-      <view class="bind-hint" v-if="bleStore.bindHint">{{ bleStore.bindHint }}</view>
+      <button class="btn-bind" style="margin-top:20rpx;" @tap="openBindModal">
+        {{ bleStore.isBound ? '管理绑定 / 重新绑定' : '去绑定设备' }}
+      </button>
 
       <!-- ★ v3.25: 未保存修改提示（草稿态） -->
       <view class="unsaved-tip" v-if="isDirty">
@@ -269,6 +236,9 @@
         <text class="submit-hint">阈值/确认次数/间隔/断连续锁 → 保存到手机本地（每台 KeyGo 设备独立配置）</text>
       </view>
     </template>
+
+    <!-- ★ 设备绑定弹窗（fixed 覆盖层，脱离 swiper，input 可靠） -->
+    <BindModal :visible="bindModalVisible" @close="bindModalVisible = false" />
   </view>
 </template>
 
@@ -278,12 +248,23 @@ import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
+import BindModal from '@/components/BindModal.vue'
 // ★ v3.23 Phase 3: 地理围栏工具
 import { getParkingLocation, GEOFENCE_RADIUS, isGeofenceMonitorActive } from '@/utils/geofence.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
+
+// ★ 设备绑定弹窗（fixed 覆盖层，脱离 swiper/scroll-view 文档流，input 可靠）
+const bindModalVisible = ref(false)
+function openBindModal() {
+  if (!bleStore.connected) {
+    toast.info('请先连接设备')
+    return
+  }
+  bindModalVisible.value = true
+}
 
 // ★ localConfig 和 syncFromStore 必须在 onShow 之前声明
 //    const 有暂时死区(TDZ)，在声明行之前访问会抛 ReferenceError
@@ -492,11 +473,10 @@ async function handleSubmit() {
   }
 }
 
-// ★ ② 设备绑定 / 解绑
-const bindCode = ref('')
-const binding = ref(false)
-const unbinding = ref(false)
-const unbindAll = ref(false)
+
+
+
+
 
 const bindStatusText = computed(() => {
   if (!bleStore.isBound) return '未绑定'
@@ -507,68 +487,7 @@ const bindStatusClass = computed(() => {
   return bleStore.sessionAuthed ? 'authed' : 'bound'
 })
 
-async function handleBind() {
-  if (!bindCode.value || binding.value) return
-  binding.value = true
-  try {
-    const ok = await bleStore.bindDevice(bindCode.value)
-    if (ok) {
-      toast.success('绑定成功')
-      bindCode.value = ''
-    } else {
-      toast.error(bleStore.bindHint || '绑定失败')
-    }
-  } catch (e) {
-    toast.error(e && e.message ? e.message : '绑定失败')
-  } finally {
-    binding.value = false
-  }
-}
 
-// ★ 2026-07-10：默认码一键绑定（绕过输入框焦点问题）
-async function handleBindDefault() {
-  if (binding.value) return
-  binding.value = true
-  try {
-    const ok = await bleStore.bindDevice('123456')
-    if (ok) {
-      toast.success('绑定成功（默认码）')
-      bindCode.value = ''
-    } else {
-      toast.error(bleStore.bindHint || '绑定失败')
-    }
-  } catch (e) {
-    toast.error(e && e.message ? e.message : '绑定失败')
-  } finally {
-    binding.value = false
-  }
-}
-
-async function handleUnbind(all) {
-  unbindAll.value = !!all
-  uni.showModal({
-    title: all ? '恢复出厂设置？' : '解绑本机？',
-    content: all
-      ? '将清除设备的全部绑定记录，所有手机都需重新绑定后才能控车。'
-      : '本机将失去对该设备的控制权，之后需重新输入绑定码才能控车。',
-    confirmText: '确认',
-    success: async (res) => {
-      if (!res.confirm) { unbindAll.value = false; return }
-      unbinding.value = true
-      try {
-        const ok = await bleStore.unbindDevice(all)
-        if (ok) toast.success(all ? '已恢复出厂' : '已解绑')
-        else toast.error(bleStore.bindHint || '解绑失败')
-      } catch (e) {
-        toast.error(e && e.message ? e.message : '解绑失败')
-      } finally {
-        unbinding.value = false
-        unbindAll.value = false
-      }
-    },
-    fail: () => { unbindAll.value = false },
-  })
-}
 
 </script>
 
@@ -634,6 +553,10 @@ async function handleUnbind(all) {
   font-size: 22rpx;
   color: var(--text-muted);
   margin-bottom: 16rpx;
+}
+.config-desc .hl {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 .config-slider { margin: 0; }
@@ -991,6 +914,9 @@ async function handleUnbind(all) {
 .bind-status.authed .bind-dot { color: #2ecc71; }
 .bind-status.authed .bind-text { color: #2ecc71; }
 
+.bind-input-wrap {
+  width: 100%;
+}
 .bind-input {
   width: 100%;
   background: var(--bg-card);
