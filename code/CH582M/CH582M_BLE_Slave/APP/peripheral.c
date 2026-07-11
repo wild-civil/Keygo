@@ -721,7 +721,7 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
      *   与标准 memcmp 相反。原代码误用 `== 0` 当作"前缀匹配"，导致所有命令前缀判断反相：
      *   BIND:123456 被当 AUTH → AUTH:FAIL:SHORT；NONCE 被当 BIND → BIND:FAIL:SHORT。
      *   现改为直接用返回值（真值=匹配），去掉错误的 `== 0`。 */
-    if (len >= 5 && tmos_memcmp(pValue, "BIND:", 5) && len < 11) {
+    if (len >= 5 && tmos_memcmp(pValue, "BIND:", 5) && len < 6) {
         KeyGo_SendRawNotify("BIND:FAIL:SHORT");
         PRINT("[BIND] too short\n");
         return;
@@ -731,14 +731,20 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         PRINT("[AUTH] too short\n");
         return;
     }
+    if (len >= 8 && tmos_memcmp(pValue, "SETCODE:", 8) && len < 9) {
+        KeyGo_SendRawNotify("SETCODE:FAIL:SHORT");
+        PRINT("[SETCODE] too short\n");
+        return;
+    }
     if (len >= 5 && tmos_memcmp(pValue, "NONCE", 5) && !(len == 5 || pValue[5] == ':')) {
         KeyGo_SendRawNotify("AUTH:FAIL:BAD_CMD");
         return;
     }
 
-    if (len >= 11 && tmos_memcmp(pValue, "BIND:", 5)) {
+    if (len >= 6 && tmos_memcmp(pValue, "BIND:", 5)) {
         PRINT("[BIND] enter\n");
-        uint8_t r = Bonding_HandleBindCmd(connHandle, peerAddr, peerType, pValue + 5, 6);
+        /* ★ 支持自定义绑定码：码变长，整段 pValue+5 即码原文（len-5 字节） */
+        uint8_t r = Bonding_HandleBindCmd(connHandle, peerAddr, peerType, pValue + 5, len - 5);
         PRINT("[BIND] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 69 && tmos_memcmp(pValue, "AUTH:", 5)) {
@@ -750,6 +756,11 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
     } else if (len >= 6 && tmos_memcmp(pValue, "UNBIND", 6)) {
         uint8_t mode = (len > 7 && pValue[6] == ':' && pValue[7] == 'A') ? 1 : 0; /* UNBIND:ALL */
         Bonding_HandleUnbindCmd(connHandle, peerAddr, mode);
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 8 && tmos_memcmp(pValue, "SETCODE:", 8)) {
+        PRINT("[SETCODE] enter\n");
+        uint8_t r = Bonding_HandleSetCodeCmd(connHandle, pValue + 8, len - 8);
+        PRINT("[SETCODE] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else {
         /* ── 通用控制命令（UNLOCK/LOCK/config/NAME 等）── */

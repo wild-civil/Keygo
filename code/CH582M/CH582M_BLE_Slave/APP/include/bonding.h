@@ -28,14 +28,21 @@
 #define BOND_KEY_LEN    16   /* bindKey 取 SHA256 的前 16 字节 */
 #define BOND_NONCE_LEN  16   /* challenge-response 一次性 nonce 长度 */
 
+/* ── 自定义绑定码最大长度 ── */
+#define BOND_CODE_MAXLEN  32  /* 支持用户把绑定码改成自己的任意串（≤32 字节） */
+
 /* ── 信任列表存储布局（DataFlash，复用 keygo_core 的 EEPROM_* 原语）──
  *   keygo_core 配置区: 0x77000 (256B 页)
  *   BLE SNV (LTK):     0x77E00  (协议栈自管，勿碰)
  *   本模块信任列表:     0x77100  (256B 页；8 条≈224B 单页；改 16 条≈448B 需 2 页，见 BOND_PAGES)
- *   ⚠ 0x77100 不得与上面两者重叠。
+ *   当前有效绑定码:     0x77200  (独立 256B 页，首字节=长度，后续=码明文；与 0x77100 不重叠)
+ *   ⚠ 上述地址不得相互重叠。
  */
 #ifndef KEYGO_BOND_ADDR
 #define KEYGO_BOND_ADDR   0x77100
+#endif
+#ifndef KEYGO_BINDCODE_ADDR
+#define KEYGO_BINDCODE_ADDR  0x77200   /* ★ 自定义绑定码持久化页 */
 #endif
 #define BOND_PAGE_SIZE    256
 
@@ -58,6 +65,11 @@ typedef struct {
 void    Bonding_Init(void);                       /* 载入信任列表 + 配置 Bond Manager + 注册回调 + 跑密码学自测 */
 uint8_t Bonding_Load(void);                        /* 从 DataFlash 读入 RAM 表 */
 uint8_t Bonding_Save(void);                        /* RAM 表写回 DataFlash（擦+写） */
+
+/* ── 当前有效绑定码持久化（独立页 KEYGO_BINDCODE_ADDR）── */
+uint8_t Bonding_LoadBindCode(void);   /* 载入已存自定义码（无则回退默认 123456） */
+uint8_t Bonding_SaveBindCode(void);   /* 当前码落盘 */
+void    Bonding_ResetBindCode(void);  /* 重置为默认 123456（UNBIND:ALL 恢复出厂时调用） */
 
 /* ── 信任列表 CRUD ── */
 int8_t  Bonding_Find(const uint8_t *peerAddr);    /* 返回索引, 找不到返回 -1 */
@@ -91,6 +103,9 @@ void    Bonding_HandleNonceReq(uint16_t connHandle);
 uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
                                const uint8_t *payload, uint8_t len);
 uint8_t Bonding_HandleUnbindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint8_t mode);
+/* ★ 自定义绑定码：已绑定且已会话鉴权时，将当前有效绑定码改为 payload，
+ *   并用新码重新派生 bindKey 覆盖信任列表 slot0。回报 SETCODE:OK / SETCODE:FAIL:* */
+uint8_t Bonding_HandleSetCodeCmd(uint16_t connHandle, const uint8_t *payload, uint16_t len);
 
 /* 对外暴露的 Bond Manager 回调表。
  * 接线：peripheral.c 的 GAPRole_PeripheralStartDevice(Peripheral_TaskID, &Bonding_BondCBs, &Peripheral_PeripheralCBs) */
