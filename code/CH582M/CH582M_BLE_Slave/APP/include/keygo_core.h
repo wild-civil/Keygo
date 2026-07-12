@@ -75,8 +75,12 @@ uint16_t KeyGo_GetRssiPeriodTicks(void);
 uint16_t KeyGo_GetDisconnectLockTicks(void);
 
 // ── ★ v3.5.1: 配置持久化到 DataFlash (解决设备重启后阈值丢失) ──
-//    保存到 DataFlash 0x77000 (在 BLE SNV 区域 0x77E00 之前，安全不冲突)
-#define KEYGO_CFG_ADDR          0x00077000
+//    ★ 2026-07-12 修复 DataFlash 地址基准：WCH 的 EEPROM_READ/WRITE 的 StartAddr 是
+//      【相对 DataFlash 基地址 0x70000 的偏移】，绝非物理地址！
+//      佐证：MCU.c 的 Lib_Read_Flash 用 BLE_SNV_ADDR=0x07E00(偏移) 且 SNV/LTK 工作正常。
+//      正确物理地址 = 0x70000 + 偏移。原误用物理地址 0x77000 → 偏移变成 0x77000(>0x8000 上限)越界 → 全部失败。
+//      物理 0x77000 = 偏移 0x7000，位于 BLE SNV(0x77E00) 之前，安全不冲突。
+#define KEYGO_CFG_ADDR          0x7000      // 物理 0x77000 = 0x70000 + 0x7000
 #define KEYGO_CFG_MAGIC         0x4B474346  // "KGCF"
 
 void KeyGo_LoadConfig(void);    // 上电时从 DataFlash 恢复配置

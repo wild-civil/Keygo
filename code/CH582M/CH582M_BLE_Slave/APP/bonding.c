@@ -70,6 +70,17 @@ static uint8_t hex2bin(const char *hex, uint8_t len, uint8_t *bin)
     return n;
 }
 
+/* ★ 常量时间比较：相等返回 1，不等返回 0（diff 累计，无早退）。
+ *   安全关键路径(HMAC 校验)用本函数而非 tmos_memcmp，
+ *   彻底规避 tmos_memcmp 返回值语义(TRUE=相等)在不同 SDK 版本间可能变化的隐患
+ *   —— crypto_sha256.c 已因同一原因改用本地 bytes_eq，此处保持一致。 */
+static uint8_t ct_eq(const uint8_t *a, const uint8_t *b, uint16_t n)
+{
+    uint8_t diff = 0;
+    for (uint16_t i = 0; i < n; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    return (diff == 0) ? 1 : 0;
+}
+
 /* 前向声明（供 Bonding_BondCBs 初始化器引用） */
 static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
                                 uint8_t uiInputs, uint8_t uiOutputs);
@@ -117,8 +128,10 @@ void Bonding_Init(void)
  *********************************************************************/
 uint8_t Bonding_Load(void)
 {
-    uint8_t buf[BOND_IO_BYTES];
-    if (EEPROM_READ(KEYGO_BOND_ADDR, buf, BOND_IO_BYTES) != 0) {
+    __attribute__((aligned(4))) uint8_t buf[BOND_IO_BYTES];
+    int rc = EEPROM_READ(KEYGO_BOND_ADDR, buf, BOND_IO_BYTES);
+    if (rc != 0) {
+        PRINT("[BOND] Load failed (rc=%d); owners=0\n", rc);
         s_bondCount = 0;
         return 1;
     }
@@ -138,7 +151,8 @@ uint8_t Bonding_Load(void)
 
 uint8_t Bonding_Save(void)
 {
-    uint8_t buf[BOND_IO_BYTES];
+    __attribute__((aligned(4))) uint8_t buf[BOND_IO_BYTES];
+    __attribute__((aligned(4))) uint8_t chk[BOND_IO_BYTES];
     tmos_memset(buf, 0xFF, BOND_IO_BYTES);
     for (uint8_t i = 0; i < s_bondCount && i < BOND_ENTRY_MAX; i++) {
         tmos_memcpy(buf + i * BOND_ENTRY_SIZE, &s_bondTbl[i], BOND_ENTRY_SIZE);
@@ -146,7 +160,18 @@ uint8_t Bonding_Save(void)
     for (uint8_t p = 0; p < BOND_PAGES; p++) {
         EEPROM_ERASE(KEYGO_BOND_ADDR + p * BOND_PAGE_SIZE, BOND_PAGE_SIZE);
     }
-    return (EEPROM_WRITE(KEYGO_BOND_ADDR, buf, BOND_IO_BYTES) == 0) ? 0 : 1;
+    if (EEPROM_WRITE(KEYGO_BOND_ADDR, buf, BOND_IO_BYTES) != 0) {
+        PRINT("[BIND] WARNING: Bonding_Save write failed (not persisted)\n");
+        return 1;
+    }
+    /* 写后读回校验, 确保真正落盘, 避免「RAM 生效但掉电即丢」 */
+    if (EEPROM_READ(KEYGO_BOND_ADDR, chk, BOND_IO_BYTES) != 0 ||
+        tmos_memcmp(chk, buf, BOND_IO_BYTES) == 0) {   /* tmos_memcmp: 0=不同 → 校验失败 */
+        PRINT("[BIND] WARNING: Bonding_Save verify FAILED (not persisted)\n");
+        return 1;
+    }
+    PRINT("[BIND] Bonding_Save OK (persisted, owners=%d)\n", s_bondCount);
+    return 0;
 }
 
 /*********************************************************************
@@ -156,7 +181,7 @@ uint8_t Bonding_Save(void)
  *********************************************************************/
 uint8_t Bonding_LoadBindCode(void)
 {
-    uint8_t buf[BOND_CODE_MAXLEN + 1];
+    __attribute__((aligned(4))) uint8_t buf[BOND_CODE_MAXLEN + 1];
     if (EEPROM_READ(KEYGO_BINDCODE_ADDR, buf, sizeof(buf)) == 0) {
         uint8_t len = buf[0];
         if (len >= 1 && len <= BOND_CODE_MAXLEN) {
@@ -176,12 +201,22 @@ uint8_t Bonding_LoadBindCode(void)
 
 uint8_t Bonding_SaveBindCode(void)
 {
-    uint8_t buf[BOND_CODE_MAXLEN + 1];
+    __attribute__((aligned(4))) uint8_t buf[BOND_CODE_MAXLEN + 1];
+    __attribute__((aligned(4))) uint8_t chk[BOND_CODE_MAXLEN + 1];
     tmos_memset(buf, 0xFF, sizeof(buf));
     buf[0] = g_curBindCodeLen;
     tmos_memcpy(buf + 1, g_curBindCode, g_curBindCodeLen);
     EEPROM_ERASE(KEYGO_BINDCODE_ADDR, BOND_PAGE_SIZE);
-    return (EEPROM_WRITE(KEYGO_BINDCODE_ADDR, buf, sizeof(buf)) == 0) ? 0 : 1;
+    if (EEPROM_WRITE(KEYGO_BINDCODE_ADDR, buf, sizeof(buf)) != 0) {
+        PRINT("[BIND] WARNING: SaveBindCode write failed (not persisted)\n");
+        return 1;
+    }
+    if (EEPROM_READ(KEYGO_BINDCODE_ADDR, chk, sizeof(buf)) != 0 ||
+        tmos_memcmp(chk, buf, sizeof(buf)) == 0) {   /* tmos_memcmp: 0=不同 → 校验失败 */
+        PRINT("[BIND] WARNING: SaveBindCode verify FAILED (not persisted)\n");
+        return 1;
+    }
+    return 0;
 }
 
 void Bonding_ResetBindCode(void)
@@ -522,9 +557,10 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     uint8_t expect[SHA256_DIGEST_LEN];
     hmac_sha256(s_bondTbl[0].bindKey, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
 
-    /* ★ 2026-07-11 修复：tmos_memcmp 返回 TRUE(非零)=相等，故「不相等」应写成 == 0。
-     *   原 `!= 0` 在反相语义下表示「相等」，会把正确的 HMAC 响应误判成 mismatch。 */
-    if (tmos_memcmp(expect, resp, SHA256_DIGEST_LEN) == 0) {
+    /* ★ 2026-07-12 加固：用自包含 ct_eq 替代 tmos_memcmp，语义自主、不依赖 SDK 版本。
+     *   ct_eq(相等)=1，故「不相等」写成 !ct_eq → mismatch。与旧逻辑（tmos_memcmp==0 判不同）等价，
+     *   但彻底消除「未来 SDK 改 tmos_memcmp 返回值语义导致鉴权被绕过/误拒」的隐患。 */
+    if (!ct_eq(expect, resp, SHA256_DIGEST_LEN)) {
         PRINT("[AUTH] mismatch\n");
         KeyGo_SendRawNotify("AUTH:FAIL");
         return 4;

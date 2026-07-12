@@ -269,7 +269,17 @@ void Peripheral_Init(void)
      *     - BIND 时 Bonding_Save 失败（信任列表不落盘）
      *     - 重启后 Bonding_Load 读不到 → 设备显示「未绑定」
      *   这是此前「重启即丢失绑定 / 配置」的根因。BLE 栈的 SNV 内部也会用同一机制。 */
-    FLASH_ROM_START_IO();
+    /* ★ 2026-07-12: DataFlash I/O 使能 + 诊断。
+     *   FLASH_ROM_START_IO() 返回 0=SUCCESS(ISP583.h:78)。若返回非0,
+     *   说明 FlashROM I/O 未能就绪 —— 这是「EEPROM_READ failed / 重启丢绑定」的最可能根因。
+     *   实测若首调失败, 先 FLASH_ROM_SW_RESET() 软复位 FlashROM 再 START_IO 常可恢复。 */
+    int ioRc = FLASH_ROM_START_IO();
+    if (ioRc != 0) {
+        PRINT("[FLASH] START_IO first try failed rc=%d, retry after SW_RESET\n", ioRc);
+        FLASH_ROM_SW_RESET();
+        ioRc = FLASH_ROM_START_IO();
+    }
+    PRINT("[FLASH] DataFlash I/O ready (START_IO rc=%d)\n", ioRc);
     KeyGo_LoadConfig();   // ★ v3.5.1: 从 DataFlash 恢复上次保存的阈值
     Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层）
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);

@@ -865,7 +865,8 @@ uint8_t KeyGo_ParseConfig(const char *line)
  *   冷却时间是设备级参数，写入 Flash 确保所有手机共享同一值。
  *   其他参数 (unlock/lock/uc/lc/dlock) 不写 Flash（per-phone 方案）。
  *
- *   使用 DataFlash 0x77000~0x770FF 区域存储配置 (BLE SNV 在 0x77E00)
+ *   使用 DataFlash【偏移 0x7000(物理 0x77000)~0x70FF】区域存储配置 (BLE SNV 在偏移 0x07E00)
+ *   ★ 2026-07-12 修复：EEPROM 地址是相对 DataFlash 基地址 0x70000 的【偏移】，非物理地址。
  *   写入前先擦除页 (256 字节对齐)，然后写入 16 字节配置块
  *   格式: [magic:4][unlock:2][lock:2][uc:1][lc:1][dlock:2][checksum:1][cooldown_ms:2][pad:1]
  *   checksum = XOR over magic+values (前 12 字节)
@@ -873,9 +874,10 @@ uint8_t KeyGo_ParseConfig(const char *line)
 
 void KeyGo_LoadConfig(void)
 {
-    uint8_t buf[16] = {0};
-    if (EEPROM_READ(KEYGO_CFG_ADDR, buf, 16) != 0) {
-        PRINT("[CONFIG] EEPROM_READ failed, using defaults\n");
+    __attribute__((aligned(4))) uint8_t buf[16] = {0};
+    int rc = EEPROM_READ(KEYGO_CFG_ADDR, buf, 16);
+    if (rc != 0) {
+        PRINT("[CONFIG] EEPROM_READ failed (rc=%d), using defaults\n", rc);
         return;
     }
 
@@ -932,7 +934,8 @@ void KeyGo_SaveConfig(void)
     // 擦除配置页 (256 字节，页对齐)
     EEPROM_ERASE(KEYGO_CFG_ADDR, 256);
 
-    uint8_t buf[16] = {0};
+    __attribute__((aligned(4))) uint8_t buf[16] = {0};
+    __attribute__((aligned(4))) uint8_t rbuf[16];
 
     /* ★ v3.15-fix3: 字节写入替代指针强转，确保对齐安全 (LE) */
     // Magic (4 bytes, LE)
@@ -961,11 +964,17 @@ void KeyGo_SaveConfig(void)
     buf[12] = 0;
     for (uint8_t i = 0; i < 12; i++) buf[12] ^= buf[i];
 
-    if (EEPROM_WRITE(KEYGO_CFG_ADDR, buf, 16) == 0) {
-        PRINT("[CONFIG] Saved to flash OK\n");
-    } else {
+    if (EEPROM_WRITE(KEYGO_CFG_ADDR, buf, 16) != 0) {
         PRINT("[CONFIG] Save to flash FAILED\n");
+        return;
     }
+    /* 写后读回校验, 确认真正落盘 */
+    if (EEPROM_READ(KEYGO_CFG_ADDR, rbuf, 16) != 0 ||
+        tmos_memcmp(rbuf, buf, 16) == 0) {   /* tmos_memcmp: 0=不同 → 校验失败 */
+        PRINT("[CONFIG] Save verify FAILED (not persisted)\n");
+        return;
+    }
+    PRINT("[CONFIG] Saved to flash OK (verified)\n");
 }
 
 /*********************************************************************
