@@ -42,6 +42,7 @@ extern "C" {
 #define SBP_DISCONNECT_LOCK_EVT     0x0800  // ★ v3.15-#15: 断连延时锁车（c. disconnectLockMs）
 #define SBP_DEFERRED_STATUS_EVT     0x1000  // ★ 2026-07-10: 绑定层短报文(BIND:OK等)后延迟发状态，避免抢占通知队列导致短报文被丢
 #define SBP_DEFERRED_RAW_EVT        0x2000  // ★ 2026-07-11: 绑定层短报文(BIND:/NONCE:/AUTH:/UNBIND:/DENY:)延迟发送队列消费。原实现在 FF03 写回调内同步发通知，写事务缓冲区仍占用（且 BIND 紧跟 Bonding_Save Flash 写会关中断/占总线）→ GATT_bm_alloc 偶发失败、通知被丢。改为写回调只入队 + 启动本事件，由 TMOS 任务在写回调之外逐个发送（与 status 同可靠通道）。
+#define SBP_UNBOUND_TIMEOUT_EVT     0x4000  // ★ 方案A（2026-07-12）：未鉴权连接超时后延迟强断（先让 BIND:TIMEOUT 通知 flush 再断链）
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
 #define SBP_PERIODIC_EVT_PERIOD        1600   // ~1s  系统状态更新

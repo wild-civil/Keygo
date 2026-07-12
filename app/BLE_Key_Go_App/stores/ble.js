@@ -280,6 +280,10 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.25-fix2: GATT 上下文重建中标志，防止看门狗与重连逻辑并发触发多次重建
     _repairing: false,
 
+    // ★ 方案A（2026-07-12）：未绑定连接超时强断标记。收到固件 BIND:TIMEOUT 后置 true，
+    //   _handleDisconnect 据此抑制自动重连（含原生扫描），避免被踢后反复重连刷占连接槽。
+    _unboundTimeoutKicked: false,
+
     // ★ v1.0.1: 亮屏触发（舒适模式核心）
     _screenOnReceiverActive: false,
     _lastScreenOnTrigger: 0,
@@ -1087,6 +1091,20 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.12: 断连时重置恢复标记，确保重连时能重新加载 per-SN 配置
       this._restoredForSn = ''
 
+      // ★ 方案A（2026-07-12）：未绑定连接超时强断 → 抑制自动重连（含原生前台扫描）
+      //   固件主动踢人（BIND:TIMEOUT）后，不应像异常断连那样自动重连刷占连接槽，
+      //   应等用户手动重连并在 30s 内绑定。此处拦截覆盖「断连早于通知到达」的竞态：
+      //   即便 notify 晚到，断开即停原生扫描；且 notify 处理已置 reconnectMode='dormant'，
+      //   挂起的定时重连在 _scheduleReconnect 内会因 dormant 而放弃。
+      if (this._unboundTimeoutKicked) {
+        console.log('[Store] 未绑定超时断开，抑制自动重连（等待用户手动重连绑定）')
+        this._unboundTimeoutKicked = false
+        if (this._foregroundServiceNative) {
+          stopNativeBackgroundScan()
+        }
+        return  // 不启动任何重连 / 围栏 / GPS 心跳
+      }
+
       // ★ v3.24: 极速模式下断连 → 三级后备记录停车位置 + 启动后台 GPS 围栏
       if (this.autoReconnectMode === 'speed') {
         console.log('[Store] ⚡ 极速模式断连，记录停车位置 + 启动围栏监控...')
@@ -1462,6 +1480,18 @@ export const useBleStore = defineStore('ble', {
       if (this.reconnectMode === 'dormant') return false   // 用户主动断开
       if (this.autoReconnectMode === 'manual') return false // ★ v3.24: 手动模式永不自动连接
       if (this.btState === 'off') return false
+      // ★ 方案A（2026-07-12 修正②）：曾因「连上未绑定超时」被固件强断的设备 → 不自动重连。
+      //   持久化兜底：即便 BIND:TIMEOUT 通知偶发丢失、或 App 重启/原生扫描回调重置了内存态，
+      //   也不会反复重连刷占唯一连接槽。用户手动 connect() 会清除该标记，恢复自动重连。
+      try {
+        const kicked = uni.getStorageSync('keygo_unbound_kicked')
+        if (kicked) {
+          const cur = this.deviceId || uni.getStorageSync('ble_device_id') || ''
+          const norm = s => String(s).replace(/:/g, '').toUpperCase()
+          // kicked==='1' 表示当时无 deviceId，一律抑制；否则按 MAC 匹配抑制
+          if (kicked === '1' || (cur && norm(kicked) === norm(cur))) return false
+        }
+      } catch {}
       // ① 绑定门槛预留：if (!this.isBound) return false
       return true
     },
@@ -2217,6 +2247,10 @@ export const useBleStore = defineStore('ble', {
         this.reconnectAttempt = 0
         this.reconnectNextDelay = 0
         this._reconnectGuard++
+        // ★ 方案A（2026-07-12 修正②）：用户主动连接即清除「未绑定超时被踢」抑制标记，
+        //   恢复后续自动重连（配合 _shouldAutoReconnect 的持久化兜底）。
+        this._unboundTimeoutKicked = false
+        try { uni.removeStorageSync('keygo_unbound_kicked') } catch {}
 
         // ★ 预清理旧连接句柄（和 _doReconnect 同样的保护）
         try {
@@ -2993,6 +3027,23 @@ export const useBleStore = defineStore('ble', {
           rawSendCommand(this.deviceId, 'AUTH:' + hmac).catch(() => {})
         } else {
           this.bindHint = '设备未绑定，请先绑定'
+        }
+      } else if (text.startsWith('BIND:TIMEOUT')) {
+        // ★ 方案A（2026-07-12）：固件侧未鉴权连接超时强断（防 DoS 占槽）
+        //   设备检测到本连接连上 30s 仍未 AUTH/BIND，主动断开并提示重连绑定。
+        //   收此消息即抑制自动重连（含原生前台扫描），避免被踢后反复重连刷占连接槽；
+        //   用户需手动重连并在 30s 内完成绑定（手动 connect 会重置 reconnectMode 并重启前台服务）。
+        this.bindHint = '连接超时未绑定，已断开；如需绑定请重连并于30秒内完成'
+        uni.showToast({ title: '连接超时未绑定，已断开', icon: 'none', duration: 3000 })
+        this._unboundTimeoutKicked = true
+        this.reconnectMode = 'dormant'   // 抑制自动重连；手动 connect 会重置为 idle
+        // ★ 2026-07-12 修正②：持久化「被踢的设备」，作为抑制自动重连的兜底。
+        //   仅靠内存标记(reconnectMode='dormant'/_unboundTimeoutKicked) 在 App 重启、
+        //   原生扫描回调、蓝牙状态事件等路径下可能被重置 → 又去刷占连接槽。
+        //   持久化后 _shouldAutoReconnect 会据此拦截，直到用户手动 connect() 才清除。
+        try { uni.setStorageSync('keygo_unbound_kicked', this.deviceId || uni.getStorageSync('ble_device_id') || '1') } catch {}
+        if (this._foregroundServiceNative) {
+          stopNativeBackgroundScan()     // 停止原生后台扫描，避免被踢后反复重连
         }
       }
     },

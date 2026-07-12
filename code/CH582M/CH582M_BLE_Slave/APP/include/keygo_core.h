@@ -47,6 +47,16 @@ void KeyGo_NotifyStatus(void);
 void KeyGo_SendRawNotify(const char *msg);
 void KeyGo_FlushRawNotify(void);   // ★ 2026-07-11: 延迟发送队列消费（SBP_DEFERRED_RAW_EVT 任务内调用）
 
+/* ─────────────────────────────────────────────────────────────────
+ * ★ 方案A（2026-07-12）：未鉴权连接时长限制 —— 防 DoS 占用唯一连接槽
+ *   场景：攻击者持续连接但不 BIND/AUTH，占住 CH582 唯一连接槽 → 车主连不进来。
+ *   做法：连接建立时记时戳；若超时(默认30s)仍未 AUTH/BIND → 下发提示并强断让槽。
+ *   取消：AUTH/BIND 成功即清零计时（车主/合法用户长连不受限，手慢也不被误踢）。
+ * ───────────────────────────────────────────────────────────────── */
+#define UNBOUND_CONN_TIMEOUT_MS   30000   // 已连接但从未 AUTH/BIND 的超时(ms)
+extern uint32_t g_unauthConnStartMs;      // 连接建立时记时戳；AUTH/BIND 成功或断连清零(=0)
+void KeyGo_CancelUnauthTimer(void);       // AUTH/BIND 成功时调用，取消计时
+
 // 命令处理 (NAME/TRUNK/UNLOCK/LOCK)
 void KeyGo_HandleCommand(const char *cmd, uint16_t len);
 

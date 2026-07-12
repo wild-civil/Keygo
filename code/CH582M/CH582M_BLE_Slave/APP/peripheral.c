@@ -374,12 +374,38 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if (events & SBP_STATE_MACHINE_EVT) {
         if (g_deviceConnected) {
+            /* ★ 方案A（2026-07-12）：未鉴权连接超时强断（防 DoS 占槽）
+             *   连接后 30s 内既不 AUTH 也不 BIND → 下发提示并断开，把唯一连接槽让回车主。
+             *   正常车主：AUTH(~250ms)/BIND(一次往返) 远小于 30s，计时早已被取消，永不触发。
+             *   ★ 2026-07-12 修正（用户实测无提示根因）：BLE 通知即使"发送成功"也只是排进
+             *   链路层缓冲，要等【下一个连接事件】才空口发出；连接间隔可能达 30~48ms，加上
+             *   raw 队列首发 ~5ms/退避 ~20ms，原先仅延迟 ~40ms 就 TerminateLink，通知常常
+             *   还没空口发出链路就断了 → App 收不到、既不提示也不抑制重连。
+             *   改：延迟拉长到 ~400ms（640 ticks），稳跨多个连接事件确保通知真正送达 App，
+             *   再强断。对占槽 DoS 影响可忽略（每次占用只多 0.4s）。 */
+            if (g_unauthConnStartMs != 0 &&
+                Peripheral_GetSystemMs() - g_unauthConnStartMs >= UNBOUND_CONN_TIMEOUT_MS) {
+                PRINT("[SEC] unauth conn timeout %lums, schedule force disconnect\n",
+                      (unsigned long)(Peripheral_GetSystemMs() - g_unauthConnStartMs));
+                KeyGo_SendRawNotify("BIND:TIMEOUT:30S");   // App 提示：长时间连接未绑定
+                g_unauthConnStartMs = 0;   // 标记已触发，避免重复；状态机继续轮询不受影响
+                tmos_start_task(Peripheral_TaskID, SBP_UNBOUND_TIMEOUT_EVT, 640);  // ~400ms 后强断，确保通知先空口送达
+            }
             KeyGo_ProcessStateMachine();
-        }
-        if (g_deviceConnected) {
             tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         }
         return (events ^ SBP_STATE_MACHINE_EVT);
+    }
+
+    /* ★ 方案A（2026-07-12）：未鉴权连接超时后的延迟强断。
+     *   由 SBP_STATE_MACHINE_EVT 触发（先发 BIND:TIMEOUT 通知），此处真正断开链路，
+     *   把唯一连接槽让回车主。已发通知故 App 能提示并抑制自动重连。 */
+    if (events & SBP_UNBOUND_TIMEOUT_EVT) {
+        if (g_deviceConnected) {
+            PRINT("[SEC] unauth timeout: terminating link\n");
+            GAPRole_TerminateLink(peripheralConnList.connHandle);
+        }
+        return (events ^ SBP_UNBOUND_TIMEOUT_EVT);
     }
 
     if (events & SBP_GPIO_PULSE_END_EVT) {
@@ -537,6 +563,10 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         KeyGo_ResetState();
 
+        // ★ 方案A（2026-07-12）：启动未鉴权连接计时（防 DoS 占槽）。
+        //   连上即开始算，AUTH/BIND 成功由 KeyGo_CancelUnauthTimer 清零；超时强断（见状态机事件）。
+        g_unauthConnStartMs = Peripheral_GetSystemMs();
+
         /* ★ v3.15-#15: 重连成功后取消断连锁车定时器
          *   用户在 dlockMs 窗口内重连 → 取消自动锁车，状态保持不变 */
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
@@ -571,6 +601,9 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         /* ★ 断连：清空绑定会话态（下次连接需重新 AUTH/BIND） */
         Bonding_ConnTerminated();
 
+        // ★ 方案A（2026-07-12）：断连即清未鉴权计时；重连时重新计（见 LinkEstablished）。
+        g_unauthConnStartMs = 0;
+
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
@@ -581,6 +614,8 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
         /* [LED_BEGIN] 取消残留的后备箱 LED 闪烁定时器 [LED_END] */
         tmos_stop_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT);
+        /* ★ 方案A（2026-07-12）：取消可能挂起的超时强断（已自然断连无需再踢） */
+        tmos_stop_task(Peripheral_TaskID, SBP_UNBOUND_TIMEOUT_EVT);
         advRestartRetryCount = 0;
 
         KeyGo_ResetState();

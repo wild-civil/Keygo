@@ -151,6 +151,17 @@ uint32_t Peripheral_GetSystemMs(void)
     return TMOS_GetSystemClock() * TMOS_TICK_NUM / TMOS_TICK_DEN;
 }
 
+/* ★ 方案A（2026-07-12）：未鉴权连接计时起点。
+ *   连接建立(Peripheral_LinkEstablished)时置为当前系统 ms；
+ *   AUTH/BIND 成功(KeyGo_CancelUnauthTimer)或断连(Peripheral_LinkTerminated)清零。 */
+uint32_t g_unauthConnStartMs = 0;
+
+/* ★ 方案A（2026-07-12）：AUTH/BIND 成功 → 取消未鉴权计时（合法用户长连不受限） */
+void KeyGo_CancelUnauthTimer(void)
+{
+    g_unauthConnStartMs = 0;
+}
+
 /* ─────────────────────────────────────────────────────────────────
  * GPIO 控制
  * ───────────────────────────────────────────────────────────────── */

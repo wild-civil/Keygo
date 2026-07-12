@@ -12,6 +12,7 @@
  *******************************************************************************/
 #include "bonding.h"
 #include "HAL.h"   // PRINT / tmos_mem*
+#include "keygo_core.h"  // ★ 方案A：KeyGo_CancelUnauthTimer / KeyGo_SendRawNotify 声明
 
 /* GetMACAddress 是 ISP583.h 提供的宏（FLASH_EEPROM_CMD 封装），经 CONFIG.h 已可见，
  * 直接调用即可，无需也不能做函数前向声明（否则宏展开成非法语法）。 */
@@ -447,6 +448,8 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
     s_bondCount = 1;
     /* BIND 成功即视为本连接已会话鉴权（证明了码知识） */
     s_sessionAuthed = 1;
+    /* ★ 方案A（2026-07-12）：BIND 成功 → 取消未鉴权计时（合法用户长连不受限） */
+    KeyGo_CancelUnauthTimer();
     s_nonceValid    = 0;
     /* ★ P0-2：BIND 成功后建立 C1 会话盐（= 新生成 nonce，App 经 BIND:OK:<32hex> 取得），
      *   供后续控制命令签名。首次绑定无 AUTH 握手，故在此单独发盐。 */
@@ -583,6 +586,8 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     }
 
     s_sessionAuthed = 1;
+    /* ★ 方案A（2026-07-12）：AUTH 成功 → 取消未鉴权计时（车主重连照常长连） */
+    KeyGo_CancelUnauthTimer();
     s_nonceValid    = 0;   /* 一次性 */
     /* ★ P0-2：复用本次 AUTH 握手的 nonce 作为 C1 会话盐（App 已知该 nonce），建立签名会话。 */
     tmos_memcpy(s_sessionSalt, s_nonce, BOND_NONCE_LEN);

@@ -131,13 +131,13 @@
       <text class="section-title mgmt-title">⚙️ 设备管理</text>
         <view class="mgmt-rows">
           <view class="mgmt-row" @tap="showNameDialog">
-            <text class="mgmt-label">设备名称</text>
+            <text class="mgmt-label">设备名称 ✍ </text>
             <text class="mgmt-val" v-if="bleStore.customDeviceName">{{ bleStore.customDeviceName }}</text>
             <text class="mgmt-val name-hint" v-else>点击设置（如车牌号）</text>
             <text class="mgmt-arrow">›</text>
           </view>
           <view class="mgmt-row" @tap="openBindModal">
-            <text class="mgmt-label">🔐 设备绑定</text>
+            <text class="mgmt-label">设备绑定 🔐 </text>
             <text class="mgmt-val" v-if="bleStore.isBound">{{ bindLabel }}</text>
             <text class="mgmt-val name-hint" v-else>未绑定·点击绑定</text>
             <text class="mgmt-arrow">›</text>
