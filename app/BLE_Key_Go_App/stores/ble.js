@@ -2983,6 +2983,11 @@ export const useBleStore = defineStore('ble', {
         if (_bokParts.length >= 3) _sessionSalt = _bokParts[2]
         _cmdSeq = 0
         _resolveWaiter('BIND', true)
+        // ★ 方案A（2026-07-12）：BIND 成功后发起 BLE 配对（bond）。
+        //   配对完成后 LTK 存 OS KeyStore + 固件 SNV，
+        //   此后 OS 自动在每次重连时加密链路（无需 App 进程），
+        //   RSSI 自动解锁的 LINK_ENCRYPTED 闸门自动放行 → 走近即开。
+        this._triggerBond()
       } else if (text.startsWith('BIND:FAIL')) {
         if (text.includes('ALREADY_BOUND')) {
           // ★ 设备已有 owner，提供的码不匹配当前有效码：必须先接管/解绑，再用『修改绑定码』切换
@@ -3045,6 +3050,36 @@ export const useBleStore = defineStore('ble', {
         if (this._foregroundServiceNative) {
           stopNativeBackgroundScan()     // 停止原生后台扫描，避免被踢后反复重连
         }
+      }
+    },
+
+    /**
+     * ★ 方案A（2026-07-12）：BIND 成功后，发起 BLE 配对（bond）。
+     *
+     * 原理：调用原生插件的 createBond()，触发 Just Works 配对（无需用户输入 PIN）。
+     * 配对成功后 LTK 存入 Android KeyStore（手机端）和固件 SNV（设备端），
+     * 此后 OS 在每次重连时自动加密链路——无需 App 进程存活。
+     *
+     * 非阻塞：配对失败不影响绑定已成功（仅暂时无法享受"走近自动解锁"，
+     * 仍可通过 App 手动操控。配对成功后会记 log 方便排查）。
+     */
+    async _triggerBond() {
+      if (!this.deviceId) return
+      try {
+        const fg = uni.requireNativePlugin('Keygo-Foreground')
+        if (!fg) {
+          console.warn('[Bond] 原生插件不可用，跳过硬连接配对')
+          return
+        }
+        fg.createBond({ mac: this.deviceId }, (res) => {
+          if (res && res.ok) {
+            console.log('[Bond] ✅ BLE 配对成功，此后重连自动加密（走近自动解锁）')
+          } else {
+            console.warn('[Bond] ⚠️ BLE 配对未完成', res && res.message)
+          }
+        })
+      } catch (e) {
+        console.warn('[Bond] 配对调用异常（非阻塞）:', e)
       }
     },
 

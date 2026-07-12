@@ -4,6 +4,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -139,6 +141,126 @@ public class KeygoForegroundModule extends UniModule {
         if (callback != null) {
             JSONObject o = new JSONObject();
             try { o.put("running", scanCallback != null); } catch (Exception e) { /* ignore */ }
+            callback.invoke(o);
+        }
+    }
+
+    /**
+     * ★ 方案A（2026-07-12）：发起 BLE 配对（bond），使 OS 自动重连加密。
+     *
+     * JS 在 BIND:OK 成功后调用：
+     *   createBond({ mac: deviceId }, (res) => { console.log('bond result:', res) })
+     *
+     * 回调返回 { ok: true/false, message: "..." }。
+     * 配对为 Just Works（NO_INPUT_NO_OUTPUT, MITM=0），通常静默完成无用户提示。
+     * bond 成功后 LTK 存入 Android KeyStore，后续断连重连 OS 自动加密链路。
+     */
+    @UniJSMethod(uiThread = false)
+    public void createBond(JSONObject options, UniJSCallback callback) {
+        String mac = (options != null) ? options.optString("mac", "") : "";
+        Log.i(TAG, "createBond mac=" + mac);
+
+        if (mac.isEmpty()) {
+            invokeCallback(callback, false, "MAC 为空");
+            return;
+        }
+
+        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter == null || !adapter.isEnabled()) {
+            invokeCallback(callback, false, "蓝牙未开启");
+            return;
+        }
+
+        BluetoothDevice device;
+        try {
+            device = adapter.getRemoteDevice(mac);
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, "getRemoteDevice 失败, mac=" + mac, e);
+            invokeCallback(callback, false, "MAC 格式无效");
+            return;
+        }
+
+        // 注册 bond 状态广播（一次性，收到结果即注销）
+        Context ctx = getAppContext();
+        if (ctx == null) {
+            invokeCallback(callback, false, "获取 Context 失败");
+            return;
+        }
+
+        BondStateReceiver receiver = new BondStateReceiver(mac, device, callback);
+        IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        ctx.registerReceiver(receiver, filter);
+
+        // 发起配对
+        boolean started = device.createBond();
+        Log.i(TAG, "createBond started=" + started + " mac=" + mac);
+        if (!started) {
+            ctx.unregisterReceiver(receiver);
+            invokeCallback(callback, false, "createBond 调用失败");
+        }
+        // 成功：等待 BondStateReceiver 回传最终结果（BOND_BONDED 或 BOND_NONE）
+    }
+
+    /** 统一回调封装 */
+    private void invokeCallback(UniJSCallback callback, boolean ok, String message) {
+        if (callback == null) return;
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", ok);
+            o.put("message", message);
+        } catch (Exception e) { /* ignore */ }
+        callback.invoke(o);
+    }
+
+    /**
+     * ★ 方案A：Bond 状态广播接收器（一次性）。
+     *
+     * 监听 BluetoothDevice.ACTION_BOND_STATE_CHANGED，
+     * 等待目标设备的最终 bond 状态（BOND_BONDED=12 或 BOND_NONE=10），
+     * 收到后回传 callback 并自动注销。
+     */
+    private static class BondStateReceiver extends BroadcastReceiver {
+        private final String mac;
+        private final BluetoothDevice device;
+        private final UniJSCallback callback;
+
+        BondStateReceiver(String mac, BluetoothDevice device, UniJSCallback callback) {
+            this.mac = mac;
+            this.device = device;
+            this.callback = callback;
+        }
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) return;
+
+            BluetoothDevice dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+            if (dev == null || !mac.equals(dev.getAddress())) return;
+
+            int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+            Log.i(TAG, "BondStateReceiver mac=" + mac + " state=" + state
+                + " (" + (state == BluetoothDevice.BOND_BONDED ? "BONDED" :
+                          state == BluetoothDevice.BOND_BONDING ? "BONDING" :
+                          state == BluetoothDevice.BOND_NONE ? "NONE" : "?") + ")");
+
+            if (state == BluetoothDevice.BOND_BONDED) {
+                context.unregisterReceiver(this);
+                invokeCallbackStatic(callback, true, "配对成功");
+            } else if (state == BluetoothDevice.BOND_NONE) {
+                context.unregisterReceiver(this);
+                invokeCallbackStatic(callback, false, "配对失败");
+            }
+            // BOND_BONDING(11): 中间状态，忽略，等最终 BOND_BONDED 或 BOND_NONE
+        }
+
+        private static void invokeCallbackStatic(UniJSCallback callback, boolean ok, String message) {
+            if (callback == null) return;
+            JSONObject o = new JSONObject();
+            try {
+                o.put("ok", ok);
+                o.put("message", message);
+            } catch (Exception e) { /* ignore */ }
             callback.invoke(o);
         }
     }

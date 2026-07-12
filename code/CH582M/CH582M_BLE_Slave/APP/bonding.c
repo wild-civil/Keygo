@@ -129,7 +129,13 @@ void Bonding_Init(void)
     GAPBondMgr_SetParameter(GAPBOND_PERI_IO_CAPABILITIES, sizeof(uint8_t), &ioCap);
     GAPBondMgr_SetParameter(GAPBOND_PERI_MITM_PROTECTION, sizeof(uint8_t), &mitm);
 
-    PRINT("[BOND] init done, owners=%d\n", s_bondCount);
+    /* ★ 方案A：启用 peri bonding 持久化。
+     *   配对完成后 LTK 写入 SNV（协议栈自动管理），断连重连后 OS 可自动恢复加密链路。
+     *   此前只配了配对参数但没 ENABLE，pairing 虽完成但 LTK 不持久→每次重连需重新配对。 */
+    uint8_t bondingEnabled = 1;
+    GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8_t), &bondingEnabled);
+
+    PRINT("[BOND] init done, owners=%d, bonding=%d\n", s_bondCount, bondingEnabled);
 }
 
 /*********************************************************************
