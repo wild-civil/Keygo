@@ -1,9 +1,8 @@
 <template>
   <!-- ★ 绑定弹窗：position:fixed 全屏覆盖层，脱离 main.vue 的 swiper/scroll-view 文档流。
        与 index.vue 的 PIN 弹窗同机制（fixed + 高 z-index）。
-       ★ 输入框方案（2026-07-11 修正）：该自定义 Android 基座上 webview <input> 弹不出键盘，
-       故字段不再用 <input>，而是「点一下弹 uni.showModal({editable:true}) 系统原生输入框」
-       （字段即触发器，键盘 100% 可靠），不堆独立按钮。 -->
+       字段用 webview <input>（与 index.vue 自定义名称同源）。用户在自定义基座上实测 <input> 键盘可用，
+       故恢复为 <input> 直输，不弹系统原生框。 -->
   <view v-if="visible" class="bind-overlay" @tap.stop>
     <view class="bind-dialog" @tap.stop>
       <view class="bind-head">
@@ -33,11 +32,9 @@
       <!-- 设备无 owner（全新 / 已恢复出厂）：首绑，可直接用自定义码 -->
       <block v-if="!showBoundMode">
         <text class="bind-desc">首次绑定可直接输入<text class="hl">你自定义的绑定码</text>（任意非空即可，绑定后该码即生效）；也可使用默认码 123456。绑定成功后本机将持有该设备的密钥，可正常控车。</text>
-        <!-- ★ 字段即触发器：点一下弹出系统原生输入框（webview input 在该基座弹不出键盘，故不用 <input>） -->
-        <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','请输入绑定码')">
-          <text v-if="fields.bindCode">{{ fields.bindCode }}</text>
-          <text v-else class="bind-ph">请输入绑定码</text>
-        </view>
+        <!-- 绑定码输入框：与 index.vue 自定义名称同源的 <input> 方式 -->
+        <input class="bind-input" v-model="fields.bindCode" type="text"
+               :maxlength="16" placeholder="请输入绑定码" />
         <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">
           {{ binding ? '绑定中...' : '绑定设备' }}
         </button>
@@ -64,10 +61,8 @@
 
           <!-- ★ 重新验证：用当前码重建会话（应对持久化丢失/换机后本地无 key 的兜底） -->
           <text class="bind-desc bind-mt">若控车提示「未绑定/验证失败」，可重新输入<text class="hl">当前绑定码</text>恢复绑定：</text>
-          <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','重新验证：请输入当前绑定码')">
-            <text v-if="fields.bindCode" class="secure">••••••</text>
-            <text v-else class="bind-ph">重新验证：请输入当前绑定码</text>
-          </view>
+          <input class="bind-input" v-model="fields.bindCode" type="text"
+                 :maxlength="16" placeholder="重新验证：请输入当前绑定码" />
           <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">
             {{ binding ? '绑定中...' : '重新绑定' }}
           </button>
@@ -76,18 +71,12 @@
 
           <!-- ★ 修改绑定码（SETCODE 指令）：切换成「你的自定义码」的主路径 -->
           <text class="bind-desc bind-mt">🔑 <text class="hl">修改绑定码（换成你的自定义码）</text>：为安全起见，须先输入<text class="hl">当前绑定码</text>核对身份。改完后须用<text class="hl">新码</text>控车；旧码（含默认 123456）将失效。忘记新码可执行「恢复出厂」重置回 123456。</text>
-          <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('oldBindCode','请输入当前绑定码（验证身份）')">
-            <text v-if="fields.oldBindCode" class="secure">••••••</text>
-            <text v-else class="bind-ph">请输入当前绑定码（验证身份）</text>
-          </view>
-          <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('newBindCode','请输入新绑定码')">
-            <text v-if="fields.newBindCode">{{ fields.newBindCode }}</text>
-            <text v-else class="bind-ph">请输入新绑定码</text>
-          </view>
-          <view class="bind-input bind-tap bind-mt" @tap.stop="promptField('confirmBindCode','请再次输入新绑定码')">
-            <text v-if="fields.confirmBindCode" class="secure">••••••</text>
-            <text v-else class="bind-ph">请再次输入新绑定码</text>
-          </view>
+          <input class="bind-input bind-mt" v-model="fields.oldBindCode" type="text"
+                 :maxlength="16" placeholder="请输入当前绑定码（验证身份）" />
+          <input class="bind-input bind-mt" v-model="fields.newBindCode" type="text"
+                 :maxlength="16" placeholder="请输入新绑定码" />
+          <input class="bind-input bind-mt" v-model="fields.confirmBindCode" type="text"
+                 :maxlength="16" placeholder="请再次输入新绑定码" />
           <text class="bind-warn">⚠ 提交时会先用「当前绑定码」自动完成一次验证，再将绑定码切换为新码；验证失败则说明当前码输错。</text>
           <text class="bind-warn" v-if="fields.newBindCode && fields.confirmBindCode && fields.newBindCode !== fields.confirmBindCode">⚠ 两次输入的新绑定码不一致</text>
           <text class="bind-warn" v-if="fields.oldBindCode && fields.newBindCode && fields.newBindCode === fields.oldBindCode">⚠ 新绑定码不能与当前绑定码相同</text>
@@ -99,10 +88,8 @@
         <!-- 设备已绑但本机无密钥：先接管，再切换自定义码 -->
         <block v-else>
           <text class="bind-desc">此设备<text class="hl">已被绑定</text>（当前手机未持有密钥）。若你就是主人：请输入<text class="hl">当前绑定码</text>(默认123456) 绑定以接管，接管后便可在『修改绑定码』换成你的自定义码。若不是主人，需先解绑/恢复出厂（同样需当前码）。</text>
-          <view class="bind-input bind-tap" @tap.stop="promptField('bindCode','接管：请输入当前绑定码')">
-            <text v-if="fields.bindCode">{{ fields.bindCode }}</text>
-            <text v-else class="bind-ph">接管：请输入当前绑定码</text>
-          </view>
+          <input class="bind-input" v-model="fields.bindCode" type="text"
+                 :maxlength="16" placeholder="接管：请输入当前绑定码" />
           <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">
             {{ binding ? '绑定中...' : '用当前码接管绑定' }}
           </button>
@@ -124,29 +111,13 @@ const emit = defineEmits(['close'])
 
 const bleStore = useBleStore()
 
-// ★ 字段值统一放 reactive。模板里输入框改为「点一下弹系统原生输入框」(见 promptField)。
-//   原因：该自定义 Android 基座上 webview <input> 弹不出键盘（与之前 config 页同病），
-//   而 uni.showModal({editable:true}) 是系统原生对话框，键盘 100% 可靠。字段即触发器，不堆按钮。
+// 字段值统一放 reactive；模板里直接 <input> 绑定（用户在自定义基座实测键盘可用）。
 const fields = reactive({ bindCode: '', newBindCode: '', confirmBindCode: '', oldBindCode: '' })
 
 const binding = ref(false)
 const unbinding = ref(false)
 const unbindAll = ref(false)
 const changing = ref(false)
-
-// ★ 点字段 → 弹系统原生输入框。editable 弹窗的 content 作初值，确认后写回 fields[key]。
-function promptField(key, placeholder) {
-  if (binding.value || changing.value) return
-  uni.showModal({
-    title: '输入绑定码',
-    editable: true,
-    placeholderText: placeholder || '请输入绑定码',
-    content: fields[key] || '',
-    success: (res) => {
-      if (res.confirm) fields[key] = (res.content || '').trim()
-    }
-  })
-}
 
 const bindStatusText = computed(() => {
   if (!bleStore.isBound) return '未绑定'
@@ -418,23 +389,18 @@ async function handleUnbind(all) {
   margin: 10rpx 0 4rpx;
 }
 
-/* ★ 字段即触发器：外观仍是输入框，但点一下弹系统原生输入框（见 promptField） */
+/* 绑定码输入框：直接用 webview <input> */
 .bind-input {
   width: 100%;
-  min-height: 80rpx;
-  display: flex;
-  align-items: center;
+  height: 80rpx;
   background: var(--bg-card-alt, var(--bg-card));
   border: 2rpx solid var(--border);
   border-radius: 12rpx;
-  padding: 20rpx 24rpx;
+  padding: 0 24rpx;
   font-size: 28rpx;
   color: var(--text-primary);
   box-sizing: border-box;
 }
-.bind-input.bind-tap { cursor: pointer; }
-.bind-input.bind-tap:active { opacity: 0.7; }
-.bind-ph { color: var(--text-muted); }
 
 .btn-bind {
   width: 100%;
