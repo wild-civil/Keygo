@@ -1,6 +1,7 @@
 # IDE / 构建产物
 **/.mrs/
 **/.settings/
+**/.gradle/
 **/obj/
 **/Listings/
 *.o
