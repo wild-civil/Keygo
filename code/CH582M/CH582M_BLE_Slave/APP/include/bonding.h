@@ -31,6 +31,9 @@
 /* ── 自定义绑定码最大长度 ── */
 #define BOND_CODE_MAXLEN  32  /* 支持用户把绑定码改成自己的任意串（≤32 字节） */
 
+/* ── 自定义绑定码最小长度（首绑 / 改码强度下限，P1-1）── */
+#define BOND_CODE_MINLEN  6   /* 绑定码至少 6 字节，避免弱码 */
+
 /* ── 信任列表存储布局（DataFlash，复用 keygo_core 的 EEPROM_* 原语）──
  *   keygo_core 配置区: 偏移 0x7000 (物理 0x77000, 256B 页)
  *   BLE SNV (LTK):     偏移 0x07E00 (物理 0x77E00, 协议栈自管，勿碰)
@@ -56,7 +59,8 @@ typedef struct {
 } bondEntry_t;
 
 #define BOND_ENTRY_MAX    8      /* D6: 容量 8（已确认）。改 16 时 BOND_PAGES 自动变 2。 */
-#define BOND_ENTRY_SIZE  (sizeof(bondEntry_t))                 /* 6+1+1+16+4 = 28B */
+#define BOND_ENTRY_SIZE  28  /* = sizeof(bondEntry_t): 6+1+1+16+4, uint32 对齐无 padding。
+                                  ★ 不能用 sizeof()（预处理器 #if 不认识），用字面值保持编译护栏可用 */
 #define BOND_TABLE_BYTES (BOND_ENTRY_MAX * BOND_ENTRY_SIZE)    /* 8*28=224B */
 #define BOND_IO_BYTES    ((BOND_TABLE_BYTES + 3) & ~3)         /* EEPROM 按 4 字节对齐 */
 #define BOND_PAGES       ((BOND_TABLE_BYTES + (BOND_PAGE_SIZE-1)) / BOND_PAGE_SIZE)
@@ -122,6 +126,10 @@ uint8_t Bonding_HandleUnbindCmd(uint16_t connHandle, const uint8_t *peerAddr, ui
 /* ★ 自定义绑定码：已绑定且已会话鉴权时，将当前有效绑定码改为 payload，
  *   并用新码重新派生 bindKey 覆盖信任列表 slot0。回报 SETCODE:OK / SETCODE:FAIL:* */
 uint8_t Bonding_HandleSetCodeCmd(uint16_t connHandle, const uint8_t *payload, uint16_t len);
+
+/* ★ P0-2：校验 C1 签名控制命令（C1:<body>:<seq>:<hmacHex64>），详见 bonding.c。
+ *   通过返回 0 并回写 body；失败返回非 0 错误码。 */
+uint8_t Bonding_VerifySignedCmd(const char *tail, uint16_t len, char *outBody, uint16_t *outBodyLen);
 
 /* 对外暴露的 Bond Manager 回调表。
  * 接线：peripheral.c 的 GAPRole_PeripheralStartDevice(Peripheral_TaskID, &Bonding_BondCBs, &Peripheral_PeripheralCBs) */

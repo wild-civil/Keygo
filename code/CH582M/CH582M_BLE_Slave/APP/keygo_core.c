@@ -416,6 +416,17 @@ void KeyGo_ProcessStateMachine(void)
     //   手动 UNLOCK/LOCK 命令仍有独立会话鉴权门控（见 Peripheral_HandleFF03）。
     if (Bonding_Count() == 0) return;
 
+    // ★ 方案B（2026-07-12）：RSSI 近场解锁须「本连接已会话鉴权」。
+    //   Bonding_Count()>0 只证「设备有主人」，证不了「当前连接=车主」；
+    //   RSSI 是链路层信号、与连谁无关 → 攻击者拿 BLE 工具在车边连上(命中阈值)即可解锁。
+    //   HMAC AUTH 只守 FF03 指令通道，没守固件自主 RSSI 解锁 → 这是缺口根源。
+    //   故此处再加一道：本连接必须真通过 NONCE→AUTH（持有 bindKey 算出 HMAC 盖章）才放行。
+    //   注意 s_sessionAuthed 每断连清零(Bonding_ConnTerminated)，需 App 重连后跑 AUTH；
+    //   正常情况前台服务 Keygo-Foreground 自动 AUTH(_maybeAutoAuth)，走近体验不变；
+    //   仅「App 被强杀 + OS 仅链路重连」极端情形不解锁（该情形由方案A的bond救场）。
+    //   影响：自动解锁 + 自动上锁 两端都被本门控拦截 → 陌生人连上也动不了车。
+    if (!Bonding_IsSessionAuthed(peripheralConnList.connHandle)) return;
+
     // ★ 只在有新 Kalman 样本时才计数（每 ~500ms 一次，而非每 125ms）
     if (!g_rssiUpdated) return;
     g_rssiUpdated = 0;

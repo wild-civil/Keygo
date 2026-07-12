@@ -26,6 +26,14 @@ static uint8_t s_nonceValid   = 0;
 static uint8_t s_sessionAuthed = 0;
 static uint8_t g_cryptoOk     = 0;   /* 1 = SHA256/HMAC 自测通过；0 = 失败(降级鉴权) */
 
+/* ★ P0-2（§15.3 修订）：C1 命令签名会话盐 + 同连接重放计数器。
+ *   s_sessionSalt 在 AUTH/BIND 成功后建立（= 本次握手 nonce，App 已知），
+ *   用于把 HMAC 绑定到「每连接随机量」，堵住「跨连接重放」洞；
+ *   s_lastCmdSeq 防同连接内重放（seq 必须严格递增）。两者在断连时清零。 */
+static uint8_t  s_sessionSalt[BOND_NONCE_LEN];
+static uint8_t  s_sessionSaltValid = 0;
+static uint32_t s_lastCmdSeq = 0;
+
 /* 默认绑定码（出厂，贴于设备/说明书）。首绑校验；owner 重绑可改码。
  * O5 待定：每颗芯片烧不同码 / 二维码标签，Phase 1 先用统一占位码。 */
 #define DEFAULT_BIND_CODE_LEN  6
@@ -362,6 +370,9 @@ void Bonding_ConnTerminated(void)
     s_sessionAuthed = 0;
     s_nonceValid    = 0;
     tmos_memset(s_nonce, 0, BOND_NONCE_LEN);
+    s_sessionSaltValid = 0;
+    tmos_memset(s_sessionSalt, 0, BOND_NONCE_LEN);
+    s_lastCmdSeq = 0;
 }
 
 uint8_t Bonding_IsSessionAuthed(uint16_t connHandle)
@@ -396,8 +407,9 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
     uint8_t        effLen  = g_curBindCodeLen;
 
     if (Bonding_Count() == 0) {
-        /* 首次绑定：接受任意 1..BOND_CODE_MAXLEN 字节作为新码 */
-        if (len < 1 || len > BOND_CODE_MAXLEN) {
+        /* ★ 首次绑定（选项① 先到先绑）：接受任意 BOND_CODE_MINLEN..BOND_CODE_MAXLEN 字节作为新码。
+         *   即用户当场输入的自定义码直接成为绑定码（P1-1 强度下限 ≥6），无「先绑默认码再强制改码」。 */
+        if (len < BOND_CODE_MINLEN || len > BOND_CODE_MAXLEN) {
             KeyGo_SendRawNotify("BIND:FAIL:SHORT");
             return 1;
         }
@@ -436,6 +448,11 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
     /* BIND 成功即视为本连接已会话鉴权（证明了码知识） */
     s_sessionAuthed = 1;
     s_nonceValid    = 0;
+    /* ★ P0-2：BIND 成功后建立 C1 会话盐（= 新生成 nonce，App 经 BIND:OK:<32hex> 取得），
+     *   供后续控制命令签名。首次绑定无 AUTH 握手，故在此单独发盐。 */
+    Bonding_GenNonce(s_sessionSalt);
+    s_sessionSaltValid = 1;
+    s_lastCmdSeq = 0;
     if (Bonding_Save() != 0) {
         /* ★ 持久化失败（多为首次设备上电 DataFlash 尚未就绪/未初始化）不阻断本次绑定：
          *   密钥已在 RAM 生效，本连接可正常鉴权控制；掉电后需重新绑定。
@@ -443,7 +460,11 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
         PRINT("[BIND] WARNING: Bonding_Save failed; key kept in RAM only (not persisted)\n");
     }
     PRINT("[BIND] owner set (key-based, MAC-independent), count=%d\n", s_bondCount);
-    KeyGo_SendRawNotify("BIND:OK");
+    /* ★ P0-2：BIND:OK 内联 C1 会话盐，App 据此对后续控制命令签名 */
+    char _bok[48];
+    tmos_memcpy(_bok, "BIND:OK:", 8);
+    bin2hex(s_sessionSalt, BOND_NONCE_LEN, _bok + 8);
+    KeyGo_SendRawNotify(_bok);
     return 0;
 }
 
@@ -468,7 +489,7 @@ uint8_t Bonding_HandleSetCodeCmd(uint16_t connHandle, const uint8_t *payload, ui
         KeyGo_SendRawNotify("SETCODE:FAIL:NO_AUTH");
         return 2;
     }
-    if (len < 1 || len > BOND_CODE_MAXLEN) {
+    if (len < BOND_CODE_MINLEN || len > BOND_CODE_MAXLEN) {
         KeyGo_SendRawNotify("SETCODE:FAIL:SHORT");
         return 3;
     }
@@ -518,25 +539,20 @@ void Bonding_HandleNonceReq(uint16_t connHandle)
  * @fn      Bonding_HandleAuthResp
  * @brief   校验 HMAC-SHA256(nonce, peerKey) == response。
  *   payload 为 64 个 hex（HMAC 输出）。成功置会话鉴权，nonce 一次性作废。
- *   回报文：AUTH:OK / AUTH:FAIL / AUTH:FAIL:NO_NONCE / AUTH:FAIL:NO_PEER
+ *   回报文：AUTH:OK / AUTH:FAIL / AUTH:FAIL:NO_NONCE / AUTH:FAIL:NO_PEER / AUTH:FAIL:CRYPTO
  *********************************************************************/
 uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
                                const uint8_t *payload, uint8_t len)
 {
     (void)connHandle; (void)peerAddr;  /* ★ 不再用 MAC 查找 owner，改用密钥本身校验 */
-    /* ★ 2026-07-11 兜底：若 SHA256 自测失败（g_cryptoOk=0，CH582M 上被 -O2/运行时破坏），
-     *   设备端无法做 HMAC 校验 → 降级为「设备已绑定即视为已鉴权」。BIND 已用明文码证明
-     *   持有者身份，威胁模型内可接受（无头设备、实体在手）。严格 HMAC 校验仅在
-     *   g_cryptoOk=1 时生效。该路径不依赖 HMAC，故 App 的 HMAC 计算被忽略也无妨。 */
+    /* ★ 2026-07-12 P0-1（§14.3.1）：删除「crypto 自测失败即降级放行」后门，改为 fail-closed。
+     *   旧逻辑在 g_cryptoOk=0 时「已绑定即视为已鉴权」——一旦某天自测偶发失败，绑定设备会
+     *   被无条件放行，是潜在后门。现改为：crypto 不可信时一律拒绝鉴权，绝不降级放行。
+     *   当前 g_cryptoOk=1（AUTH:OK 实证），此分支为兜底防御；真出现应修 crypto 而非放行。 */
     if (!g_cryptoOk) {
-        if (s_bondCount == 0) {
-            KeyGo_SendRawNotify("AUTH:FAIL:NO_PEER");
-            return 2;
-        }
-        s_sessionAuthed = 1;
-        PRINT("[AUTH] crypto disabled (self-test FAIL) -> bound=device authed (fallback)\n");
-        KeyGo_SendRawNotify("AUTH:OK");
-        return 0;
+        KeyGo_SendRawNotify("AUTH:FAIL:CRYPTO");
+        PRINT("[AUTH] crypto self-test failed, refuse all auth (fail-closed)\n");
+        return 4;
     }
     if (s_bondCount == 0) {
         KeyGo_SendRawNotify("AUTH:FAIL:NO_PEER");  /* 设备尚未绑定 */
@@ -568,6 +584,10 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
 
     s_sessionAuthed = 1;
     s_nonceValid    = 0;   /* 一次性 */
+    /* ★ P0-2：复用本次 AUTH 握手的 nonce 作为 C1 会话盐（App 已知该 nonce），建立签名会话。 */
+    tmos_memcpy(s_sessionSalt, s_nonce, BOND_NONCE_LEN);
+    s_sessionSaltValid = 1;
+    s_lastCmdSeq = 0;
     tmos_memset(s_nonce, 0, BOND_NONCE_LEN);
     PRINT("[AUTH] session authed (key-based, MAC-independent)\n");
     KeyGo_SendRawNotify("AUTH:OK");
@@ -604,7 +624,72 @@ uint8_t Bonding_HandleUnbindCmd(uint16_t connHandle, const uint8_t *peerAddr, ui
     }
     s_sessionAuthed = 0;
     s_nonceValid    = 0;
+    s_sessionSaltValid = 0;
+    tmos_memset(s_sessionSalt, 0, BOND_NONCE_LEN);
+    s_lastCmdSeq = 0;
     KeyGo_SendRawNotify("UNBIND:OK");
+    return 0;
+}
+
+/*********************************************************************
+ * @fn      Bonding_VerifySignedCmd
+ * @brief   校验 C1 签名控制命令（在 Peripheral_HandleFF03 的 else 分支调用）。
+ *   输入 tail = 去掉 "C1:" 前缀后的剩余串，格式：<body>:<seq>:<hmacHex64>
+ *     - body：原控制命令（如 UNLOCK / LOCK / TRUNK / NAME:xxx），可含 ':'。
+ *     - seq ：十进制序号（防同连接重放）。
+ *     - hmac：HMAC-SHA256(bindKey, s_sessionSalt || "<body>:<seq>") 的 64 hex。
+ *   校验：① 会话盐已建立；② seq > s_lastCmdSeq；③ HMAC 匹配。
+ *   通过返回 0，并把 body 写入 outBody（供 KeyGo_HandleCommand 执行）；失败返回非 0 错误码。
+ *   ★ 防跨连接重放：s_sessionSalt 每连接由 AUTH/BIND 重建（= 新随机 nonce），
+ *     旧连接的签名在新连接下因 salt 不同而必然 HMAC 校验失败。
+ *********************************************************************/
+uint8_t Bonding_VerifySignedCmd(const char *tail, uint16_t len, char *outBody, uint16_t *outBodyLen)
+{
+    if (!s_sessionSaltValid) return 1;          /* 会话盐未建立（未 AUTH/BIND） */
+    if (len < 67) return 2;                      /* 至少 "X:1:" + 64hex = 67 */
+    if (tail[len - 65] != ':') return 3;         /* hmac 前必须是 ':' 分隔 */
+    const char *hmacHex = tail + len - 64;
+
+    /* head = tail[0 .. len-66] = "<body>:<seq>" */
+    uint16_t headLen = len - 65;
+    if (headLen > 64) return 10;                 /* head 超长保护 */
+    int idx = -1;
+    for (uint16_t i = 0; i < headLen; i++) {
+        if (tail[i] == ':') idx = (int)i;
+    }
+    if (idx < 0) return 4;                       /* 找不到 seq 分隔 */
+    uint16_t bodyLen = (uint16_t)idx;
+    uint16_t seqLen  = headLen - (uint16_t)idx - 1;
+    if (seqLen == 0 || seqLen > 10) return 5;    /* seq 长度异常 */
+    if (bodyLen >= 64) return 10;                /* body 超长保护 */
+
+    /* 解析 seq 十进制 */
+    uint32_t seq = 0;
+    for (uint16_t i = (uint16_t)idx + 1; i < headLen; i++) {
+        char c = tail[i];
+        if (c < '0' || c > '9') return 6;        /* 非数字 */
+        seq = seq * 10u + (uint32_t)(c - '0');
+    }
+    if (seq <= s_lastCmdSeq) return 7;           /* 重放/乱序 */
+
+    /* 校验 HMAC：msg = s_sessionSalt || "<body>:<seq>" */
+    uint8_t resp[SHA256_DIGEST_LEN];
+    if (hex2bin(hmacHex, 64, resp) != SHA256_DIGEST_LEN) return 8;  /* hmac 非法 hex */
+
+    uint8_t material[BOND_NONCE_LEN + 64];
+    uint16_t mlen = 0;
+    tmos_memcpy(material, s_sessionSalt, BOND_NONCE_LEN); mlen += BOND_NONCE_LEN;
+    tmos_memcpy(material + mlen, tail, headLen);          mlen += headLen;
+    uint8_t expect[SHA256_DIGEST_LEN];
+    hmac_sha256(s_bondTbl[0].bindKey, BOND_KEY_LEN, material, mlen, expect);
+
+    if (!ct_eq(expect, resp, SHA256_DIGEST_LEN)) return 9;  /* 签名不匹配 */
+
+    /* 通过：更新重放计数器并回写 body */
+    s_lastCmdSeq = seq;
+    tmos_memcpy(outBody, tail, bodyLen);
+    outBody[bodyLen] = 0;
+    *outBodyLen = bodyLen;
     return 0;
 }
 

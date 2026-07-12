@@ -773,7 +773,7 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         PRINT("[SETCODE] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else {
-        /* ── 通用控制命令（UNLOCK/LOCK/config/NAME 等）── */
+        /* ── 通用控制命令（UNLOCK/LOCK/TRUNK/NAME 等）：须经 C1 签名 ── */
         if (Bonding_Count() == 0) {
             KeyGo_SendRawNotify("DENY:NOT_BOUND");
             PRINT("[CMD] rejected: device not bound\n");
@@ -786,9 +786,26 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
             KeyGo_SendRawNotify(msg);
             PRINT("[CMD] rejected: auth required, nonce issued\n");
             tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+        } else if (len >= 3 && tmos_memcmp(pValue, "C1:", 3)) {
+            /* ★ P0-2：带 C1 签名 → 校验后执行 */
+            static char _body[64];
+            uint16_t _bodyLen = 0;
+            uint8_t r = Bonding_VerifySignedCmd((const char *)pValue + 3, len - 3, _body, &_bodyLen);
+            if (r != 0) {
+                char _err[40];
+                snprintf(_err, sizeof(_err), "CMD:FAIL:SIG:%d", r);
+                KeyGo_SendRawNotify(_err);
+                PRINT("[CMD] signed verify fail r=%d\n", r);
+            } else {
+                KeyGo_HandleCommand(_body, _bodyLen);
+                KeyGo_NotifyStatus();
+            }
+            tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
         } else {
-            KeyGo_HandleCommand((const char *)pValue, len);
-            KeyGo_NotifyStatus();
+            /* 未带 C1 签名的明文命令 → 一律拒绝（强制签名） */
+            KeyGo_SendRawNotify("CMD:FAIL:NO_SIG");
+            PRINT("[CMD] rejected: missing C1 signature\n");
+            tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
         }
     }
 }

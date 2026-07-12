@@ -122,6 +122,11 @@ let _bindInProgress = false
 // ★ 2026-07-12: 自动 AUTH（重连恢复会话）进行中标志——防止 _maybeAutoAuth 被多路径并发触发导致重复 NONCE
 let _autoAuthRunning = false
 
+// ★ P0-2: C1 命令签名会话态（每连接）
+let _sessionSalt = null   // 当前会话盐（AUTH/BIND 握手 nonce 的 hex），C1 命令签名用
+let _cmdSeq = 0           // 当前连接 C1 命令序号（防重放），每连接递增
+let _lastNonce = null     // 最近一次 NONCE 请求的 hex，AUTH:OK 时作为会话盐来源
+
 // 绑定指令的异步等待器（NONCE/AUTH/BIND/UNBIND 的回应经 FF02 通知解析后 resolve）
 const _bindWaiters = { NONCE: null, AUTH: null, BIND: null, UNBIND: null, SETCODE: null }
 // ★ 2026-07-10: 记录 BIND 流程中固件最后回包原文，便于失败时给出确切原因
@@ -741,6 +746,7 @@ export const useBleStore = defineStore('ble', {
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
+      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 断连重置签名会话态
       this.filteredRssi = -999
       this.statusStale = false
       this.reconnectMode = 'paused'
@@ -1669,6 +1675,7 @@ export const useBleStore = defineStore('ble', {
     _finalizeConnection(deviceId) {
       this.connected = true
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
+      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 新连接重置签名会话态
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
@@ -2377,6 +2384,7 @@ export const useBleStore = defineStore('ble', {
       this.connected = false
       this.deviceId = ''
       this.deviceName = ''
+      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 主动断开重置签名会话态
       this.scanning = false
       this.customDeviceName = ''
       this.serialNumber = ''              // ★ v3.3
@@ -2767,10 +2775,36 @@ export const useBleStore = defineStore('ble', {
           e.code = 'NOT_BOUND'
           throw e
         }
+        // ★ P0-2: 控制命令须经 C1 签名（防跨连接重放 + 防同连接重放）
+        const signed = this._signCommand(command)
+        if (!signed) {
+          const e = new Error('会话未就绪（缺少签名盐，请重新验证绑定）')
+          e.code = 'NO_SALT'
+          throw e
+        }
+        command = signed
       }
       // ★ v3.27-fix ②: 经模块级写队列串行化，保证「上一条 write 落地后再发下一条」，
       //   避免与配置下发并发抢 GATT 通道（从源头降低 GATT_BUSY / write failed）。
       await enqueueWrite(() => rawSendCommand(this.deviceId, command))
+    },
+
+    /** ★ P0-2: 对控制命令做 C1 签名，返回 "C1:<cmd>:<seq>:<hmacHex>" 或 null（缺盐/缺密钥）。
+     *   签名 = HMAC-SHA256(bindKey, saltBytes || "<cmd>:<seq>")。
+     *   与固件 Bonding_VerifySignedCmd 完全一致：msg = salt(16) + ascii(cmd+":"+seq)。 */
+    _signCommand(cmd) {
+      if (!_bindKey || !_sessionSalt) return null
+      _cmdSeq += 1
+      const seq = String(_cmdSeq)
+      const head = cmd + ':' + seq
+      const saltBytes = hexToBytes(_sessionSalt)
+      const headBytes = new Uint8Array(head.length)
+      for (let i = 0; i < head.length; i++) headBytes[i] = head.charCodeAt(i) & 0xff
+      const msg = new Uint8Array(saltBytes.length + headBytes.length)
+      msg.set(saltBytes, 0)
+      msg.set(headBytes, saltBytes.length)
+      const hmac = hmacSha256Hex(msg, _bindKey)
+      return 'C1:' + head + ':' + hmac
     },
 
     // ==================== ★ ② 绑定 / 授权 ====================
@@ -2879,6 +2913,7 @@ export const useBleStore = defineStore('ble', {
       const hex = await p
       done = true
       clearTimeout(timer)
+      _lastNonce = hex || null   // ★ P0-2: 记录本次 NONCE，AUTH:OK 时作为会话盐来源
       return hex || null
     },
 
@@ -2894,18 +2929,25 @@ export const useBleStore = defineStore('ble', {
         this.sessionAuthed = true
         this._autoAuthState = 'idle'   // ★ 2026-07-12: 会话已建立，自动 AUTH 状态机归位
         this.bindHint = ''
+        _sessionSalt = _lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
+        _cmdSeq = 0
         _resolveWaiter('AUTH', true)
       } else if (text.startsWith('AUTH:FAIL')) {
         this.sessionAuthed = false
+        _sessionSalt = null; _cmdSeq = 0   // ★ P0-2
         /* ★ 2026-07-10 fix：移除 AUTH:FAIL:NO_PEER 误报为"固件过旧"的旧逻辑。
          *   AUTH:FAIL:NO_PEER 可能来自并发/残留的 ensureSession 流（与 BIND 无关），
          *   把 AUTH 失败误判为 BIND 失败会打断正确的 BIND:OK 响应，导致"一绑就失败"。
          *   BIND 的成功/失败仅由 BIND:OK / BIND:FAIL:* 决定。 */
         this.bindHint = '验证失败，请重试'
         _resolveWaiter('AUTH', false)
-      } else if (text === 'BIND:OK') {
+      } else if (text.startsWith('BIND:OK')) {
         this.isBound = true
         this.bindHint = '绑定成功'
+        // ★ P0-2: BIND:OK 可能内联 C1 会话盐（BIND:OK:<32hex>），提取作为签名盐；旧固件无盐则跳过
+        const _bokParts = text.split(':')
+        if (_bokParts.length >= 3) _sessionSalt = _bokParts[2]
+        _cmdSeq = 0
         _resolveWaiter('BIND', true)
       } else if (text.startsWith('BIND:FAIL')) {
         if (text.includes('ALREADY_BOUND')) {
@@ -2918,6 +2960,7 @@ export const useBleStore = defineStore('ble', {
       } else if (text === 'UNBIND:OK') {
         this.isBound = false
         this.sessionAuthed = false
+        _sessionSalt = null; _cmdSeq = 0   // ★ P0-2
         /* ★ 2026-07-11 防御：绑定进行中（_bindInProgress）不在此清空 _bindKey，
          *   避免并发场景下迟到的 UNBIND:OK 把刚设好的 key 清掉（见 _acquireBindLock）。 */
         if (!_bindInProgress) _bindKey = null
@@ -2939,10 +2982,12 @@ export const useBleStore = defineStore('ble', {
         if (!_bindInProgress) {
           this.isBound = false
           this.sessionAuthed = false
+          _sessionSalt = null; _cmdSeq = 0   // ★ P0-2
         }
       } else if (text.startsWith('DENY:AUTH_REQ:')) {
         // 控制指令被拒且内联带 nonce → 用本地 key 直接回 AUTH（下一次控制即生效）
         const nonceHex = text.slice('DENY:AUTH_REQ:'.length)
+        _lastNonce = nonceHex   // ★ P0-2: 该 nonce 即本次会话盐来源（AUTH:OK 时采用）
         if (_bindKey) {
           const hmac = hmacSha256Hex(hexToBytes(nonceHex), _bindKey)
           rawSendCommand(this.deviceId, 'AUTH:' + hmac).catch(() => {})
@@ -3000,6 +3045,7 @@ export const useBleStore = defineStore('ble', {
       this.sessionAuthed = false
       this.bindHint = ''
       _lastBindRaw = ''   // ★ 清空陈旧回包，使失败提示只反映本次绑定操作
+      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2
       _resolveWaiter('AUTH', false)  // 清掉连接时可能残留的 AUTH waiter
 
       const key = deriveBindKey(code, sn)
@@ -3364,7 +3410,8 @@ export const useBleStore = defineStore('ble', {
       // ★ 可选：同步写入固件（供无本地记录的手机作为初始默认名）
       if (syncToDevice) {
         try {
-          await rawSendCommand(this.deviceId, `NAME:${name}`)
+          // ★ P0-2: 经 sendCommand 走 C1 签名（NAME:xxx 含 ':'，固件按最后一个 ':' 切分 seq/hmac，body 完整保留）
+          await this.sendCommand(`NAME:${name}`)
           console.log('[Store] 设备名称已同步到固件 DataFlash d2:', name)
         } catch (e) {
           console.warn('[Store] 同步名称到固件失败:', e?.message || e)
