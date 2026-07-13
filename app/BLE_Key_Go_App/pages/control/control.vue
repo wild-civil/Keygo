@@ -125,6 +125,7 @@ import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 import { sendConfig } from '@/utils/ble.js'
+import { cmdErrorMsg } from '@/utils/readable-errors.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
@@ -133,17 +134,6 @@ const themeClass = computed(() => themeStore.themeClass)
 onShow(() => {
   themeStore.applyNavBar()
 })
-
-// ★ v3.27: 根据命令错误码返回诚实文案（不再把所有失败都说成"请检查连接"）
-function cmdErrorMsg(err) {
-  const code = err && err.code
-  if (code === 'NO_CONN') return '未连接，请先连接设备'
-  if (code === 'TOO_FAST') return '操作太频繁，请稍候'
-  if (code === 'CONFLICT') return '指令冲突，请重试'
-  if (code === 'NOT_BOUND') return '设备未绑定，请先到「配置」绑定'
-  if (code === 'AUTH_FAIL') return '设备验证失败，请重新绑定'
-  return '发送失败，请检查连接'
-}
 
 async function handleUnlock() {
   try {
