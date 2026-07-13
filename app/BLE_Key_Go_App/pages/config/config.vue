@@ -24,8 +24,8 @@
             <text class="mode-name">手动模式</text>
             <text class="mode-badge" v-if="bleStore.autoReconnectMode === 'manual'">当前</text>
           </view>
-          <text class="mode-desc">完全手动：不自动连接、也不自动锁车</text>
-          <text class="mode-power">适合露营等贴身场景，由你点按钮控制</text>
+          <text class="mode-desc">完全手动，不自动解锁车、断连也不自动锁车</text>
+          <text class="mode-power">适合露营等贴身场景，后台零功耗、由你点按钮控制</text>
         </view>
 
         <view class="mode-card"

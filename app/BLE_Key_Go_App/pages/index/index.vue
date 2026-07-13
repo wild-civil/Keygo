@@ -372,14 +372,14 @@ onShow(async () => {
   }
 
   // ★ v1.0.1: 根据智能重连模式决定 onShow 行为
-  if (bleStore.autoReconnectMode === 'comfort') {
-    // 舒适模式（亮屏触发）→ onShow 时尝试重连
-    // 闸门：用户主动断开(dormant) / 已连接 / 蓝牙关 → 不自动连；idle 避免重入
-    if (bleStore.reconnectMode === 'idle' && bleStore._shouldAutoReconnect()) {
+  if (bleStore.autoReconnectMode === 'comfort' || bleStore.autoReconnectMode === 'manual') {
+    // 舒适/手动模式：onShow（App 打开/回前台）即尝试「前台」自动连接。
+    // 手动模式用户要求「打开 App 也要自动连」，故放行前台；但后台重连(心跳/亮屏扫描/原生扫描)
+    // 仍由 _shouldAutoReconnect 的 manual&&!isForeground 拦死，不会在锁屏后刷连接。
+    // 闸门：用户主动断开(dormant) / 已连接 / 蓝牙关 → 不自动连；idle 避免重入。
+    if (bleStore.reconnectMode === 'idle' && bleStore._shouldAutoReconnect(true, true)) {
       bleStore.tryAutoConnect()
     }
-  } else if (bleStore.autoReconnectMode === 'manual') {
-    // ★ v3.24: 手动模式 — 不自动连接（统一闸门已拦截），仅由用户点击按钮控制
   } else if (bleStore.autoReconnectMode === 'speed') {
     // ★ Phase 3: 极速模式 → GPS 围栏检测（内部已含 _shouldAutoReconnect 闸门）
     if (!bleStore.connected) {

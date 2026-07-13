@@ -48,7 +48,7 @@
           <text class="step-num">5</text>
           <view class="step-content">
             <text class="step-title">当钥匙用</text>
-            <text class="step-desc">返回「控制」页解锁 / 锁车；自动/极速模式手机靠近自动连接，手动模式需手动点按</text>
+            <text class="step-desc">返回「控制」页解锁 / 锁车；自动/极速模式手机靠近自动连接，手动模式纯手动控制，打开均可 App 即自动连。</text>
           </view>
         </view>
       </view>

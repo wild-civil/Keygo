@@ -92,9 +92,10 @@ import {
   recordScreenEvent,
 } from '@/utils/debug-panel.js'
 
-// ★ v3.32.2 (2026-07-13): App 版本号，方便回看改动与排查问题（与固件 KEYGO_FW_VERSION = "3.32.2" 保持一致，固件/App 同一版本）。
-//   本版本落地：RSSI 显示层改为 EMA 平滑 + 500ms 节流，回前台保留旧值（见下方 ★ 标记）。
-export const APP_VERSION = 'v3.32.2'
+// ★ v3.33.0 (2026-07-14): App 版本号，与固件 KEYGO_FW_VERSION = "3.33.0" 保持一致（固件/App 同一版本）。
+//   本版本落地：① 手动模式语义修正（打开 App 仍自动连，仅锁屏后台不自动重连，isForeground 闸门）；
+//   ② fwsec 安全协议能力字段解析分流骨架（fwSec 状态 + _handleStatus 读取）；③ 收口文案同步。
+export const APP_VERSION = 'v3.33.0'
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
@@ -135,6 +136,7 @@ export const useBleStore = defineStore('ble', {
     customDeviceName: '',         // 设备自定义名称
     serialNumber: '',             // ★ v3.3: 设备序列号（永久唯一，FF04 读取）
     fwVersion: '',                 // ★ 2026-07-10: 固件版本号（FF02 status 的 v 字段），用于确认设备烧录的是哪版固件
+    fwSec: -1,                     // ★ v3.33: 安全协议能力版本（FF02 status 的 fwsec 字段）。-1=未连接/未收状态；0=旧固件(无此字段,裸协议)；1=当前基线(BIND/AUTH/C1/单码)；2+=授权体系。后续破坏性协议升级据此分流走旧/新路径
     fingerprint: '',              // ★ v3.3: 扫描阶段指纹（MAC 后缀，来自广播包）
 
     // ★ ②: 绑定/授权状态（UI 展示用）
@@ -1454,16 +1456,43 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ 2026-07-14 修复：清除「未绑定超时被踢」的持久化抑制标记。
+     *   仅当标记命中当前设备（或无具体设备时的通配 '1'）才清，避免误清
+     *   其它设备的合法抑制。调用时机：AUTH:OK / BIND:OK（即本机已证明是 owner）。
+     *   陌生人/未绑定连接永远到不了这两个回包 → 标记保持 → 不自动刷占连接槽（DoS 保护不破）。
+     */
+    _clearUnboundKicked() {
+      try {
+        const kicked = uni.getStorageSync('keygo_unbound_kicked')
+        if (!kicked) return
+        const cur = this.deviceId || uni.getStorageSync('ble_device_id') || ''
+        const norm = s => String(s).replace(/:/g, '').toUpperCase()
+        if (kicked === '1' || (cur && norm(kicked) === norm(cur))) {
+          uni.removeStorageSync('keygo_unbound_kicked')
+          console.log('[Store] 连接鉴权成功，清除「未绑定超时被踢」抑制标记，恢复自动重连')
+        }
+      } catch {}
+    },
+
+    /**
      * ★ 自动重连统一闸门（② 用户主动断开不自动连；① 绑定门槛预留）
      *   所有自动触发点（onShow / 亮屏 / 围栏）都应先过此闸门。
      *   注意：不含 "reconnectMode==='idle'" —— 那是 onShow 避免重入的额外约束。
      *   @returns {boolean}
      */
-    _shouldAutoReconnect() {
+    // ★ ignoreKicked=true 用于「前台自动连」(App 启动/回到前台)：即使曾被写「未绑定被踢」
+    //   标记也允许本次前台尝试，连上后由 AUTH:OK/BIND:OK 清除标记；否则会形成死锁：
+    //   标记拦住自动连 → 连不上 → 到不了 AUTH:OK → 标记永远清不掉 → 每次都要手动连。
+    //   后台被动触发(STATE_ON/心跳/亮屏/原生扫描)仍传 false，保留 DoS 抑制。
+    // ★ isForeground=true 用于「前台自动连」(App 启动/回到前台 onShow)：手动模式下也允许本次
+    //   前台尝试（用户需求：手动模式打开 App 也要自动连）。后台被动触发(STATE_ON/心跳/亮屏/
+    //   原生扫描)传默认 false，手动模式仍被拦死 → 锁屏后台不自动重连，仅由用户点按钮或打开 App 触发。
+    _shouldAutoReconnect(ignoreKicked = false, isForeground = false) {
       if (this.connected) return false
       if (this.reconnectMode === 'dormant') return false   // 用户主动断开
-      if (this.autoReconnectMode === 'manual') return false // ★ v3.24: 手动模式永不自动连接
+      if (this.autoReconnectMode === 'manual' && !isForeground) return false // ★ 手动模式：仅前台放行
       if (this.btState === 'off') return false
+      if (!ignoreKicked) {
       // ★ 方案A（2026-07-12 修正②）：曾因「连上未绑定超时」被固件强断的设备 → 不自动重连。
       //   持久化兜底：即便 BIND:TIMEOUT 通知偶发丢失、或 App 重启/原生扫描回调重置了内存态，
       //   也不会反复重连刷占唯一连接槽。用户手动 connect() 会清除该标记，恢复自动重连。
@@ -1476,6 +1505,7 @@ export const useBleStore = defineStore('ble', {
           if (kicked === '1' || (cur && norm(kicked) === norm(cur))) return false
         }
       } catch {}
+      } // end if (!ignoreKicked)
       // ① 绑定门槛预留：if (!this.isBound) return false
       return true
     },
@@ -2495,6 +2525,11 @@ export const useBleStore = defineStore('ble', {
         // ★ 冷启动修复：适配器已开，用实时状态校正 btState（BT 已开→'on'，否则回落），
         //   避免 onShow 里 _forceRefreshBluetoothState 读到过期的 "not init" 误判为 off。
         await this._reconcileBtState()
+        // 注：即时重连由紧随其后的 tryAutoConnect() 负责（main.vue onShow 在 prepareForAutoConnect
+        //   之后立即调用）。此处不再重复触发 _startReconnect，避免与 tryAutoConnect 的 _doReconnect
+        //   并发双连（前者置 reconnectMode='active' 后仍会再跑一次 _doReconnect）。
+        //   tryAutoConnect 现已对前台自动连放开「未绑定被踢」标记拦截，故蓝牙已开时启动即能自动连，
+        //   无需等待 60s 心跳；若蓝牙本来关闭，则由用户开启后的 STATE_ON 事件 / 原生广播驱动重连。
         // 适配器已开 → 启动 AlarmManager 心跳，作为后台自动连的驱动（Doze 下仍能唤醒）
         this._startHeartbeat()
         return true
@@ -2516,7 +2551,12 @@ export const useBleStore = defineStore('ble', {
         return false
       }
       // ★ 方案B: 统一闸门（用户主动断开/已连接/蓝牙关 → 不自动连）
-      if (!this._shouldAutoReconnect()) return false
+      //   前台自动连传 (ignoreKicked=true, isForeground=true)：
+      //   - ignoreKicked：即使曾因「未绑定被踢」被写持久标记也允许本次尝试，以打破死锁
+      //     （见 _shouldAutoReconnect 说明）——连上后由 AUTH:OK/BIND:OK 清除标记；
+      //   - isForeground：手动模式也放行「前台」自动连（用户需求：打开 App 就要连），
+      //     但后台被动触发不传 isForeground，手动模式仍被拦死（锁屏后不自动重连）。
+      if (!this._shouldAutoReconnect(true, true)) return false
       this._ensureGlobalListeners()
 
       // ★ 冷启动修复：本会话尚未 openBluetoothAdapter 时，getBluetoothAdapterState
@@ -2749,6 +2789,16 @@ export const useBleStore = defineStore('ble', {
 
       // ★ 2026-07-10: 固件版本号（v 字段）—— 确认设备烧录的是哪版，便于排查"改了没生效"
       if (data.v !== undefined) this.fwVersion = String(data.v)
+
+      // ★ v3.33: 安全协议能力版本（fwsec 字段）—— 授权体系升级总闸门。
+      //   收到 status 即代表已建立通信：有 fwsec → 用其值；无 fwsec → 旧固件视为 0（裸协议）。
+      //   后续「多 owner / 管理员 / 限时·限次绑定码」等破坏性协议改动，一律先判 this.fwSec
+      //   再决定走旧单码路径还是新授权体系路径，避免新固件配旧 App / 旧固件配新 App 时错配。
+      const _fwsec = (data.fwsec !== undefined) ? Number(data.fwsec) : 0
+      if (this.fwSec !== _fwsec) {
+        this.fwSec = _fwsec
+        console.log('[Store] 设备安全协议能力 fwsec =', _fwsec, '(fwVersion=' + this.fwVersion + ')')
+      }
 
       // ★ 2026-07-10: 已绑定标志（bn 字段）—— 双保险确认绑定成功。
       //   固件 BIND 后连续发 BIND:OK + 状态包，浅通知队列下 BIND:OK 可能丢弃；
@@ -3054,6 +3104,11 @@ export const useBleStore = defineStore('ble', {
         this.sessionAuthed = true
         this._autoAuthState = 'idle'   // ★ 2026-07-12: 会话已建立，自动 AUTH 状态机归位
         this.bindHint = ''
+        // ★ 2026-07-14 修复：AUTH 握手成功即证明本机是该设备的 owner
+        //   （陌生人/未绑定连接永远到不了 AUTH:OK）。据此清除「未绑定超时被踢」的
+        //   持久化抑制标记，恢复后续自动重连（含 App 重启）。否则该标记一旦写入便
+        //   永久屏蔽自动重连，导致正常 owner 在重烧固件/瞬时超时后无法自动重连（舒适模式失效）。
+        this._clearUnboundKicked()
         B._sessionSalt = B._lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
         B._cmdSeq = 0
         _resolveWaiter('AUTH', true)
@@ -3069,6 +3124,8 @@ export const useBleStore = defineStore('ble', {
       } else if (text.startsWith('BIND:OK')) {
         this.isBound = true
         this.bindHint = '绑定成功'
+        // ★ 2026-07-14 修复：绑定成功即 owner，清除被踢抑制标记（见 AUTH:OK 处说明）
+        this._clearUnboundKicked()
         // ★ P0-2: BIND:OK 可能内联 C1 会话盐（BIND:OK:<32hex>），提取作为签名盐；旧固件无盐则跳过
         const _bokParts = text.split(':')
         if (_bokParts.length >= 3) B._sessionSalt = _bokParts[2]
