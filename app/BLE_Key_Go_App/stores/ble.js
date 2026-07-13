@@ -3257,16 +3257,6 @@ export const useBleStore = defineStore('ble', {
           '（若设备此前已配对过则链路本身已加密，仍安全）')
       }
 
-      // ★ ①(2026-07-13) 先配对(bond)再发 BIND：配对完成后链路加密，
-      //   随后 BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞（见 docs/已验证事实_安全模型实测与纠偏.md F3）。
-      const bondRes = await this._triggerBond()
-      if (bondRes && bondRes.ok) {
-        console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
-      } else {
-        console.warn('[BIND] ⚠ 配对未完成（', (bondRes && bondRes.message) || '未知', '），绑定码将以明文传输',
-          '（若设备此前已配对过则链路本身已加密，仍安全）')
-      }
-
       // 0) ★ 先注册 BIND waiter（关键修复：消除"固件回包早于 waiter 注册"的竞态）。
       //    旧逻辑先写 BIND 再 _waitBind，若固件回包极快可能错过；提前注册 waiter 更稳。
       //    ★ 2026-07-11: 超时 1200→2500ms，吸收观察到的 FF02 通知延迟（固件回包经延迟任务
