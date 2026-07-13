@@ -4,43 +4,35 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">KeyGo·钥启程</text>
-      <text class="login-subtitle">使用帮助 · 快速指南</text>
+      <text class="login-subtitle">使用帮助 · v3.33</text>
     </view>
 
-    <!-- 快速指南卡片 -->
+    <!-- 快速上手卡片 -->
     <view class="login-card">
-      <text class="card-title">📖 快速指南</text>
+      <text class="card-title">📖 快速上手</text>
 
       <view class="guide-steps">
         <view class="guide-step">
           <text class="step-num">1</text>
           <view class="step-content">
-            <text class="step-title">首次连接</text>
-            <text class="step-desc">打开「连接」页 → 扫描设备 → 点击连接 → 手机弹出配对框 → 输入 PIN</text>
+            <text class="step-title">连接设备</text>
+            <text class="step-desc">打开「连接」页 → 扫描 → 点击你的 KeyGo 设备</text>
           </view>
         </view>
 
         <view class="guide-step">
           <text class="step-num">2</text>
           <view class="step-content">
-            <text class="step-title">输入配对 PIN</text>
-            <text class="step-desc">默认 PIN: <text class="highlight">123456</text>（建议首次配对后修改）</text>
+            <text class="step-title">绑定钥匙</text>
+            <text class="step-desc">输入绑定码 <text class="highlight">123456</text>（默认）→ 系统自动配对 → App 完成密钥验证</text>
           </view>
         </view>
 
         <view class="guide-step">
           <text class="step-num">3</text>
           <view class="step-content">
-            <text class="step-title">自动连接</text>
-            <text class="step-desc">配对成功后，打开 App 自动连接，无需任何操作</text>
-          </view>
-        </view>
-
-        <view class="guide-step">
-          <text class="step-num">4</text>
-          <view class="step-content">
-            <text class="step-title">恢复出厂</text>
-            <text class="step-desc">长按设备按键 5 秒恢复出厂设置，所有参数恢复默认</text>
+            <text class="step-title">当钥匙用</text>
+            <text class="step-desc">返回「控制」页解锁 / 锁车；手机靠近自动连接，无需操作</text>
           </view>
         </view>
       </view>
@@ -57,20 +49,28 @@
       </view>
     </view>
 
-    <!-- BLE Bonding 说明 -->
+    <!-- BLE Bonding 安全（v3.33 实际模型） -->
     <view class="login-card" style="margin-top: 24rpx;">
-      <text class="card-title">🔒 BLE Bonding 安全</text>
+      <text class="card-title">🔒 BLE Bonding 安全（v3.33）</text>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
-        <text class="tip-text">BLE 链路层加密，符合 Apple CarKey / 车载蓝牙标准</text>
+        <text class="tip-text">链路层加密（LESC）：配对后密钥(LTK)存芯片 SNV，重连自动加密，无需记密码</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
-        <text class="tip-text">配对密钥持久化，无需记密码，无需联网</text>
+        <text class="tip-text">应用层绑定码 + HMAC-SHA256 挑战应答：控制指令须经会话鉴权，无密钥无法操控</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
-        <text class="tip-text">PIN 仅用于首次配对，配对后密钥存在手机安全芯片中</text>
+        <text class="tip-text">信任列表持久化（DataFlash，最多 8 把钥匙）：绑定关系断电不丢</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">✅</text>
+        <text class="tip-text">序列号=MAC 用于密钥派生：无绑定码无法派生密钥，无泄露风险</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">规划中：多管理员 / 锁定列表、带屏设备 LESC+MITM passkey、远程临时授权</text>
       </view>
     </view>
 
@@ -143,7 +143,7 @@
         <view class="info-row"><text class="info-label">汽车</text><text class="info-val">解锁 / 锁车 / 后备箱——适合汽车遥控场景</text></view>
         <view class="info-row"><text class="info-label">电瓶车</text><text class="info-val">解锁 / 锁车 / 骑行（双击）——「骑行」会向车辆输出快速双击脉冲，模拟原遥控双击启动</text></view>
       </view>
-      <view class="info-tip"><text class="tip-icon">💡</text><text class="tip-text">模式存于设备，可在「配置」页随时切换；切换后设备重启仍保持</text></view>
+      <view class="info-tip"><text class="tip-icon">💡</text><text class="tip-text">模式存于设备（DataFlash），可在「控制」页底部随时切换；切换后重启仍保持</text></view>
     </view>
 
     <!-- ★ Phase 2: 常见错误排查 -->
@@ -159,9 +159,34 @@
       </view>
     </view>
 
+    <!-- ★ v3.33: 规划中 / 待核对功能 -->
+    <view class="login-card" style="margin-top: 24rpx;">
+      <text class="card-title">📋 规划中功能（待核对）</text>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">多管理员 / 锁定列表（多 owner 管理）</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">极速模式 GPS 围栏（已搭框架，待真机落地）</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">配置(uc/lc)断电持久化一致性（当前重启会回退，见排查项）</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">带屏设备 LESC+MITM passkey、远程临时授权</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">后台重连三模式（舒适/极速/省电）真机验证</text>
+      </view>
+    </view>
+
     <!-- 底部 -->
     <view class="login-footer">
-      <text class="footer-text">BLE KeyGo v3.2 · 纯本地 · 安全可靠</text>
+      <text class="footer-text">BLE KeyGo v3.33 · 纯本地 · 安全可靠</text>
       <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>
