@@ -36,7 +36,7 @@
         <text class="status-sub" v-else>扫描下方设备进行连接</text>
       </view>
       <view class="status-rssi" v-if="bleStore.connected">
-        <text class="rssi-value">{{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi : '---' }}</text>
+        <text class="rssi-value">{{ bleStore.displayRssi > -999 ? bleStore.displayRssi : '---' }}</text>
         <text class="rssi-unit">dBm</text>
       </view>
     </view>
@@ -276,6 +276,10 @@ function openBindModal() {
 }
 
 onShow(async () => {
+  // ★ v3.31.0 / 2026-07-13: 方案 B —— 回前台【保留】后台持续平滑出来的旧 RSSI 值，
+  //   不再清零成 ---。原因：displayRssi 已被 EMA 平滑 + 500ms 节流（见 stores/ble.js），
+  //   后台噪值「回放/狂跳」的根因已消除，保留旧值视觉更连续；下一个节流刻度（≤500ms）
+  //   会静默刷新为最新平滑值，期间不跳。
   themeStore.applyNavBar()
 
   // ★ 冷启动修复：先确保蓝牙适配器已打开（仅 openBluetoothAdapter，不申请权限、BT 已开无弹窗），

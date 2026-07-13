@@ -68,6 +68,11 @@ import {
   recordScreenEvent,
 } from '@/utils/debug-panel.js'
 
+// ★ v3.31.0 (2026-07-13): App 版本号，方便回看改动与排查问题（与固件 KEYGO_FW_VERSION 对应）。
+//   本版本落地：RSSI 显示层改为 EMA 平滑 + 500ms 节流，回前台保留旧值（见下方 ★ 标记）。
+export const APP_VERSION = 'v3.31.0'
+console.log('[KeyGo] App version', APP_VERSION)
+
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
 //   先禁用原生分支，走纯 JS 兜底；定位原生根因后改回 false。
 const __DISABLE_NATIVE_FG = false
@@ -196,6 +201,8 @@ export const useBleStore = defineStore('ble', {
     deviceState: 'LOCKED',        // LOCKED / UNLOCKED / ACTION
     rssi: -999,
     filteredRssi: -999,
+    displayRssi: -999,            // ★ v3.31.0 / 2026-07-13: 平滑+节流后的显示用 RSSI（UI 绑定此值，杜绝后台噪值狂跳）
+    rssiEma: -999,                // ★ 内部：displayRssi 的 EMA 累加器（仅 >-900 时视为有效）
     batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
     autoLockEnabled: -1,          // ★ v3.24-fixb: 固件自动锁使能状态(FF02 al 字段)，-1=未知/未同步，0=关闭(手动模式)，1=开启
     statusStale: false,            // ★ v3.15-#13: 超时未收到 Status Notify → 连接可能已中断
@@ -277,6 +284,9 @@ export const useBleStore = defineStore('ble', {
     //   WRITE 仍成功）。为免页面误显 "--"，断连时先不立即清零 RSSI，而是延迟 3s 确认真断连：
     //   期间若收到 FF02(c:1) 自愈则取消清零（见 _parseSingleStatus）。
     _disconnectRssiClearTimer: null,
+    _lastFf02Ms: 0,               // ★ v3.31.0 / 2026-07-13: 最近一次收到含 RSSI 的 FF02 时间戳（连续无包判 stale 用）
+    _lastRssiDisplayMs: 0,        // ★ v3.31.0 / 2026-07-13: 最近一次写入 displayRssi 的时间（节流用）
+    _rssiStaleWatchdog: null,     // ★ v3.31.0 / 2026-07-13: 连续无 FF02 看门狗定时器
     // ★ v3.25-fix2: GATT 上下文重建中标志，防止看门狗与重连逻辑并发触发多次重建
     _repairing: false,
 
@@ -298,7 +308,8 @@ export const useBleStore = defineStore('ble', {
     },
 
     rssiDistance: (state) => {
-      const r = state.filteredRssi > -999 ? state.filteredRssi : state.rssi
+      const r = state.displayRssi > -999 ? state.displayRssi
+        : (state.filteredRssi > -999 ? state.filteredRssi : state.rssi)
       if (r === -999 || r === undefined) return '无信号'
       if (r >= -30) return '极近 (<0.5m)'
       if (r >= -45) return '很近 (~0.5m)'
@@ -309,7 +320,8 @@ export const useBleStore = defineStore('ble', {
     },
 
     rssiPercent: (state) => {
-      const r = state.filteredRssi > -999 ? state.filteredRssi : state.rssi
+      const r = state.displayRssi > -999 ? state.displayRssi
+        : (state.filteredRssi > -999 ? state.filteredRssi : state.rssi)
       if (r === -999 || r === undefined) return 0
       const pct = ((r + 100) / 80) * 100
       return Math.max(0, Math.min(100, Math.round(pct)))
@@ -752,6 +764,8 @@ export const useBleStore = defineStore('ble', {
       this.rssi = -999
       _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 断连重置签名会话态
       this.filteredRssi = -999
+      this.displayRssi = -999
+      this.rssiEma = -999
       this.statusStale = false
       this.reconnectMode = 'paused'
       this.reconnectNextDelay = 0
@@ -1078,6 +1092,10 @@ export const useBleStore = defineStore('ble', {
       //   自愈，_parseSingleStatus 会重设 connected/filteredRssi 并取消本定时器（见下方）。
       this.statusStale = true
       this.batteryLevel = -1        // ★ v3.14: 断连重置电量
+      // ★ v3.31.0 / 2026-07-13: 清掉 RSSI 看门狗并重置显示态（避免残留 stale 显示）
+      this._clearRssiStaleWatchdog()
+      this.displayRssi = -999
+      this.rssiEma = -999
       if (this._disconnectRssiClearTimer) clearTimeout(this._disconnectRssiClearTimer)
       this._disconnectRssiClearTimer = setTimeout(() => {
         this._disconnectRssiClearTimer = null
@@ -1562,6 +1580,7 @@ export const useBleStore = defineStore('ble', {
               console.log('[Store] \ud83d\udcf1 \u4eae\u5c4f\u8fde\u63a5\u6210\u529f\uff0c\u521d\u59cb\u5316...')
               setDebugReconnectResult(true, '\u4eae\u5c4f\u8fde\u63a5\u6210\u529f')
               this.connected = true
+              this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 亮屏修复连上后重置 RSSI 显示态
               this.lastDeviceId = targetId
               if (!this.deviceName) {
                 const macClean = targetId.replace(/:/g, '')
@@ -1704,6 +1723,7 @@ export const useBleStore = defineStore('ble', {
      */
     _finalizeConnection(deviceId) {
       this.connected = true
+      this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
       _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 新连接重置签名会话态
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
@@ -2263,6 +2283,7 @@ export const useBleStore = defineStore('ble', {
         this.deviceId = deviceId
         this.deviceName = deviceName || 'KeyGo'
         this.connected = true
+        this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 手动连上后重置 RSSI 显示态
         this.lastDeviceId = deviceId
 
         // ★ v3.6: 连接成功后重置重连状态（允许后续异常断连自动重连）
@@ -2627,6 +2648,29 @@ export const useBleStore = defineStore('ble', {
 
     // ==================== 状态处理 (v3.2 短键名) ====================
 
+    // ★ v3.31.0 / 2026-07-13: 连续无 FF02 看门狗 —— 连接仍在但长时间收不到状态包（后台 Doze/CCCD 失效）
+    //   → 冻结 RSSI 显示，等 FF02 恢复再解冻，使「后台真断连」及时反映为无信号。
+    _startRssiStaleWatchdog() {
+      this._clearRssiStaleWatchdog()
+      this._rssiStaleWatchdog = setInterval(() => {
+        if (!this.connected) return
+        if (this._lastFf02Ms && Date.now() - this._lastFf02Ms > 4000) {
+          this.displayRssi = -999
+        }
+      }, 1500)
+    },
+    _clearRssiStaleWatchdog() {
+      if (this._rssiStaleWatchdog) { clearInterval(this._rssiStaleWatchdog); this._rssiStaleWatchdog = null }
+    },
+    // ★ v3.31.0 / 2026-07-13: 每次（重）连接时重置 RSSI 显示态 + 启动看门狗
+    _resetRssiDisplay() {
+      this.displayRssi = -999
+      this.rssiEma = -999
+      this._lastFf02Ms = 0
+      this._lastRssiDisplayMs = 0
+      this._startRssiStaleWatchdog()
+    },
+
     _handleStatusNotify(jsonStr) {
       const jsons = jsonStr.replace(/\}\{/g, '}\x00{').split('\x00')
       for (const item of jsons) {
@@ -2668,9 +2712,25 @@ export const useBleStore = defineStore('ble', {
         this.connected = data.c === 1
       }
 
-      // RSSI（先更新，后续校验要用）
+      // RSSI（先更新原始值，后续校验要用）
       if (data.r !== undefined && data.r > -999) this.rssi = data.r
-      if (data.f !== undefined && data.f > -999) this.filteredRssi = data.f
+      // ★ v3.31.0 / 2026-07-13: 显示用 RSSI 经 EMA 平滑 + 节流写入 displayRssi。
+      //   后台累积的噪值被 EMA 抹平 → 回前台不会「疯狂跳跃/回放」。
+      //   raw/filteredRssi 仍保留供其他逻辑使用，仅 UI 改绑 displayRssi。
+      //   ★ 节流窗口 = rssiReadPeriodMs（与固件采样间隔【同源】）：手机改 RSSI 采样间隔会同步改这里，
+      //     避免显示刷新比固件采样还快（徒增跳动）。注意：FF02 通知周期(~1s)独立于此，故显示实际
+      //     最多每 1s 跳一次（除非固件 FF02 周期也跟随 interval）。
+      if (data.f !== undefined && data.f > -999) {
+        this.filteredRssi = data.f
+        this._lastFf02Ms = Date.now()
+        if (this.rssiEma < -900) this.rssiEma = data.f
+        else this.rssiEma = Math.round(this.rssiEma * 0.7 + data.f * 0.3)
+        const _now = Date.now()
+        if (_now - this._lastRssiDisplayMs >= this.rssiReadPeriodMs) {
+          this.displayRssi = this.rssiEma
+          this._lastRssiDisplayMs = _now
+        }
+      }
 
       if (data.st !== undefined) {
         this.deviceState = data.st

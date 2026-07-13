@@ -124,6 +124,7 @@
 
       <view class="divider"></view>
       <view class="section-title">确认次数设置（手机端保存）</view>
+      <view class="config-desc" style="margin: 0 0 10px; color: #6b7280;">{{ confirmHint }}</view>
 
       <view class="config-item">
         <view class="config-header">
@@ -290,6 +291,17 @@ const isDirty = computed(() => {
     || localConfig.interval !== (bleStore.rssiReadPeriodMs || 500)
     || localConfig.dlock !== bleStore.disconnectLockDelayMs
     || localConfig.kr !== (bleStore.kalmanR || 15)
+})
+
+// ★ v3.31.0 / 2026-07-13: 把「确认次数(样本数)」换算成用户能直接理解的语义。
+//   固件 uc/lc 字面 = 连续几次滤波 RSSI 在阈值内；时间 = 次数 × 采样间隔(interval)。
+//   采样间隔与 App 显示节流同源，故手机改「固件 RSSI 读取间隔」会同步影响这里的换算。
+const confirmHint = computed(() => {
+  const ms = localConfig.interval || 500
+  const ucSec = (localConfig.uc * ms / 1000)
+  const lcSec = (localConfig.lc * ms / 1000)
+  return `解锁确认 ${localConfig.uc} 次 = 需连续 ${localConfig.uc} 次滤波 RSSI 在阈值内 ≈ ${ucSec.toFixed(1)}s；` +
+         `锁车确认 ${localConfig.lc} 次 ≈ ${lcSec.toFixed(1)}s（采样间隔 ${ms}ms）`
 })
 
 // ★ v3.25: 配置页以 swiper 组件形式嵌入 main.vue，切 tab 只改 tabIndex、不触发页面生命周期，
