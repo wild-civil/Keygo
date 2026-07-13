@@ -129,9 +129,10 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">📊 连接页显示确认进度条</text>
+		  <switch :checked="localConfig.showProgress" @change="onToggleProgress" color="#3b82f6" style="transform: scale(0.7);" />
         </view>
         <view class="config-desc">开启后，连接页会在走近/走远时显示「解锁/锁车进度 N/总」（需固件 v3.31+ 上报进度）</view>
-        <switch :checked="localConfig.showProgress" @change="onToggleProgress" color="#3b82f6" style="transform: scale(0.9);" />
+        <!-- <switch :checked="localConfig.showProgress" @change="onToggleProgress" color="#3b82f6" style="transform: scale(0.7);" /> -->
       </view>
 
       <view class="config-item">

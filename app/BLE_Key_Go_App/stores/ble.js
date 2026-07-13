@@ -2734,11 +2734,14 @@ export const useBleStore = defineStore('ble', {
       if (data.f !== undefined && data.f > -999) {
         this.filteredRssi = data.f
         this._lastFf02Ms = Date.now()
-        if (this.rssiEma < -900) this.rssiEma = data.f
-        else this.rssiEma = Math.round(this.rssiEma * 0.7 + data.f * 0.3)
+        // ★ 2026-07-13 修正: 显示 RSSI 直接用固件 Kalman 滤波值 f（与区间判定 th/ucnt/lcnt
+        //   同源），**不再叠加 EMA 二次平滑**。原 EMA(0.7/0.3, 新值权重仅0.3) 让显示值严重滞后
+        //   于 f：走近时 f 已过 -40 触发解锁但 EMA 仍显示 -42；走远时 f 已回中性但 EMA 仍 -39。
+        //   改直接显示 f 后大数字与区间判定一致。f 本身已是 Kalman 平滑值，无需再叠一层；
+        //   节流(rssiReadPeriodMs)仅控刷新率，避免高于固件采样频率的徒增跳动。
         const _now = Date.now()
         if (_now - this._lastRssiDisplayMs >= this.rssiReadPeriodMs) {
-          this.displayRssi = this.rssiEma
+          this.displayRssi = data.f
           this._lastRssiDisplayMs = _now
         }
       }
@@ -2790,6 +2793,9 @@ export const useBleStore = defineStore('ble', {
       if (data.uc !== undefined) this.deviceUc = Number(data.uc)
       if (data.lc !== undefined) this.deviceLc = Number(data.lc)
       // ★ v3.31 方案B: 实时确认进度（ucnt/lcnt）与当前区间（th）
+      //   注: 进区瞬间 RSSI 在阈值边缘徘徊会先 ++ 出 ucnt=1(th=1) 再抖回中性区清零(th=0),
+      //   如实显示即 1→0→1→2 的轻微闪烁(边界抖动真实反映)。曾尝试 App 端区间延迟去抖,
+      //   但导致进度不跟手, 故回退为直接赋值, 保持跟手; 彻底消除闪烁需固件侧区间迟滞(另议)。
       if (data.ucnt !== undefined) this.unlockProgress = Number(data.ucnt)
       if (data.lcnt !== undefined) this.lockProgress = Number(data.lcnt)
       if (data.th !== undefined) this.thresholdZone = Number(data.th)
