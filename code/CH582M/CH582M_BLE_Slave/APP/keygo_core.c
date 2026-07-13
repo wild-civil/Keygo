@@ -448,11 +448,11 @@ void KeyGo_ProcessStateMachine(void)
 
     // ★ v3.5: 使用可运行时配置的阈值变量 (非 #define 硬编码)
     if (g_filteredRSSI > g_cfgUnlockThreshold) {
-        
         // ★ v3.31 方案B-修正: 计数器钳制在配置值，已解锁且仍处解锁区时不再无限 ++
         //   （否则解锁后 g_keyState==UNLOCKED 不进清零分支，计数一路飙到 10/2 等）。
         //   钳制后：解锁瞬间计到 uc → 触发解锁；之后恒为 uc/uc「定格」，App 显示 N/N 不再溢出。
-        if (g_unlockCounter < g_cfgUnlockCount) g_unlockCounter++; // g_unlockCounter++; // 之前版本
+        // if (g_unlockCounter < g_cfgUnlockCount) g_unlockCounter++; // 之前版本：g_unlockCounter++;  
+        g_unlockCounter++; // ★ v3.31 方案B: 直接 ++（计数溢出由 App 端 Math.min 钳制显示，固件保持原样避免锁车阈值响应延迟）
         g_lockCounter = 0;
         if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED) {
             g_keyState = KSTATE_UNLOCKED;
@@ -462,8 +462,9 @@ void KeyGo_ProcessStateMachine(void)
             KeyGo_Unlock();
         }
     } else if (g_filteredRSSI < g_cfgLockThreshold) {
-        // ★ v3.31 方案B-修正: 同上，锁车计数器钳制在配置值，定格 N/N
-        if (g_lockCounter < g_cfgLockCount) g_lockCounter++; // g_lockCounter++; // 之前版本
+        // ★ v3.31 方案B: 同上，锁车计数器钳制在配置值，定格 N/N
+        // if (g_lockCounter < g_cfgLockCount) g_lockCounter++; // 之前版本：g_lockCounter++; 
+        g_lockCounter++; // ★ v3.31 方案B: 同上，计数溢出由 App 端 Math.min 处理
         g_unlockCounter = 0;
         if (g_lockCounter >= g_cfgLockCount && g_keyState != KSTATE_LOCKED) {
             g_keyState = KSTATE_LOCKED;

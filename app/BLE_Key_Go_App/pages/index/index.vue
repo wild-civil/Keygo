@@ -66,16 +66,14 @@
       </text>
 
       <template v-if="bleStore.autoLockEnabled !== 0">
-        <!-- 中间区间：未达任一阈值，计数器被反复清零，永不触发 → 显式提示 -->
+        <!-- 中间区间：未达任一阈值 → 仅标题文字 + 灰色条，不要 RSSI 数值和提示 -->
         <template v-if="bleStore.thresholdZone === 0">
           <view class="progress-header">
             <text class="progress-label">📍 中间区间</text>
-            <text class="progress-value neutral">{{ bleStore.displayRssi }} dBm</text>
           </view>
           <view class="progress-bar-bg">
             <view class="progress-bar-fill neutral" :style="{ width: bleStore.rssiPercent + '%' }"></view>
           </view>
-          <text class="progress-tip">走近（&gt;{{ bleStore.unlockThreshold }}dBm）解锁 · 走远（&lt;{{ bleStore.lockThreshold }}dBm）锁车</text>
         </template>
 
         <!-- 解锁区 -->
@@ -827,13 +825,10 @@ async function handleSetName() {
   background: #ef4444;
 }
 .progress-bar-fill.neutral {
-  background: #f59e0b;
+  background: #9ca3af;
 }
 .progress-value.lock {
   color: #ef4444;
-}
-.progress-value.neutral {
-  color: #f59e0b;
 }
 .progress-tip {
   display: block;
