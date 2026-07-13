@@ -92,9 +92,9 @@ import {
   recordScreenEvent,
 } from '@/utils/debug-panel.js'
 
-// ★ v3.31.0 (2026-07-13): App 版本号，方便回看改动与排查问题（与固件 KEYGO_FW_VERSION 对应）。
+// ★ v3.32.2 (2026-07-13): App 版本号，方便回看改动与排查问题（与固件 KEYGO_FW_VERSION = "3.32.2" 保持一致，固件/App 同一版本）。
 //   本版本落地：RSSI 显示层改为 EMA 平滑 + 500ms 节流，回前台保留旧值（见下方 ★ 标记）。
-export const APP_VERSION = 'v3.31.0'
+export const APP_VERSION = 'v3.32.2'
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
@@ -2336,6 +2336,13 @@ export const useBleStore = defineStore('ble', {
           // ★ v3.12: SN 就绪 → 加载设备专属配置 + 下发到固件（per-phone 个性化）
           this._loadConfigForDevice(sn)
           this._syncConfigToDevice()
+          // ★ v3.32.2-fix①: 手动连接路径补上「恢复绑定 + 自动 AUTH」。
+          //   此前此分支（connect() 手动连接）漏掉了 _finalizeConnection（自动重连路径）已有的
+          //   _restoreBindKey + _maybeAutoAuth，导致：手动模式重启 APP 后，用户手动连上设备，
+          //   isBound/sessionAuthed 永远 false → UI 恒显「连接待验证」、控车被挡成「请先绑定」，
+          //   逼用户每次手动重绑。固件每连接清零会话态，故重连/手动连都必须重 AUTH——自动补上。
+          this._restoreBindKey(sn)
+          this._maybeAutoAuth()
         }).catch(err => {
           const msg = err?.message || String(err)
           // ★ 根据错误类型分类处理

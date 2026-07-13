@@ -105,6 +105,7 @@
 import { ref, computed, reactive } from 'vue'
 import { useBleStore } from '@/stores/ble.js'
 import { toast } from '@/utils/toast.js'
+import { isFirmwareAtLeast } from '@/utils/firmware.js'
 
 const props = defineProps({ visible: { type: Boolean, default: false } })
 const emit = defineEmits(['close'])
@@ -139,13 +140,13 @@ const bindStatusClass = computed(() => {
 const showBoundMode = computed(() => bleStore.isBound || bleStore.deviceBound)
 const hasLocalKey   = computed(() => bleStore.isBound)
 
-// ★ 固件版本判定：已知支持「延迟发送回包」(绑定可用的关键修复) 的最低版本是 3.30.2。
-//   含 rc/预发布后缀也按主版本号判定（如 3.30.4-rc5 → 4 ≥ 2 → 新固件）。
+// ★ 固件版本判定：支持「延迟发送回包」(绑定可用的关键修复) 的最低版本是 3.30.2。
+//   用真正的版本比较（isFirmwareAtLeast），覆盖 3.30.2 / 3.31.x / 3.32.x 等所有新固件，
+//   不再写死 3.30.x 正则（旧正则对 3.31+ 不匹配 → 误报"旧固件"）。
 const fwBadge = computed(() => {
   const v = bleStore.fwVersion || ''
   if (!v) return { text: '未知（未读到版本，先连接设备）', cls: 'unknown' }
-  const m = /^3\.30\.(\d+)/.exec(v)
-  if (m && parseInt(m[1], 10) >= 2) {
+  if (isFirmwareAtLeast(v)) {
     return { text: '✅ 新固件（支持延迟发送回包，可正常绑定）', cls: 'ok' }
   }
   return { text: '⚠️ 旧固件（BIND:OK/NONCE/AUTH 回包易丢失，绑定多半失败，请烧录 ≥3.30.2）', cls: 'old' }
@@ -402,6 +403,9 @@ async function handleUnbind(all) {
   box-sizing: border-box;
 }
 
+/* 主按钮：绑定设备 / 重新绑定 / 修改绑定码（蓝色渐变实心按钮）
+   用法：在模板里加 :disabled="!fields.bindCode || binding" 即可触发下方 [disabled] 样式。
+   调颜色：修改 background 即可；禁用态目前用浅灰底，如果想保持蓝色系，看 [disabled] 注释。 */
 .btn-bind {
   width: 100%;
   background: var(--gradient-accent);
@@ -410,9 +414,26 @@ async function handleUnbind(all) {
   font-weight: 600;
   padding: 24rpx 0;
   border-radius: 14rpx;
+  /* 状态切换（disabled/按下）带 0.18s 过渡，避免截图里那种生硬的惨白跳变 */
+  transition: opacity 0.18s, filter 0.18s, transform 0.1s;
 }
-.btn-bind:active { opacity: 0.8; }
-.btn-bind[disabled] { opacity: 0.3; }
+
+/* 按下反馈：轻微压暗 + 降低亮度，给用户“按下去”的触觉感，不破坏渐变配色 */
+.btn-bind:active {
+  opacity: 0.85;
+  filter: brightness(0.92);
+}
+
+/* 禁用态（未输入绑定码或处理中）：
+   原来只有 opacity: 0.3，会把蓝色渐变洗成很淡的蓝色水印，像截图里那样发虚。
+   这里单独给禁用态一套配色：浅灰底 + 灰字，轮廓清晰，一看就是“不可点”。
+   如果你想改成蓝色系禁用态，把 background 改成 #a7c3e8（浅蓝）、color 保持 #fff 即可。 */
+.btn-bind[disabled] {
+  opacity: 0.6;                              /* 比 0.3 更饱满，不发虚 */
+  background: var(--bg-disabled, #e5e7eb); /* 覆盖渐变，使用浅灰底色 */
+  color: var(--text-disabled, #9ca3af);      /* 灰字，fallback 为 #9ca3af */
+  filter: grayscale(0.25);                   /* 轻微去饱和，让禁用感更明确 */
+}
 
 .btn-bind-default {
   width: 100%;
