@@ -509,6 +509,7 @@ async function handleSubmit() {
 
 
 
+
 const bindStatusText = computed(() => {
   if (!bleStore.isBound) return '未绑定'
   if (bleStore.sessionAuthed) return '已绑定 · 本连接已验证'

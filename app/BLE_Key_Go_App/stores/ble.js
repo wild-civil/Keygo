@@ -150,6 +150,7 @@ export const useBleStore = defineStore('ble', {
 
     // 设备状态（从 FF02 Notify 接收）
     deviceState: 'LOCKED',        // LOCKED / UNLOCKED / ACTION
+    deviceMode: 'car',            // ★ Phase 2: 设备模式 'car' / 'ebike'（权威来自设备状态 m，本地缓存兜底）
     rssi: -999,
     filteredRssi: -999,
     displayRssi: -999,            // ★ v3.31.0 / 2026-07-13: 平滑+节流后的显示用 RSSI（UI 绑定此值，杜绝后台噪值狂跳）
@@ -306,6 +307,10 @@ export const useBleStore = defineStore('ble', {
     },
 
     isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
+
+    // ★ Phase 2: 双模式派生状态
+    isEbike: (state) => state.deviceMode === 'ebike',
+    deviceModeLabel: (state) => state.deviceMode === 'ebike' ? '电瓶车' : '汽车',
 
     /* ★ v3.15: 电池图标 — emoji 方案（默认启用）
      *   若想切换为 CSS 组件，修改 control.vue 模板中的电池区域
@@ -2128,6 +2133,7 @@ export const useBleStore = defineStore('ble', {
     _resolveDeviceName(sn) {
       if (!sn) return
       this._loadDeviceNames()
+      this._loadCachedDeviceMode()   // ★ Phase 2: SN 就绪即恢复模式缓存（设备 m 上报前渲染正确 UI）
       const entry = this._deviceNames[sn]
 
       if (entry && entry.name) {
@@ -2716,6 +2722,11 @@ export const useBleStore = defineStore('ble', {
       //   SN 到达后由 _resolveDeviceName() 用本地名称覆盖（本地优先）
       //   短暂闪烁可接受（仅 SN 已就绪 + 本地名与 d2 不同时才会发生）
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
+
+      // ★ Phase 2: 设备模式 m (0=car / 1=ebike)，权威覆盖本地缓存
+      if (data.m !== undefined) {
+        this.deviceMode = data.m ? 'ebike' : 'car'
+      }
 
       // ★ v3.7 / v3.12: 冷却时间 ms (cd = cooldown duration)
       //   设备级参数 — 从 FF02 Notify 被动同步，确保 App 显示与设备一致
@@ -3527,6 +3538,40 @@ export const useBleStore = defineStore('ble', {
     async trunk() {
       if (!this.connected) throwError('NO_CONN')
       await this._throttledCommand('TRUNK')
+    },
+
+    async ride() {
+      if (!this.connected) throwError('NO_CONN')
+      // ★ Phase 2: 仅 ebike 模式有意义；car 模式提前拦截给友好提示
+      //   （固件侧亦有 DENY:NOT_SUPPORTED 兜底，防止被篡改绕过）
+      if (this.deviceMode !== 'ebike') throwError('NOT_SUPPORTED')
+      await this._throttledCommand('RIDE')
+    },
+
+    /**
+     * ★ Phase 2: 切换设备模式（汽车/电瓶车）。
+     *   经 FF03 签名下发 MODE:car / MODE:ebike（受绑定 + GATT 加密门控），
+     *   乐观更新 deviceMode 并写本地缓存（keygo_mode_<serial>）兜底。
+     *   设备回状态包(m 字段)后会经 _parseSingleStatus 校正。
+     */
+    async setDeviceMode(mode) {
+      if (mode !== 'car' && mode !== 'ebike') throwError('NOT_SUPPORTED')
+      if (!this.connected) throwError('NO_CONN')
+      if (this.deviceMode === mode) return   // 无变化，跳过下发
+      await this.sendCommand('MODE:' + mode)
+      this.deviceMode = mode                 // 乐观更新
+      if (this.serialNumber) {
+        try { uni.setStorageSync('keygo_mode_' + this.serialNumber, mode) } catch (e) {}
+      }
+    },
+
+    /** ★ Phase 2: 连接时用本地缓存恢复设备模式（设备 m 上报前即可渲染正确 UI） */
+    _loadCachedDeviceMode() {
+      if (!this.serialNumber) return
+      try {
+        const cached = uni.getStorageSync('keygo_mode_' + this.serialNumber)
+        if (cached === 'car' || cached === 'ebike') this.deviceMode = cached
+      } catch (e) {}
     },
 
     /**

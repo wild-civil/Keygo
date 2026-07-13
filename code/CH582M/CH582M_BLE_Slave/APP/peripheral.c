@@ -281,6 +281,7 @@ void Peripheral_Init(void)
     }
     PRINT("[FLASH] DataFlash I/O ready (START_IO rc=%d)\n", ioRc);
     KeyGo_LoadConfig();   // ★ v3.5.1: 从 DataFlash 恢复上次保存的阈值
+    KeyGo_LoadMode();     // ★ Phase 2: 从 DataFlash 恢复设备模式(car/ebike)
     Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层）
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
     GAPRole_BroadcasterSetCB(&Broadcaster_BroadcasterCBs);
@@ -417,6 +418,17 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     if (events & SBP_LED_TRUNK_BLINK_EVT) {
         KeyGo_LedTrunkBlinkHandler();
         return (events ^ SBP_LED_TRUNK_BLINK_EVT);
+    }
+
+    /* [LED_BEGIN] 骑行 LED 闪烁回调 (参照后备箱, 2 次亮灭) [LED_END] */
+    if (events & SBP_LED_RIDE_BLINK_EVT) {
+        KeyGo_LedRideBlinkHandler();
+        return (events ^ SBP_LED_RIDE_BLINK_EVT);
+    }
+
+    if (events & SBP_GPIO_RIDE_EVT) {     // ★ Phase 2: ebike RIDE 双脉冲序列
+        KeyGo_RidePulseHandler();
+        return (events ^ SBP_GPIO_RIDE_EVT);
     }
 
     // ★ v3.13: advertising 重启兜底 — 延迟重试，避免 BLE Controller 偶发卡死
@@ -614,6 +626,8 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
         /* [LED_BEGIN] 取消残留的后备箱 LED 闪烁定时器 [LED_END] */
         tmos_stop_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT);
+        /* [LED_BEGIN] 取消残留的骑行 LED 闪烁定时器 [LED_END] */
+        tmos_stop_task(Peripheral_TaskID, SBP_LED_RIDE_BLINK_EVT);
         /* ★ 方案A（2026-07-12）：取消可能挂起的超时强断（已自然断连无需再踢） */
         tmos_stop_task(Peripheral_TaskID, SBP_UNBOUND_TIMEOUT_EVT);
         advRestartRetryCount = 0;

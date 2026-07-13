@@ -123,6 +123,42 @@
       </text>
     </view>
 
+    <!-- ★ Phase 2: 首次绑定向导 -->
+    <view class="login-card" style="margin-top: 24rpx;">
+      <text class="card-title">🔗 首次绑定向导（6 步）</text>
+      <view class="guide-steps">
+        <view class="guide-step"><text class="step-num">1</text><view class="step-content"><text class="step-title">开蓝牙 + 定位</text><text class="step-desc">系统蓝牙开启，并授予 App「始终允许」定位权限（后台扫描重连需要）</text></view></view>
+        <view class="guide-step"><text class="step-num">2</text><view class="step-content"><text class="step-title">扫描并选择设备</text><text class="step-desc">前往「连接」页扫描，点击你的 KeyGo 设备</text></view></view>
+        <view class="guide-step"><text class="step-num">3</text><view class="step-content"><text class="step-title">选择设备模式</text><text class="step-desc">汽车（解锁/锁车/后备箱）或电瓶车（解锁/锁车/骑行），可在「控制」页底部随时切换</text></view></view>
+        <view class="guide-step"><text class="step-num">4</text><view class="step-content"><text class="step-title">输入绑定码</text><text class="step-desc">默认 <text class="highlight">123456</text>（建议首次绑定后修改）。点击「一键默认码绑定」可快速绑定</text></view></view>
+        <view class="guide-step"><text class="step-num">5</text><view class="step-content"><text class="step-title">自动配对 + 验证</text><text class="step-desc">手机弹出系统配对框 → 配对成功 → App 自动完成密钥验证</text></view></view>
+        <view class="guide-step"><text class="step-num">6</text><view class="step-content"><text class="step-title">完成</text><text class="step-desc">返回「控制」页即可用手机当钥匙</text></view></view>
+      </view>
+    </view>
+
+    <!-- ★ Phase 2: 设备模式说明 -->
+    <view class="login-card" style="margin-top: 24rpx;">
+      <text class="card-title">🚗/🛵 设备模式说明</text>
+      <view class="info-rows">
+        <view class="info-row"><text class="info-label">汽车</text><text class="info-val">解锁 / 锁车 / 后备箱——适合汽车遥控场景</text></view>
+        <view class="info-row"><text class="info-label">电瓶车</text><text class="info-val">解锁 / 锁车 / 骑行（双击）——「骑行」会向车辆输出快速双击脉冲，模拟原遥控双击启动</text></view>
+      </view>
+      <view class="info-tip"><text class="tip-icon">💡</text><text class="tip-text">模式存于设备，可在「配置」页随时切换；切换后设备重启仍保持</text></view>
+    </view>
+
+    <!-- ★ Phase 2: 常见错误排查 -->
+    <view class="login-card" style="margin-top: 24rpx;">
+      <text class="card-title">🛠 常见错误排查</text>
+      <view class="info-rows">
+        <view class="info-row"><text class="info-label">操作太频繁</text><text class="info-val">连点触发，稍候 1~2 秒再试</text></view>
+        <view class="info-row"><text class="info-label">指令冲突</text><text class="info-val">蓝牙瞬时写冲突，重试一次即可</text></view>
+        <view class="info-row"><text class="info-label">设备未绑定</text><text class="info-val">前往「配置」页绑定，默认码 123456</text></view>
+        <view class="info-row"><text class="info-label">验证失败</text><text class="info-val">绑定关系异常，请重新绑定</text></view>
+        <view class="info-row"><text class="info-label">发送失败</text><text class="info-val">检查蓝牙是否仍连接，或重连设备</text></view>
+        <view class="info-row"><text class="info-label">模式不支持</text><text class="info-val">当前设备模式不支持该操作（如汽车模式点「骑行」）</text></view>
+      </view>
+    </view>
+
     <!-- 底部 -->
     <view class="login-footer">
       <text class="footer-text">BLE KeyGo v3.2 · 纯本地 · 安全可靠</text>
