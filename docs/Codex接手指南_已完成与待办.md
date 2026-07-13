@@ -55,11 +55,39 @@ KeyGo = **CH582M BLE 从机固件**（MRS IDE + RISC-V + tmos RTOS + WCH BLE 库
 2. **DataFlash 地址基准修复（决定性）**：WCH EEPROM 的 StartAddr 是相对 DataFlash 基址 0x70000 的**偏移**，旧代码误用物理地址导致重启丢绑定/配置。现为：`CFG 0x7000 / BOND 0x7100 / BINDCODE 0x7200`（物理 0x77000/0x77100/0x77200）。
 3. **SHA256 位长 UB + 短报文延迟发送（`d8c47da`，真机 AUTH:OK 通过）**：`crypto_sha256.c` 位长高 32 位移位 ≥32 属未定义行为已修；绑定回包改延迟队列发送避免被丢。
 4. **未绑定连接 30s 超时强断 + App 抑制自动重连（`31f3f59`，真机 PASS）**：防单连接槽被占的 DoS；断连后 App 不再自动重连未绑定设备。
-5. **方案 A 双闸门 RSSI 解锁（`a895d0c`，可用）**：`keygo_core.c:442-443` 闸门 `!LINK_ENCRYPTED && !IsSessionAuthed → return`。保留"App 被杀+已配对+OS 重连加密仍能解锁"。
+5. **方案 A 双闸门 RSSI 解锁（`a895d0c`，可用）**：`keygo_core.c:442-443` 闸门 `!LINK_ENCRYPTED && !IsSessionAuthed → return`。原设计"App 被杀+已配对+OS 重连加密仍能解锁"——⚠ 实测未生效，详见 §3.5 F2。
 6. **RSSI 解锁进度可见（v3.31, `5e696ad`/`206a30b`）**：解锁/锁车进度条、配置回显、中间区间诊断。
 7. **RSSI 显示修正（`c57cf3c`，最新）**：大数字 `displayRssi` 直接取固件 Kalman 滤波值 `f`（与区间判定同源），去掉 EMA 二次平滑导致的显示滞后。
 
 > 这些版本组合 = 当前"可用"基线。继续开发请在此之上，**不要回退这些已验证行为**。
+
+---
+
+## 3.5 已验证事实（安全模型实测与纠偏，2026-07-13）
+
+> 详细机理与复现步骤见 `docs/已验证事实_安全模型实测与纠偏.md`。以下为给接手者的浓缩结论，**均来自真机，非推理**。
+
+### F1 — 漏洞 A 真实存在（nrfconnect 配对 → RSSI 静默钥匙，无需绑定码）
+- 复现：nrfconnect 连设备 → Just Works 配对（`bonding.c:125-126`）→ 之后 App 连接链路加密 → `LINK_ENCRYPTED=true` → `keygo_core.c:442` 闸门放行 → 走近自动解锁，**全程未输入绑定码**。
+- **严重性修正**：用户实测 **App 关闭后该手机不解锁**。原因：RSSI 解锁需"被维持的活跃连接"，而连接靠 App 前台服务维持；App 死→前台服务死→无连接→无 RSSI→不解锁。裸 Android 不对已配对 BLE 设备做可靠后台自动重连。
+- 结论：漏洞 A 实际利用门槛 = "运行 KeyGo App（保持连接）+ 曾用 nrfconnect 配对"的蓄意者，非路人。
+
+### F2 — "App 被杀解锁"当前未生效（与 F1 同源）
+- 方案 A 宣称"App 被杀+已配对+OS 重连加密仍能解锁"，**实测不成立**：重连依赖被杀的前台服务，裸系统不兜底。`keygo_core.c:442` 的 `LINK_ENCRYPTED` 闸门逻辑在，但触发条件（系统级自动重连加密）在真机不满足。
+- 若要实现，需前台服务独立常驻进程（`:remote`）或验证特定 ROM 的 bond 自动重连——是新工作，非一行改动。
+
+### F3 — HMAC 挑战应答被注释（BIND 明文）
+- `ble.js:2888-2890` 阶段1 明文绑定：HMAC `NONCE/AUTH` 握手禁用，`BIND:123456` 明文空中传输，`BIND:OK` 直接置 `sessionAuthed=true`。
+- 固件 `crypto_sha256.c` 完好且自测通过，现仅用于 BIND 码 KDF 校验。恢复加密握手=取消注释 `ensureSession`/`_authWithKey`（阶段3），但 `BIND` 那次仍明文（需配合"先配对再 BIND"或认证配对）。
+
+### F4 — 构建路径差异（待验证，非定论）
+- Android Studio 离线发布包 vs HBuilderX 自定义调试基座：nrfconnect 配对后，**离线包不会"自动验证绑定通过"，基座会**。
+- 可能：`packageName`/签名不同致 BLE 状态隔离；或离线包没吃到最新 `keygo-foreground.aar`（已知坑）；或离线包前台服务未触发重连。需抓 `KeygoBleScanSvc|KeygoFgModule` 日志对比 `LINK_ENCRYPTED`/BondState 确认。
+
+### 给 Codex 的硬提醒
+- 不要假设"App 被杀能解锁""普通路人能开"——两者都不成立（F1/F2）。
+- 改安全代码前，先用 nrfconnect 复现 F1 作回归基准。
+- "改了没生效"先怀疑 aar 没吃到 / `versionCode` 没 +1 / 装错基座（F4 + §6 铁律）。
 
 ---
 
