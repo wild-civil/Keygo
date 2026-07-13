@@ -3243,15 +3243,6 @@ export const useBleStore = defineStore('ble', {
           '（若设备此前已配对过则链路本身已加密，仍安全）')
       }
 
-      // ★ v3.32.1: 配对成功后重试 FF02 Notify 订阅。首次连接时链路未加密，
-      //   _finalizeConnection 的 800ms 延迟 _enableStatusNotify 会因 CCCD 需 AUTHEN 而被拒绝；
-      //   现在链路已加密，重试即可成功订阅，确保 BIND:OK/NONCE/AUTH 回包能经 FF02 送达。
-      if (bondRes && bondRes.ok) {
-        console.log('[BIND] 🔄 配对完成，重试 FF02 Notify 订阅（链路已加密）...')
-        await this._enableStatusNotify()
-        console.log('[BIND] FF02 Notify 订阅重试完成，statusNotifyReady=', this._statusNotifyReady)
-      }
-
       // 0) ★ 先注册 BIND waiter（关键修复：消除"固件回包早于 waiter 注册"的竞态）。
       //    旧逻辑先写 BIND 再 _waitBind，若固件回包极快可能错过；提前注册 waiter 更稳。
       //    ★ 2026-07-11: 超时 1200→2500ms，吸收观察到的 FF02 通知延迟（固件回包经延迟任务

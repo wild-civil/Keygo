@@ -113,10 +113,9 @@ static uint8_t simpleProfileChar4[SIMPLEPROFILE_CHAR4_LEN] = {0};
 static uint8_t simpleProfileChar4UserDesp[] = "Serial\0";
 
 /*********************************************************************
- * ★ Profile Attributes Table — v3.32.1 GATT 加密门控
- *    FF01/FF02-CCCD/FF03 → GATT_PERMIT_AUTHEN_* (需配对后才能访问)
- *    FF04 → GATT_PERMIT_READ (保留明文读，首次绑定时尚未配对需读序列号)
- *    仅配对后加密链路可访问 FF01/FF02/FF03；未配对连接会被协议栈拒绝。
+ * ★ Profile Attributes Table — 无加密要求
+ *    使用 GATT_PERMIT_READ / GATT_PERMIT_WRITE
+ *    连接即可读写所有特征值
  *********************************************************************/
 static gattAttribute_t simpleProfileAttrTbl[] = {
     // ── Service Declaration ──
@@ -135,7 +134,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar1UUID},
-        GATT_PERMIT_AUTHEN_WRITE,       // ★ v3.32.1: 加密写入（仅配对后可写，空中密文）
+        GATT_PERMIT_WRITE,              // ★ 普通写入（无加密要求） 到时候需要配对再加密
         0,
         simpleProfileChar1
     },
@@ -160,7 +159,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, clientCharCfgUUID},
-        GATT_PERMIT_AUTHEN_READ | GATT_PERMIT_AUTHEN_WRITE,  // ★ v3.32.1: CCCD 加密门控（仅配对后可订阅通知）
+        GATT_PERMIT_READ | GATT_PERMIT_WRITE,  // ★ CCCD 普通读写（无加密要求） 到时候需要配对再加密
         0,
         (uint8_t *)simpleProfileChar2Config
     },
@@ -179,7 +178,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar3UUID},
-        GATT_PERMIT_AUTHEN_WRITE,  // ★ v3.32.1: 加密写入（仅配对后可写 BIND/AUTH/控制命令，未配对连接被协议栈拒）
+        GATT_PERMIT_WRITE,  // ★ 明文写：无头设备 Just-Works 配对无 MITM 防护，安全边界改由应用层 BIND/AUTH(HMAC) 承担，去掉加密门控以杜绝强制配对弹窗
         0,
         simpleProfileChar3
     },
@@ -198,7 +197,7 @@ static gattAttribute_t simpleProfileAttrTbl[] = {
     },
     {
         {ATT_BT_UUID_SIZE, simpleProfilechar4UUID},
-        GATT_PERMIT_READ,   // ★ v3.32.1: 明码读（需要首次配对前读取序列号，KDF 派生 bindKey；安全由应用层 AUTH 保证）
+        GATT_PERMIT_READ,   // ★ 明文读：序列号(=MAC)用于 KDF 派生 bindKey，需随时可读以便恢复绑定态；安全由应用层 AUTH 保证，去掉加密门控
         0,
         simpleProfileChar4
     },
