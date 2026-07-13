@@ -62,7 +62,7 @@ extern "C" {
 
 // ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
 #define GPIO_PULSE_LOCK_TICKS          320    // ~200ms  解锁/锁车
-#define GPIO_PULSE_TRUNK_TICKS         3200    // ~2000ms  后备箱长按 
+#define GPIO_PULSE_TRUNK_TICKS         8000    // ~5000ms  后备箱长按 
 /* ★ Phase 2: ebike RIDE 双脉冲（模拟电动车遥控双击启动骑行）
  *   —— 这两个值决定「点击速度」，可按真车遥控器手感调整 ——
  *   序列: ON(RIDE_HALF_TICKS) → OFF(RIDE_GAP_TICKS) → ON(RIDE_HALF_TICKS) → OFF

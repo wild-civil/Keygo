@@ -4,7 +4,7 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">KeyGo·钥启程</text>
-      <text class="login-subtitle">使用帮助 · v3.33</text>
+      <text class="login-subtitle">使用帮助 · v3.32.2</text>
     </view>
 
     <!-- 快速上手卡片 -->
@@ -49,9 +49,9 @@
       </view>
     </view>
 
-    <!-- BLE Bonding 安全（v3.33 实际模型） -->
+    <!-- BLE Bonding 安全（v3.32.2 实际模型） -->
     <view class="login-card" style="margin-top: 24rpx;">
-      <text class="card-title">🔒 BLE Bonding 安全（v3.33）</text>
+      <text class="card-title">🔒 BLE Bonding 安全（v3.32.2）</text>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
         <text class="tip-text">链路层加密（LESC）：配对后密钥(LTK)存芯片 SNV，重连自动加密，无需记密码</text>
@@ -159,7 +159,7 @@
       </view>
     </view>
 
-    <!-- ★ v3.33: 规划中 / 待核对功能 -->
+    <!-- ★ v3.32.2: 规划中 / 待核对功能 -->
     <view class="login-card" style="margin-top: 24rpx;">
       <text class="card-title">📋 规划中功能（待核对）</text>
       <view class="info-tip">
@@ -186,7 +186,7 @@
 
     <!-- 底部 -->
     <view class="login-footer">
-      <text class="footer-text">BLE KeyGo v3.33 · 纯本地 · 安全可靠</text>
+      <text class="footer-text">BLE KeyGo v3.32.2 · 纯本地 · 安全可靠</text>
       <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>
