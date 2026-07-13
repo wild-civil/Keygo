@@ -58,6 +58,55 @@
       </view>
     </view>
 
+    <!-- ★ v3.31 方案B-修正②: 开关打开即「始终显示」进度卡片（解锁区/锁车区/中间区都显示），deviceUc<1(旧固件/未同步)不显示 -->
+    <view class="progress-card" v-if="bleStore.connected && bleStore.showProgressCard && bleStore.deviceUc >= 1">
+      <!-- 自动锁关闭（手动模式）→ 直接说明为什么不会自动锁车，这是「没法锁车」最常见原因 -->
+      <text class="progress-tip" v-if="bleStore.autoLockEnabled === 0">
+        ⚠️ 自动锁已关闭（手动模式），RSSI 不会自动解锁/锁车，请用手动按键
+      </text>
+
+      <template v-if="bleStore.autoLockEnabled !== 0">
+        <!-- 中间区间：未达任一阈值，计数器被反复清零，永不触发 → 显式提示 -->
+        <template v-if="bleStore.thresholdZone === 0">
+          <view class="progress-header">
+            <text class="progress-label">📍 中间区间</text>
+            <text class="progress-value neutral">{{ bleStore.displayRssi }} dBm</text>
+          </view>
+          <view class="progress-bar-bg">
+            <view class="progress-bar-fill neutral" :style="{ width: bleStore.rssiPercent + '%' }"></view>
+          </view>
+          <text class="progress-tip">走近（&gt;{{ bleStore.unlockThreshold }}dBm）解锁 · 走远（&lt;{{ bleStore.lockThreshold }}dBm）锁车</text>
+        </template>
+
+        <!-- 解锁区 -->
+        <template v-else-if="bleStore.thresholdZone === 1">
+          <view class="progress-header">
+            <text class="progress-label">🔓 解锁进度</text>
+            <text class="progress-value">{{ Math.min(bleStore.unlockProgress, bleStore.deviceUc) }}/{{ bleStore.deviceUc }}</text>
+          </view>
+          <view class="progress-bar-bg">
+            <view class="progress-bar-fill" :style="{ width: (bleStore.deviceUc > 0 ? Math.min(bleStore.unlockProgress, bleStore.deviceUc) / bleStore.deviceUc * 100 : 0) + '%' }"></view>
+          </view>
+        </template>
+
+        <!-- 锁车区 -->
+        <template v-else>
+          <view class="progress-header">
+            <text class="progress-label">🔒 锁车进度</text>
+            <text class="progress-value lock">{{ Math.min(bleStore.lockProgress, bleStore.deviceLc) }}/{{ bleStore.deviceLc }}</text>
+          </view>
+          <view class="progress-bar-bg">
+            <view class="progress-bar-fill lock" :style="{ width: (bleStore.deviceLc > 0 ? Math.min(bleStore.lockProgress, bleStore.deviceLc) / bleStore.deviceLc * 100 : 0) + '%' }"></view>
+          </view>
+        </template>
+
+        <!-- 配置一致性提示 -->
+        <text class="progress-tip" v-if="bleStore.deviceUc >= 0 && bleStore.deviceUc !== bleStore.unlockCountRequired">
+          ⚠️ 设备确认次数 uc={{ bleStore.deviceUc }} 与 App 设置 {{ bleStore.unlockCountRequired }} 不一致，配置可能未下发
+        </text>
+      </template>
+    </view>
+
     <!-- ★ v3.25: 极速模式距离显示（仅 speed 模式 + 未连接 + 有停车位置时显示） -->
     <view class="geofence-card" v-if="!bleStore.connected && bleStore.autoReconnectMode === 'speed' && bleStore.parkingLocation">
       <view class="geofence-header">
@@ -738,6 +787,59 @@ async function handleSetName() {
   justify-content: space-between;
   font-size: 22rpx;
   color: var(--text-muted);
+}
+
+/* ===== v3.31 方案B: 确认进度卡片 ===== */
+.progress-card {
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  padding: 20rpx 24rpx;
+  margin-bottom: 24rpx;
+}
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14rpx;
+}
+.progress-label {
+  font-size: 26rpx;
+  color: var(--text-strong);
+}
+.progress-value {
+  font-size: 30rpx;
+  font-weight: 700;
+  color: var(--accent, #3b82f6);
+}
+.progress-bar-bg {
+  height: 14rpx;
+  background: var(--bg-track, #e5e7eb);
+  border-radius: 7rpx;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent, #3b82f6);
+  border-radius: 7rpx;
+  transition: width 0.2s ease;
+}
+.progress-bar-fill.lock {
+  background: #ef4444;
+}
+.progress-bar-fill.neutral {
+  background: #f59e0b;
+}
+.progress-value.lock {
+  color: #ef4444;
+}
+.progress-value.neutral {
+  color: #f59e0b;
+}
+.progress-tip {
+  display: block;
+  margin-top: 12rpx;
+  font-size: 22rpx;
+  color: #f59e0b;
 }
 
 /* ===== 设备区域 ===== */

@@ -217,6 +217,14 @@ export const useBleStore = defineStore('ble', {
     manualCooldown: false,        // 手动命令冷却中
     manualCooldownMs: 8000,      // ★ v3.7 / v3.12: 初始默认值（设备连接后由 FF02 同步覆盖，设备级参数）
 
+    // ★ v3.31 方案B: 设备真实确认参数与实时进度（FF02 新增字段 uc/lc/ucnt/lcnt/th 同步）
+    deviceUc: -1,                 // 设备真实解锁确认次数（回显验证 App 下发的 uc 是否真落到设备；-1=未同步）
+    deviceLc: -1,                 // 设备真实锁车确认次数
+    unlockProgress: 0,            // 当前解锁进度计数（连续几次滤波 RSSI 在解锁区）
+    lockProgress: 0,              // 当前锁车进度计数
+    thresholdZone: 0,             // 当前区间：0 中性 / 1 解锁区 / 2 锁车区
+    showProgressCard: true,       // ★ v3.31 方案B-修正: 连接页是否显示「确认进度」卡片（手机端偏好，不下发设备）
+
     // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
     _lastCmdAt: 0,               // 上次命令发起时间戳(ms)，用于最小间隔节流
@@ -438,6 +446,8 @@ export const useBleStore = defineStore('ble', {
           if (saved.rssiReadPeriodMs !== undefined) this.rssiReadPeriodMs = saved.rssiReadPeriodMs
           if (saved.disconnectLockDelayMs !== undefined) this.disconnectLockDelayMs = saved.disconnectLockDelayMs
           if (saved.kalmanR !== undefined) this.kalmanR = saved.kalmanR
+          // ★ v3.31 方案B-修正: 连接页进度条开关（手机端偏好）
+          if (saved.showProgressCard !== undefined) this.showProgressCard = !!saved.showProgressCard
           // ★ v3.12: cooldown_ms 是设备级参数，不从本地存储恢复
           //   设备通过 FF02 Notify 上报当前冷却时间，App 被动同步
           //   old: manualCooldownMs 本地持久化 → 多个手机可能不一致
@@ -2044,6 +2054,7 @@ export const useBleStore = defineStore('ble', {
           rssiReadPeriodMs: this.rssiReadPeriodMs,
           disconnectLockDelayMs: this.disconnectLockDelayMs,
           kalmanR: this.kalmanR,
+          showProgressCard: this.showProgressCard,  // ★ v3.31 方案B-修正: 进度条开关（手机端偏好）
           // ★ v3.12: cooldown_ms 不在这里持久化（设备级参数，由固件 DataFlash 管理）
         }
         /* ★ v3.15: 优先 SN 专属 key，无 SN 时回退通用 key
@@ -2774,6 +2785,14 @@ export const useBleStore = defineStore('ble', {
           _resolveWaiter('BIND', true)
         }
       }
+
+      // ★ v3.31 方案B: 设备真实确认参数（uc/lc）—— 回显验证 App 下发的配置是否真落到设备
+      if (data.uc !== undefined) this.deviceUc = Number(data.uc)
+      if (data.lc !== undefined) this.deviceLc = Number(data.lc)
+      // ★ v3.31 方案B: 实时确认进度（ucnt/lcnt）与当前区间（th）
+      if (data.ucnt !== undefined) this.unlockProgress = Number(data.ucnt)
+      if (data.lcnt !== undefined) this.lockProgress = Number(data.lcnt)
+      if (data.th !== undefined) this.thresholdZone = Number(data.th)
 
       // ★ v3.15-#13: 每次收到有效 Status 后重置看门狗
       this._resetStatusStaleTimer()

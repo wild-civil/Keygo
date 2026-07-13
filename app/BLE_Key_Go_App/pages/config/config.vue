@@ -128,6 +128,14 @@
 
       <view class="config-item">
         <view class="config-header">
+          <text class="config-label">📊 连接页显示确认进度条</text>
+        </view>
+        <view class="config-desc">开启后，连接页会在走近/走远时显示「解锁/锁车进度 N/总」（需固件 v3.31+ 上报进度）</view>
+        <switch :checked="localConfig.showProgress" @change="onToggleProgress" color="#3b82f6" style="transform: scale(0.9);" />
+      </view>
+
+      <view class="config-item">
+        <view class="config-header">
           <text class="config-label">解锁确认次数</text>
           <text class="config-value">{{ localConfig.uc }} 次</text>
         </view>
@@ -277,6 +285,7 @@ const localConfig = reactive({
   interval: 500,
   dlock: 5000,
   kr: 15,   // ★ 与 CH582M / ESP32C3 默认 kf_r=15.0 一致
+  showProgress: true,  // ★ v3.31 方案B-修正: 连接页「确认进度」卡片开关（手机端偏好）
 })
 
 // ★ v3.25: 切回页面时用于强制 slider 重渲染的计数（解决 uni-app slider 非受控不回弹）
@@ -291,6 +300,7 @@ const isDirty = computed(() => {
     || localConfig.interval !== (bleStore.rssiReadPeriodMs || 500)
     || localConfig.dlock !== bleStore.disconnectLockDelayMs
     || localConfig.kr !== (bleStore.kalmanR || 15)
+    || localConfig.showProgress !== bleStore.showProgressCard
 })
 
 // ★ v3.31.0 / 2026-07-13: 把「确认次数(样本数)」换算成用户能直接理解的语义。
@@ -322,6 +332,7 @@ function resetToSaved() {
     interval: bleStore.rssiReadPeriodMs || 500,
     dlock: bleStore.disconnectLockDelayMs,
     kr: bleStore.kalmanR || 15,
+    showProgress: bleStore.showProgressCard,
   })
   configReloadKey.value++
 }
@@ -427,6 +438,7 @@ watch(() => bleStore.lockCountRequired, () => { localConfig.lc = bleStore.lockCo
 watch(() => bleStore.rssiReadPeriodMs, () => { localConfig.interval = bleStore.rssiReadPeriodMs || 500 })
 watch(() => bleStore.disconnectLockDelayMs, () => { localConfig.dlock = bleStore.disconnectLockDelayMs })
 watch(() => bleStore.kalmanR, () => { localConfig.kr = bleStore.kalmanR || 15 })
+watch(() => bleStore.showProgressCard, () => { localConfig.showProgress = bleStore.showProgressCard })
 
 function onUnlockChange(e) { localConfig.unlock = e.detail.value }
 function onLockChange(e) { localConfig.lock = e.detail.value }
@@ -434,6 +446,12 @@ function onUcChange(delta) { localConfig.uc = Math.max(1, Math.min(20, localConf
 function onLcChange(delta) { localConfig.lc = Math.max(1, Math.min(30, localConfig.lc + delta)) }
 function onIntervalChange(e) { localConfig.interval = e.detail.value }
 function onDlockChange(e) { localConfig.dlock = e.detail.value }
+// ★ v3.31 方案B-修正: 进度条开关是手机端偏好，不入下发配置，直接写 store 并持久化
+function onToggleProgress(e) {
+  localConfig.showProgress = e.detail.value
+  bleStore.showProgressCard = e.detail.value
+  bleStore._persistConfig()
+}
 
 // ★ v3.13: 卡尔曼 R 值档位预设（等比分布，每档体感步进一致）
 const krPresets = [
