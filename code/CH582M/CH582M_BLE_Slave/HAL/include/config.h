@@ -34,11 +34,15 @@
 #define PIN_LOCK_GPIO               GPIO_Pin_5   // PA5 → 上锁
 #define PIN_TRUNK_GPIO              GPIO_Pin_6   // PA6 → 后备箱
 #define PIN_KEYPOWER_GPIO           GPIO_Pin_7   // PA7 → 钥匙电源
+/* ★ Phase 2: ebike RIDE 输出引脚。默认复用 TRUNK 脚(PA6)——电动车 PCB 应将
+ *   RIDE 触发线接到此处；若硬件另有独立 RIDE 脚，改此宏即可。 */
+#define PIN_RIDE_GPIO               GPIO_Pin_6   // PA6 → 电瓶车 RIDE(快速双击)
 
 #define PIN_UNLOCK_PORT             GPIOA
 #define PIN_LOCK_PORT               GPIOA
 #define PIN_TRUNK_PORT              GPIOA
 #define PIN_KEYPOWER_PORT           GPIOA
+#define PIN_RIDE_PORT               GPIOA
 
 /* ─────────────────────────────────────────────────────────────────
  * 默认配置值 (可通过 MRS IDE 项目预处理覆盖)

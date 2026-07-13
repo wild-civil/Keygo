@@ -209,10 +209,14 @@
         <slider class="config-slider" :min="0" :max="30000" :step="1000"
           :value="localConfig.dlock" @change="onDlockChange"
           :activeColor="sliderActivePink" :backgroundColor="sliderTrackColor"
+          :disabled="bleStore.autoReconnectMode === 'manual'"
           block-size="24" />
         <view class="slider-labels">
           <text>0</text>
           <text>30s</text>
+        </view>
+        <view v-if="bleStore.autoReconnectMode === 'manual'" class="config-desc config-disabled-hint">
+          ⚙️ 手动模式下断连自动锁已禁用，此设置不生效（固件收到 autolock=0 后跳过断连自动锁）
         </view>
       </view>
 
@@ -221,7 +225,9 @@
       <view class="divider"></view>
       <view class="section-title">🔐 设备绑定（应用层鉴权）</view>
       <view class="config-desc">已连接设备固件版本：<text class="fw-ver">{{ bleStore.fwVersion || '未知' }}</text>
-        <text v-if="bleStore.fwVersion && bleStore.fwVersion !== '3.30.1'">（仍显示旧版本 → 烧录未生效，设备跑的是旧固件）</text></view>
+        <text v-if="!bleStore.fwVersion" class="fw-warn">（未读到版本，先连接设备）</text>
+        <text v-else-if="isFirmwareAtLeast(bleStore.fwVersion)" class="fw-ok">（✅ 新固件，支持延迟发送回包，可正常绑定）</text>
+        <text v-else class="fw-warn">（⚠️ 固件过旧，绑定时回包易丢失，建议升级到 ≥3.30.2）</text></view>
 
       <view class="bind-status" :class="bindStatusClass">
         <text class="bind-dot">●</text>
@@ -261,6 +267,8 @@ import { toast } from '@/utils/toast.js'
 import BindModal from '@/components/BindModal.vue'
 // ★ v3.23 Phase 3: 地理围栏工具
 import { getParkingLocation, GEOFENCE_RADIUS, isGeofenceMonitorActive } from '@/utils/geofence.js'
+// ★ v3.32.2-fix③: 固件版本比较（判断是否 ≥3.30.2 支持延迟发送回包）
+import { isFirmwareAtLeast } from '@/utils/firmware.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
@@ -509,6 +517,7 @@ async function handleSubmit() {
 
 
 
+
 const bindStatusText = computed(() => {
   if (!bleStore.isBound) return '未绑定'
   if (bleStore.sessionAuthed) return '已绑定 · 本连接已验证'
@@ -589,6 +598,15 @@ const bindStatusClass = computed(() => {
   font-size: 22rpx;
   color: var(--text-muted);
   margin-bottom: 16rpx;
+}
+/* ★ v3.32.2-fix③: 固件版本文案配色 */
+.fw-ver { font-weight: 600; color: var(--text-primary); }
+.fw-ok  { color: #2ecc71; }
+.fw-warn{ color: #e67e22; }
+/* ★ v3.32.2-fix②: 手动模式下滑块置灰提示 */
+.config-disabled-hint {
+  color: var(--text-muted);
+  margin-top: 8rpx;
 }
 .config-desc .hl {
   color: var(--text-primary);

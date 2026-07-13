@@ -11,7 +11,7 @@ const TAB_LIST = [
   { path: '/pages/index/index',   name: '连接' },
   { path: '/pages/control/control', name: '控制' },
   { path: '/pages/config/config',   name: '配置' },
-  { path: '/pages/login/login',     name: '帮助' },
+  { path: '/pages/help/help',     name: '帮助' },
 ]
 
 let _startX = 0

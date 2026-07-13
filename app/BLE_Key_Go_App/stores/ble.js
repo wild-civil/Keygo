@@ -7,6 +7,30 @@
  *   - ★ v3.11: 原生 BroadcastReceiver 驱动 btState，模仿 nRF Connect
  */
 
+/**
+ * ==================== 文件分区索引 (TOC · as of 2026-07-13) ====================
+ * 本 store 为单文件 God-Store (约 4121 行)，按职责分为 15 个分区。
+ * 维护策略: 保持单 store 不拆分(单人维护 + 重连逻辑改动不频繁)，仅做轻量整理。
+ * 重连簇(分区 4/5/6/13/14/15)最纠缠、时序敏感，改动需谨慎、改一处验全局。
+ *
+ *   1. 持久化配置 ........................ L337
+ *   2. 全局监听器 (v3.6 单例) ............ L418
+ *   3. 蓝牙适配器检测 (v3.6) ............. L598
+ *   4. 断连处理 & 重连 (v3.6) ............ L1017
+ *   5. 舒适模式后台轮询 (v3.23) .......... L1278
+ *   6. 舒适模式亮屏触发 (v1.0.1) ......... L1424
+ *   7. 设备名称本地存储 (v3.8) ........... L2095
+ *   8. 扫描 .............................. L2148
+ *   9. 连接 .............................. L2212
+ *  10. 状态处理 (v3.2 短键名) ............ L2611
+ *  11. 命令 (v3.2) ....................... L2829
+ *  12. 绑定 / 授权 ....................... L2917
+ *  13. 智能重连模式 (v3.23) .............. L3575
+ *  14. 极速模式·地理围栏 (v3.23 P3) ...... L3649
+ *  15. AlarmManager 心跳·防 Doze (v3.23.2) L3891
+ * =============================================================================
+ */
+
 import { defineStore } from 'pinia'
 import {
   BLE_CONFIG,
@@ -68,9 +92,9 @@ import {
   recordScreenEvent,
 } from '@/utils/debug-panel.js'
 
-// ★ v3.31.0 (2026-07-13): App 版本号，方便回看改动与排查问题（与固件 KEYGO_FW_VERSION 对应）。
+// ★ v3.32.2 (2026-07-13): App 版本号，方便回看改动与排查问题（与固件 KEYGO_FW_VERSION = "3.32.2" 保持一致，固件/App 同一版本）。
 //   本版本落地：RSSI 显示层改为 EMA 平滑 + 500ms 节流，回前台保留旧值（见下方 ★ 标记）。
-export const APP_VERSION = 'v3.31.0'
+export const APP_VERSION = 'v3.32.2'
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
@@ -93,85 +117,12 @@ import {
   getDistanceToParking,  // ★ v3.25: 同步获取缓存距离（UI 初始化用）
 } from '@/utils/geofence.js'
 
-// ★ v3.27-fix ②: GATT 写串行锁（模块级单例）
-//   所有写特征值操作（手动命令 / 配置下发）都经由本 Promise 链排队，保证
-//   「上一条 write 的 onCharacteristicWrite 回调真正落地后，再发下一条」。
-//   这是从源头消除 Android BLE GATT_BUSY(status 11) / write failed 的关键：
-//   此前 _cmdBusy(守护手动命令) 与 _configWriteBusy(守护配置下发) 互不协调，
-//   可能并发抢同一 GATT 通道，导致后发的写被系统/固件拒掉，误报「发送失败」。
-let _writeChain = Promise.resolve()
-function enqueueWrite(writeFn) {
-  // 无论上一条写成功或失败，都接着执行下一条（不把错误传进链里阻断后续排队）
-  const run = _writeChain.then(() => writeFn(), () => writeFn())
-  _writeChain = run.then(() => {}, () => {})  // 吞掉异常，避免 unhandled rejection
-  return run
-}
-
-// ★ v3.27-fix ①: 判定是否为 GATT 瞬时写冲突（连接其实未断，仅本次写被拒）
-//   涵盖 Android 常见表现：GATT_BUSY(status 11)、系统 errCode 10008、以及
-//   含 'write fail' / 'already' / 'busy' / 'gatt' 字样的 errMsg。
-//   这类不该提示「检查连接」，而应提示「指令冲突，请重试」。
-//   注意：明确是连接断开(not connected / disconnect / closed)的，不算瞬时冲突，
-//   保持 FAIL「发送失败，请检查连接」以如实反映连接问题。
-function _isGattConflict(err) {
-  const msg = (err && (err.errMsg || err.message || String(err) || '')).toLowerCase()
-  if (/not connected|disconnect|connection.*closed|closed/.test(msg)) return false
-  return /gatt\s*busy|status\s*11|10008|write\s*fail|already|busy|gatt/.test(msg)
-}
-
-// ★ ②: 绑定层模块级状态（非响应式，避免无谓重渲染）
-//   _bindKey: 本机持有的 bindKey（Uint8Array(16)），本地持久化于 uni storage（按序列号）
-let _bindKey = null
-// ★ 2026-07-10: 绑定进行中标志——防止连接时自动 ensureSession 的并发 AUTH 干扰 BIND 流程
-let _bindInProgress = false
-// ★ 2026-07-12: 自动 AUTH（重连恢复会话）进行中标志——防止 _maybeAutoAuth 被多路径并发触发导致重复 NONCE
-let _autoAuthRunning = false
-
-// ★ P0-2: C1 命令签名会话态（每连接）
-let _sessionSalt = null   // 当前会话盐（AUTH/BIND 握手 nonce 的 hex），C1 命令签名用
-let _cmdSeq = 0           // 当前连接 C1 命令序号（防重放），每连接递增
-let _lastNonce = null     // 最近一次 NONCE 请求的 hex，AUTH:OK 时作为会话盐来源
-
-// 绑定指令的异步等待器（NONCE/AUTH/BIND/UNBIND 的回应经 FF02 通知解析后 resolve）
-const _bindWaiters = { NONCE: null, AUTH: null, BIND: null, UNBIND: null, SETCODE: null }
-// ★ 2026-07-10: 记录 BIND 流程中固件最后回包原文，便于失败时给出确切原因
-let _lastBindRaw = ''
-// ★ 2026-07-11 修复：本次 BIND 是否为「未绑定→已绑定」的跃迁。
-//   仅在此跃迁下，才允许 status.bn=1 兜底确认 BIND 成功（应对旧固件 BIND:OK 被浅通知队列丢弃）。
-//   设备本就绑定时，status.bn=1 只反映既有状态，不能证明「本次用某特定码验证成功」，
-//   否则用旧码/错误码重绑会被误判成功（见下方 status 解析的 gating）。
-let _bindConfirmByStatus = false
-function _waitFor(type) { return new Promise((resolve) => { _bindWaiters[type] = resolve }) }
-function _resolveWaiter(type, val) {
-  const r = _bindWaiters[type]
-  _bindWaiters[type] = null
-  if (r) r(val)
-}
-
-// ★ 2026-07-11: 绑定/解绑互斥锁。根因：用户「解绑还没结束就点绑定」会让两条命令并发，
-//   那条迟到的 UNBIND:OK 会清空刚由 bindDevice 设好的 _bindKey（见 UNBIND:OK 处理），
-//   表现为「重绑后无法操控 / 提示先绑定」。用串行锁让 bind/unbind 互斥执行，杜绝此竞态。
-let _bindMutex = Promise.resolve()
-function _acquireBindLock() {
-  let _rel
-  const _prev = _bindMutex
-  _bindMutex = new Promise(r => { _rel = r })
-  return _prev.then(() => _rel)
-}
-
-// ★ 2026-07-11: 等待 BIND:OK，超时(ms)返回 false 但不阻塞后续兜底。
-//   超时后若真实 BIND:OK 晚到，仍会被 _resolveWaiter 处理（无害），不泄漏状态。
-function _waitBind(ms) {
-  return new Promise((resolve) => {
-    let done = false
-    const t = setTimeout(() => {
-      if (!done) { done = true; resolve(false) }
-    }, ms)
-    _waitFor('BIND').then((v) => {
-      if (!done) { done = true; clearTimeout(t); resolve(v === true) }
-    })
-  })
-}
+// ★ v3.27-fix: 命令写队列 + GATT 冲突检测（提取到 utils/command-queue.js）
+import { enqueueWrite, isGattConflict } from '@/utils/command-queue.js'
+// ★ 用户可读错误文案集中管理（提取到 utils/readable-errors.js）
+import { throwError, ERROR_MSGS } from '@/utils/readable-errors.js'
+// ★ ②: 绑定层模块级状态（提取到 stores/ble-binding.js，通过 B 命名空间对象访问）
+import { B, _waitFor, _resolveWaiter, _acquireBindLock, _waitBind } from './ble-binding.js'
 
 export const useBleStore = defineStore('ble', {
   state: () => ({
@@ -199,6 +150,7 @@ export const useBleStore = defineStore('ble', {
 
     // 设备状态（从 FF02 Notify 接收）
     deviceState: 'LOCKED',        // LOCKED / UNLOCKED / ACTION
+    deviceMode: 'car',            // ★ Phase 2: 设备模式 'car' / 'ebike'（权威来自设备状态 m，本地缓存兜底）
     rssi: -999,
     filteredRssi: -999,
     displayRssi: -999,            // ★ v3.31.0 / 2026-07-13: 平滑+节流后的显示用 RSSI（UI 绑定此值，杜绝后台噪值狂跳）
@@ -355,6 +307,10 @@ export const useBleStore = defineStore('ble', {
     },
 
     isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
+
+    // ★ Phase 2: 双模式派生状态
+    isEbike: (state) => state.deviceMode === 'ebike',
+    deviceModeLabel: (state) => state.deviceMode === 'ebike' ? '电瓶车' : '汽车',
 
     /* ★ v3.15: 电池图标 — emoji 方案（默认启用）
      *   若想切换为 CSS 组件，修改 control.vue 模板中的电池区域
@@ -522,7 +478,7 @@ export const useBleStore = defineStore('ble', {
           //   SETCODE:OK / SETCODE:FAIL:* 会被当"未知包"→当 JSON 解析失败丢弃→
           //   _handleBindingNotify 永远收不到 SETCODE → 改码 waiter 6s 超时。
           //   这才是"改码一直失败、回包显示陈旧 AUTH:OK/BIND:OK"的真正根因。
-          const _SHORT_PREFIX = ['BIND:', 'NONCE:', 'AUTH:', 'UNBIND:', 'DENY:', 'SETCODE:']
+          const _SHORT_PREFIX = ['BIND:', 'NONCE:', 'AUTH:', 'UNBIND:', 'DENY:', 'SETCODE:', 'CMD:']
           const _isShort = _SHORT_PREFIX.some(p => _buf.startsWith(p))
           if (_isShort) {
             const _brace = _buf.indexOf('{')
@@ -772,7 +728,7 @@ export const useBleStore = defineStore('ble', {
       this.connected = false
       this.deviceState = 'LOCKED'
       this.rssi = -999
-      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 断连重置签名会话态
+      B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 断连重置签名会话态
       this.filteredRssi = -999
       this.displayRssi = -999
       this.rssiEma = -999
@@ -1735,7 +1691,7 @@ export const useBleStore = defineStore('ble', {
       this.connected = true
       this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
-      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 新连接重置签名会话态
+      B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 新连接重置签名会话态
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
@@ -2177,6 +2133,7 @@ export const useBleStore = defineStore('ble', {
     _resolveDeviceName(sn) {
       if (!sn) return
       this._loadDeviceNames()
+      this._loadCachedDeviceMode()   // ★ Phase 2: SN 就绪即恢复模式缓存（设备 m 上报前渲染正确 UI）
       const entry = this._deviceNames[sn]
 
       if (entry && entry.name) {
@@ -2379,6 +2336,13 @@ export const useBleStore = defineStore('ble', {
           // ★ v3.12: SN 就绪 → 加载设备专属配置 + 下发到固件（per-phone 个性化）
           this._loadConfigForDevice(sn)
           this._syncConfigToDevice()
+          // ★ v3.32.2-fix①: 手动连接路径补上「恢复绑定 + 自动 AUTH」。
+          //   此前此分支（connect() 手动连接）漏掉了 _finalizeConnection（自动重连路径）已有的
+          //   _restoreBindKey + _maybeAutoAuth，导致：手动模式重启 APP 后，用户手动连上设备，
+          //   isBound/sessionAuthed 永远 false → UI 恒显「连接待验证」、控车被挡成「请先绑定」，
+          //   逼用户每次手动重绑。固件每连接清零会话态，故重连/手动连都必须重 AUTH——自动补上。
+          this._restoreBindKey(sn)
+          this._maybeAutoAuth()
         }).catch(err => {
           const msg = err?.message || String(err)
           // ★ 根据错误类型分类处理
@@ -2450,7 +2414,7 @@ export const useBleStore = defineStore('ble', {
       this.connected = false
       this.deviceId = ''
       this.deviceName = ''
-      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2: 主动断开重置签名会话态
+      B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 主动断开重置签名会话态
       this.scanning = false
       this.customDeviceName = ''
       this.serialNumber = ''              // ★ v3.3
@@ -2748,12 +2712,28 @@ export const useBleStore = defineStore('ble', {
 
       if (data.st !== undefined) {
         this.deviceState = data.st
+        // ★ 方案A(2026-07-13): 控制命令「已确认成功」早解析。
+        //   固件成功执行命令后才会下发非 ACTION 的状态(st=UNLOCKED/LOCKED/TRUNK)，
+        //   失败则只回 CMD:FAIL/DENY(不发状态)。故收到终态即视为命令已落地，
+        //   让 _waitCmdResult 立即 resolve（不再干等 1.2s 超时）→ toast 与车状态文字同步出现。
+        //   失败回包由 _handleBindingNotify 经 B._cmdWaiter 走 reject，且先到先消费并置空 waiter，
+        //   优先级高于此处，不会误判成功。
+        if (data.st !== 'ACTION' && B._cmdWaiter) {
+          const w = B._cmdWaiter
+          B._cmdWaiter = null
+          w()  // 成功确认（无 errObj → resolve）
+        }
       }
 
       // ★ v3.8: 自定义名称 — d2 总是接收作为初始显示
       //   SN 到达后由 _resolveDeviceName() 用本地名称覆盖（本地优先）
       //   短暂闪烁可接受（仅 SN 已就绪 + 本地名与 d2 不同时才会发生）
       if (data.d2 !== undefined && data.d2 !== '') this.customDeviceName = data.d2
+
+      // ★ Phase 2: 设备模式 m (0=car / 1=ebike)，权威覆盖本地缓存
+      if (data.m !== undefined) {
+        this.deviceMode = data.m ? 'ebike' : 'car'
+      }
 
       // ★ v3.7 / v3.12: 冷却时间 ms (cd = cooldown duration)
       //   设备级参数 — 从 FF02 Notify 被动同步，确保 App 显示与设备一致
@@ -2783,7 +2763,7 @@ export const useBleStore = defineStore('ble', {
         //   设备本就绑定时，bn=1 只反映既有状态，不能证明「本次用某特定码验证成功」——
         //   否则用旧码/错误码重绑会被误判成功（用户实测：改码后旧码 123456 仍能「验证」）。
         //   已绑定场景下的成败，只看固件对这条 BIND 的真实回包（BIND:OK / BIND:FAIL:*）。
-        if (bound && _bindWaiters.BIND && _bindConfirmByStatus) {
+        if (bound && B._bindWaiters.BIND && B._bindConfirmByStatus) {
           console.log('[Store] 🔒 经 status.bn=1 确证绑定成功（仅首绑跃迁生效，BIND:OK 可能已被通知队列丢弃）')
           _resolveWaiter('BIND', true)
         }
@@ -2883,47 +2863,72 @@ export const useBleStore = defineStore('ble', {
       this._persistConfig()
     },
 
+    /**
+     * ★ 等待固件对控制命令的回包（CMD:FAIL:* / DENY:NOT_BOUND / DENY:AUTH_REQ:*）。
+     *   固件成功执行只刷 status（不发 CMD:OK），故超时窗口内无失败回包即视为成功。
+     *   失败时 _handleBindingNotify 经 B._cmdWaiter 回调 { code, msg }。
+     */
+    _waitCmdResult(ms = 1200) {
+      return new Promise((resolve, reject) => {
+        let done = false
+        const timer = setTimeout(() => {
+          if (done) return
+          done = true
+          B._cmdWaiter = null
+          resolve()  // 超时 = 成功（固件成功不发 CMD:OK）
+        }, ms)
+        B._cmdWaiter = (errObj) => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          B._cmdWaiter = null
+          if (errObj) reject(errObj)
+          else resolve()
+        }
+      })
+    },
+
     async sendCommand(command) {
-      if (!this.deviceId) throw new Error('未连接设备')
-      // ★ 控制类指令要求本连接已完成会话鉴权（sessionAuthed 由 BIND:OK 或 AUTH:OK 置位；
-      //   重连时由 _maybeAutoAuth→ensureSession 经 NONCE→AUTH 的 HMAC 挑战应答自动重建）。
+      if (!this.deviceId) throwError('NO_CONN')
+      // ★ 控制类指令（非 BIND/AUTH/NONCE/UNBIND/SETCODE）要求本连接已完成会话鉴权；
       //   指令本身经 C1 签名（per-command HMAC + 会话盐 + 自增序号）防重放，
       //   固件 Peripheral_HandleFF03→Bonding_VerifySignedCmd 校验；未签名一律 CMD:FAIL:NO_SIG。
-      if (!/^(BIND:|AUTH:|NONCE|UNBIND|SETCODE:)/.test(command)) {
-        if (!this.sessionAuthed) {
-          const e = new Error('设备未绑定，请先绑定')
-          e.code = 'NOT_BOUND'
-          throw e
-        }
-        // ★ P0-2: 控制命令须经 C1 签名（防跨连接重放 + 防同连接重放）
+      const isControl = !/^(BIND:|AUTH:|NONCE|UNBIND|SETCODE:)/.test(command)
+      if (isControl && command !== 'STATUS') {
+        if (!this.sessionAuthed) throwError('NOT_BOUND')
         const signed = this._signCommand(command)
-        if (!signed) {
-          const e = new Error('会话未就绪（缺少签名盐，请重新验证绑定）')
-          e.code = 'NO_SALT'
-          throw e
-        }
+        if (!signed) throwError('NO_SALT')
         command = signed
       }
       // ★ v3.27-fix ②: 经模块级写队列串行化，保证「上一条 write 落地后再发下一条」，
       //   避免与配置下发并发抢 GATT 通道（从源头降低 GATT_BUSY / write failed）。
       await enqueueWrite(() => rawSendCommand(this.deviceId, command))
+      // ★ 等待固件回包确认命令真实成败：失败回 CMD:FAIL/DENY（经 B._cmdWaiter reject）；
+      //   成功固件只刷 status、不发 CMD:OK，故超时窗口内无失败即视为成功。
+      if (isControl && command !== 'STATUS') {
+        try {
+          await this._waitCmdResult(1200)
+        } catch (e) {
+          throwError(e.code, e.msg || ERROR_MSGS[e.code])
+        }
+      }
     },
 
     /** ★ P0-2: 对控制命令做 C1 签名，返回 "C1:<cmd>:<seq>:<hmacHex>" 或 null（缺盐/缺密钥）。
      *   签名 = HMAC-SHA256(bindKey, saltBytes || "<cmd>:<seq>")。
      *   与固件 Bonding_VerifySignedCmd 完全一致：msg = salt(16) + ascii(cmd+":"+seq)。 */
     _signCommand(cmd) {
-      if (!_bindKey || !_sessionSalt) return null
-      _cmdSeq += 1
-      const seq = String(_cmdSeq)
+      if (!B._bindKey || !B._sessionSalt) return null
+      B._cmdSeq += 1
+      const seq = String(B._cmdSeq)
       const head = cmd + ':' + seq
-      const saltBytes = hexToBytes(_sessionSalt)
+      const saltBytes = hexToBytes(B._sessionSalt)
       const headBytes = new Uint8Array(head.length)
       for (let i = 0; i < head.length; i++) headBytes[i] = head.charCodeAt(i) & 0xff
       const msg = new Uint8Array(saltBytes.length + headBytes.length)
       msg.set(saltBytes, 0)
       msg.set(headBytes, saltBytes.length)
-      const hmac = hmacSha256Hex(msg, _bindKey)
+      const hmac = hmacSha256Hex(msg, B._bindKey)
       return 'C1:' + head + ':' + hmac
     },
 
@@ -2938,13 +2943,13 @@ export const useBleStore = defineStore('ble', {
      */
     async ensureSession() {
       if (this.sessionAuthed) return true
-      if (_bindInProgress) return false  // ★ 2026-07-10: 绑定进行中，跳过并发 AUTH，避免 NO_PEER 干扰
-      if (!_bindKey) return false
+      if (B._bindInProgress) return false  // ★ 2026-07-10: 绑定进行中，跳过并发 AUTH，避免 NO_PEER 干扰
+      if (!B._bindKey) return false
 
       const nonceHex = await this._requestNonce()
       if (!nonceHex) { this.sessionAuthed = false; return false }
 
-      const hmac = hmacSha256Hex(hexToBytes(nonceHex), _bindKey)
+      const hmac = hmacSha256Hex(hexToBytes(nonceHex), B._bindKey)
       const p = _waitFor('AUTH')
       let done = false
       const timer = setTimeout(() => {
@@ -2965,18 +2970,18 @@ export const useBleStore = defineStore('ble', {
 
     /**
      * ★ 2026-07-12 修复（bug ①）：重连后自动恢复会话鉴权。
-     *   仅在「本连接已订阅 FF02 Notify(_statusNotifyReady) + 本机持有 bindKey(_bindKey)
+     *   仅在「本连接已订阅 FF02 Notify(_statusNotifyReady) + 本机持有 bindKey(B._bindKey)
      *   + 尚未鉴权(sessionAuthed=false) + 无 BIND 进行中 + 仍连接」时触发 ensureSession。
      *   由序列号读取完成 与 _enableStatusNotify(FF02 订阅就绪) 双路径调用，
-     *   经 _statusNotifyReady 与 _autoAuthRunning 双重闸门保证「订阅后才发 NONCE、不重复触发」。
+     *   经 _statusNotifyReady 与 B._autoAuthRunning 双重闸门保证「订阅后才发 NONCE、不重复触发」。
      *   设备端 Bonding_ConnTerminated 每连接清零会话态，故重连必须重 AUTH——此方法让该过程全自动，
      *   消除「重进 APP 还得手动验证绑定」的体验问题。
      */
     _maybeAutoAuth(attempt = 1) {
       if (this.sessionAuthed) { this._autoAuthState = 'idle'; return }
-      if (_bindInProgress || !_bindKey || !this.connected) return
-      if (_autoAuthRunning) return
-      _autoAuthRunning = true
+      if (B._bindInProgress || !B._bindKey || !this.connected) return
+      if (B._autoAuthRunning) return
+      B._autoAuthRunning = true
       const MAX_TRIES = 4
       const run = async () => {
         try {
@@ -2985,7 +2990,7 @@ export const useBleStore = defineStore('ble', {
           if (!this._statusNotifyReady) {
             await this._enableStatusNotify()
             if (!this._statusNotifyReady) {
-              if (attempt < MAX_TRIES) { _autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
+              if (attempt < MAX_TRIES) { B._autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
               this._autoAuthState = 'failed'
               console.warn('[BIND] FF02 订阅失败，自动会话鉴权无法进行（请手动验证）')
               return
@@ -2998,7 +3003,7 @@ export const useBleStore = defineStore('ble', {
             console.log('[BIND] 自动会话鉴权成功（重连恢复）')
           } else if (attempt < MAX_TRIES) {
             // ★ 一次性短报文被丢弃等瞬时失败 → 重试，避免永久卡"待验证"
-            _autoAuthRunning = false
+            B._autoAuthRunning = false
             setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500)
             return
           } else {
@@ -3006,11 +3011,11 @@ export const useBleStore = defineStore('ble', {
             console.warn('[BIND] 自动会话鉴权失败（设备可能已解绑/重置，请手动验证）')
           }
         } catch (e) {
-          if (attempt < MAX_TRIES) { _autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
+          if (attempt < MAX_TRIES) { B._autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
           this._autoAuthState = 'failed'
           console.warn('[BIND] 自动会话鉴权异常:', e?.message || e)
         } finally {
-          _autoAuthRunning = false
+          B._autoAuthRunning = false
         }
       }
       run()
@@ -3033,7 +3038,7 @@ export const useBleStore = defineStore('ble', {
       const hex = await p
       done = true
       clearTimeout(timer)
-      _lastNonce = hex || null   // ★ P0-2: 记录本次 NONCE，AUTH:OK 时作为会话盐来源
+      B._lastNonce = hex || null   // ★ P0-2: 记录本次 NONCE，AUTH:OK 时作为会话盐来源
       return hex || null
     },
 
@@ -3042,19 +3047,19 @@ export const useBleStore = defineStore('ble', {
      */
     _handleBindingNotify(text) {
       console.log('[BIND] notify:', text)
-      _lastBindRaw = text   // ★ 记录原件，供 bindDevice 失败兜底提示
+      B._lastBindRaw = text   // ★ 记录原件，供 bindDevice 失败兜底提示
       if (text.startsWith('NONCE:')) {
         _resolveWaiter('NONCE', text.slice(6))
       } else if (text === 'AUTH:OK') {
         this.sessionAuthed = true
         this._autoAuthState = 'idle'   // ★ 2026-07-12: 会话已建立，自动 AUTH 状态机归位
         this.bindHint = ''
-        _sessionSalt = _lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
-        _cmdSeq = 0
+        B._sessionSalt = B._lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
+        B._cmdSeq = 0
         _resolveWaiter('AUTH', true)
       } else if (text.startsWith('AUTH:FAIL')) {
         this.sessionAuthed = false
-        _sessionSalt = null; _cmdSeq = 0   // ★ P0-2
+        B._sessionSalt = null; B._cmdSeq = 0   // ★ P0-2
         /* ★ 2026-07-10 fix：移除 AUTH:FAIL:NO_PEER 误报为"固件过旧"的旧逻辑。
          *   AUTH:FAIL:NO_PEER 可能来自并发/残留的 ensureSession 流（与 BIND 无关），
          *   把 AUTH 失败误判为 BIND 失败会打断正确的 BIND:OK 响应，导致"一绑就失败"。
@@ -3066,8 +3071,8 @@ export const useBleStore = defineStore('ble', {
         this.bindHint = '绑定成功'
         // ★ P0-2: BIND:OK 可能内联 C1 会话盐（BIND:OK:<32hex>），提取作为签名盐；旧固件无盐则跳过
         const _bokParts = text.split(':')
-        if (_bokParts.length >= 3) _sessionSalt = _bokParts[2]
-        _cmdSeq = 0
+        if (_bokParts.length >= 3) B._sessionSalt = _bokParts[2]
+        B._cmdSeq = 0
         _resolveWaiter('BIND', true)
         // ★ 配对(bond)已前置到 bindDevice 发 BIND 之前（见 ① 先配对再 BIND），此处不再触发。
       } else if (text.startsWith('BIND:FAIL')) {
@@ -3081,10 +3086,10 @@ export const useBleStore = defineStore('ble', {
       } else if (text === 'UNBIND:OK') {
         this.isBound = false
         this.sessionAuthed = false
-        _sessionSalt = null; _cmdSeq = 0   // ★ P0-2
-        /* ★ 2026-07-11 防御：绑定进行中（_bindInProgress）不在此清空 _bindKey，
+        B._sessionSalt = null; B._cmdSeq = 0   // ★ P0-2
+        /* ★ 2026-07-11 防御：绑定进行中（B._bindInProgress）不在此清空 B._bindKey，
          *   避免并发场景下迟到的 UNBIND:OK 把刚设好的 key 清掉（见 _acquireBindLock）。 */
-        if (!_bindInProgress) _bindKey = null
+        if (!B._bindInProgress) B._bindKey = null
         this.bindHint = '已解绑'
         _resolveWaiter('UNBIND', true)
       } else if (text.startsWith('UNBIND:FAIL')) {
@@ -3097,24 +3102,33 @@ export const useBleStore = defineStore('ble', {
         this.bindHint = '修改绑定码失败' + (text.includes('NO_AUTH') ? '：需先验证' :
           text.includes('NOT_BOUND') ? '：设备未绑定' : '：码长度不合法')
         _resolveWaiter('SETCODE', false)
+      } else if (text.startsWith('CMD:FAIL')) {
+        // ★ 控制命令被固件拒绝：签名校验失败(NO_SIG/SIG) → 经 B._cmdWaiter 让 sendCommand reject 对应错误码
+        let code = 'CMD_FAIL', msg = ERROR_MSGS.CMD_FAIL
+        if (text.includes('NO_SIG')) { code = 'NO_SIG'; msg = ERROR_MSGS.NO_SIG }
+        if (B._cmdWaiter) { const w = B._cmdWaiter; B._cmdWaiter = null; w({ code, msg }) }
       } else if (text === 'DENY:NOT_BOUND') {
         // 设备当前没有任何 owner（未绑定状态）
         // ★ 2026-07-11 防御：仅在非绑定进行中时清 isBound（避免 SETCODE/改码期间误清导致 UI 翻车）
-        if (!_bindInProgress) {
+        if (!B._bindInProgress) {
           this.isBound = false
           this.sessionAuthed = false
-          _sessionSalt = null; _cmdSeq = 0   // ★ P0-2
+          B._sessionSalt = null; B._cmdSeq = 0   // ★ P0-2
         }
+        // ★ 本次控制命令被拒（设备无 owner）→ 让 sendCommand reject 为 NOT_BOUND
+        if (B._cmdWaiter) { const w = B._cmdWaiter; B._cmdWaiter = null; w({ code: 'NOT_BOUND', msg: ERROR_MSGS.NOT_BOUND }) }
       } else if (text.startsWith('DENY:AUTH_REQ:')) {
         // 控制指令被拒且内联带 nonce → 用本地 key 直接回 AUTH（下一次控制即生效）
         const nonceHex = text.slice('DENY:AUTH_REQ:'.length)
-        _lastNonce = nonceHex   // ★ P0-2: 该 nonce 即本次会话盐来源（AUTH:OK 时采用）
-        if (_bindKey) {
-          const hmac = hmacSha256Hex(hexToBytes(nonceHex), _bindKey)
+        B._lastNonce = nonceHex   // ★ P0-2: 该 nonce 即本次会话盐来源（AUTH:OK 时采用）
+        if (B._bindKey) {
+          const hmac = hmacSha256Hex(hexToBytes(nonceHex), B._bindKey)
           rawSendCommand(this.deviceId, 'AUTH:' + hmac).catch(() => {})
         } else {
           this.bindHint = '设备未绑定，请先绑定'
         }
+        // ★ 本次控制命令未执行（会话失效触发重认证握手）→ 让 sendCommand reject 为 AUTH_REQ，提示稍候重试
+        if (B._cmdWaiter) { const w = B._cmdWaiter; B._cmdWaiter = null; w({ code: 'AUTH_REQ', msg: ERROR_MSGS.AUTH_REQ }) }
       } else if (text.startsWith('BIND:TIMEOUT')) {
         // ★ 方案A（2026-07-12）：固件侧未鉴权连接超时强断（防 DoS 占槽）
         //   设备检测到本连接连上 30s 仍未 AUTH/BIND，主动断开并提示重连绑定。
@@ -3180,7 +3194,7 @@ export const useBleStore = defineStore('ble', {
       try {
         const hex = uni.getStorageSync('keygo_bindkey_' + sn)
         if (hex && hex.length === 32) {
-          _bindKey = hexToBytes(hex)
+          B._bindKey = hexToBytes(hex)
           this.isBound = true
         }
       } catch (e) { /* 忽略 */ }
@@ -3200,29 +3214,29 @@ export const useBleStore = defineStore('ble', {
     async bindDevice(code) {
       const _release = await _acquireBindLock()
       try {
-      if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
+      if (!this.connected) throwError('NO_CONN')
       let sn = this.serialNumber
       if (!sn) {
         try { sn = await readSerialNumber(this.deviceId, 5000) } catch (e) { sn = '' }
       }
-      if (!sn) { const e = new Error('无法读取序列号'); e.code = 'NO_SERIAL'; throw e }
+      if (!sn) throwError('NO_SERIAL')
 
       // ★ 2026-07-11 修复：捕获本次 BIND 前的绑定态。仅当「未绑定→已绑定」跃迁时，
       //   才允许 status.bn=1 兜底确认成功（见下方 status 解析 gating）。设备已绑时，
       //   status.bn=1 不能证明「本次用某码验证成功」，必须只看固件对这条 BIND 的真实回包。
-      _bindConfirmByStatus = !(this.isBound || this.deviceBound)
+      B._bindConfirmByStatus = !(this.isBound || this.deviceBound)
 
       /* ★ 2026-07-11 重写：不再只赌单个 BIND:OK 短报文（该包可能被并发写覆盖、或旧固件
        *   下被浅通知队列丢弃）。改为「BIND 写入(串行队列) → 短等 BIND:OK → 兜底走 AUTH 握手」：
        *   BIND 成功后固件 s_bondCount=1，紧接着的 AUTH 握手必然成功 → 确证绑定生效。
        *   此路径不依赖 BIND:OK 是否送达，也不依赖重烧固件，彻底解决"6 秒超时绑不上"。 */
-      _bindInProgress = true
-      _bindKey = null
+      B._bindInProgress = true
+      B._bindKey = null
       this.isBound = false
       this.sessionAuthed = false
       this.bindHint = ''
-      _lastBindRaw = ''   // ★ 清空陈旧回包，使失败提示只反映本次绑定操作
-      _sessionSalt = null; _cmdSeq = 0; _lastNonce = null   // ★ P0-2
+      B._lastBindRaw = ''   // ★ 清空陈旧回包，使失败提示只反映本次绑定操作
+      B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2
       _resolveWaiter('AUTH', false)  // 清掉连接时可能残留的 AUTH waiter
 
       const key = deriveBindKey(code, sn)
@@ -3231,7 +3245,17 @@ export const useBleStore = defineStore('ble', {
       //   若 fwVersion !== "3.30.2" → 当前烧的不是含「延迟发送 + bn 字段」的新固件，
       //   绑定必失败（旧固件短报文在写回调同步发会被丢）。需 MRS 重编译并重新烧录。
       console.log('[BIND] === 开始绑定 === fwVersion=', JSON.stringify(this.fwVersion),
-                  ' sn=', sn, ' 已持有本地key=', !!_bindKey, ' isBound=', this.isBound)
+                  ' sn=', sn, ' 已持有本地key=', !!B._bindKey, ' isBound=', this.isBound)
+
+      // ★ ①(2026-07-13) 先配对(bond)再发 BIND：配对完成后链路加密，
+      //   随后 BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞（见 docs/已验证事实_安全模型实测与纠偏.md F3）。
+      const bondRes = await this._triggerBond()
+      if (bondRes && bondRes.ok) {
+        console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
+      } else {
+        console.warn('[BIND] ⚠ 配对未完成（', (bondRes && bondRes.message) || '未知', '），绑定码将以明文传输',
+          '（若设备此前已配对过则链路本身已加密，仍安全）')
+      }
 
       // ★ ①(2026-07-13) 先配对(bond)再发 BIND：配对完成后链路加密，
       //   随后 BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞（见 docs/已验证事实_安全模型实测与纠偏.md F3）。
@@ -3254,14 +3278,14 @@ export const useBleStore = defineStore('ble', {
         await enqueueWrite(() => rawSendCommand(this.deviceId, 'BIND:' + code))
       } catch (e) {
         _resolveWaiter('BIND', false)   // 写失败释放 waiter，避免 _authWithKey 误用残留
-        _bindInProgress = false
+        B._bindInProgress = false
         throw e
       }
 
       // 2) 等待 BIND:OK（waiter 已在步骤0注册，回包早于此处也不会错过）
       const bindOk = await bindWaitPromise
       // ★ 2026-07-11 修复：BIND 等待结束后清掉兜底开关，避免后续状态包误用本次 BIND 的跃迁标志
-      _bindConfirmByStatus = false
+      B._bindConfirmByStatus = false
 
       let bound = (bindOk === true)
 
@@ -3276,18 +3300,18 @@ export const useBleStore = defineStore('ble', {
         }
       }
 
-      _bindInProgress = false
+      B._bindInProgress = false
 
       if (bound) {
-        _bindKey = key
+        B._bindKey = key
         this._saveBindKey(sn, key)
         this.serialNumber = sn         // ★ 确保 serialNumber 立即可用，verifyBindCode 依赖它做本地 KDF 验证
         this.isBound = true
         this.sessionAuthed = true
         this.bindHint = '绑定成功'
       } else {
-        this.bindHint = _lastBindRaw
-          ? ('绑定失败，固件回包: ' + _lastBindRaw)
+        this.bindHint = B._lastBindRaw
+          ? ('绑定失败，固件回包: ' + B._lastBindRaw)
           : '绑定失败：BIND 写入后固件无回应（BIND:OK 与 AUTH 握手均未确认）'
       }
       return bound
@@ -3327,7 +3351,7 @@ export const useBleStore = defineStore('ble', {
     async unbindDevice(all = false) {
       const _release = await _acquireBindLock()
       try {
-      if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
+      if (!this.connected) throwError('NO_CONN')
       /* ★ 2026-07-11 修复：解绑前先尝试 AUTH 会话鉴权（证明持有密钥）。
        *   但「无法鉴权」有两种良性情况，不能直接报错：
        *     ① 设备端 bond 已丢失（如重启后持久化未生效、或物理恢复出厂）→ s_bondCount==0
@@ -3356,15 +3380,15 @@ export const useBleStore = defineStore('ble', {
       if (ok === true) {
         this.isBound = false
         this.sessionAuthed = false
-        _bindKey = null
+        B._bindKey = null
         if (this.serialNumber) this._clearBindKey(this.serialNumber)
         this.bindHint = '已解绑'
         return true
       }
       // UNBIND 失败：若本就没鉴权成功，说明设备已绑但验证失败（key 不匹配/需重绑）
       if (!authed) {
-        const e = new Error(_bindKey ? '设备验证失败，请重新绑定' : '设备未绑定，请先绑定')
-        e.code = _bindKey ? 'AUTH_FAIL' : 'NOT_BOUND'
+        const e = new Error(B._bindKey ? '设备验证失败，请重新绑定' : '设备未绑定，请先绑定')
+        e.code = B._bindKey ? 'AUTH_FAIL' : 'NOT_BOUND'
         throw e
       }
       return false
@@ -3383,19 +3407,17 @@ export const useBleStore = defineStore('ble', {
     async changeBindCode(newCode) {
       const _release = await _acquireBindLock()
       try {
-        if (!this.connected) { const e = new Error('未连接设备'); e.code = 'NO_CONN'; throw e }
-        if (!_bindKey) {
-          const e = new Error('设备未绑定，请先绑定'); e.code = 'NOT_BOUND'; throw e
-        }
+        if (!this.connected) throwError('NO_CONN')
+        if (!B._bindKey) throwError('NOT_BOUND')
         // ★ ②(2026-07-13) 恢复 HMAC 前置校验：改码前先 NONCE→AUTH 证明持有当前绑定码，
         //   防止"会话已失效却仍能改码"的边界。失败即拒绝，由用户先用当前码重绑。
-        const authed = await this._authWithKey(_bindKey)
+        const authed = await this._authWithKey(B._bindKey)
         if (!authed) {
           const e = new Error('无法验证当前绑定码，请先用「当前绑定码」重新绑定')
           e.code = 'AUTH_FAIL'
           throw e
         }
-        _lastBindRaw = ''   // ★ 清空陈旧回包，使失败提示只反映本次操作（避免误显旧 BIND:OK）
+        B._lastBindRaw = ''   // ★ 清空陈旧回包，使失败提示只反映本次操作（避免误显旧 BIND:OK）
         this.sessionAuthed = true
         const p = _waitFor('SETCODE')
         let done = false
@@ -3418,7 +3440,7 @@ export const useBleStore = defineStore('ble', {
           if (!sn) { try { sn = await readSerialNumber(this.deviceId, 5000) } catch (e) { sn = '' } }
           if (!sn) { this.bindHint = '修改成功，但读取序列号失败，请重连以刷新密钥'; return true }
           const key = deriveBindKey(newCode, sn)
-          _bindKey = key
+          B._bindKey = key
           this._saveBindKey(sn, key)
           // ★ 改码后固件 s_sessionAuthed 仍=1（基于旧码 nonce 标记），但内部 s_nonceValid=0，
           //   且 slot0 key 已是新码派生。下一次 NONCE→AUTH 用新 key 才能正确通过。
@@ -3430,21 +3452,21 @@ export const useBleStore = defineStore('ble', {
           try { await this._authWithKey(key) } catch (e) { /* 忽略，保持 sessionAuthed=true */ }
           return true
         }
-        this.bindHint = _lastBindRaw
-          ? ('修改失败，固件回包: ' + _lastBindRaw)
+        this.bindHint = B._lastBindRaw
+          ? ('修改失败，固件回包: ' + B._lastBindRaw)
           : '修改绑定码失败：设备未回应 SETCODE（很可能当前固件不支持「修改绑定码」，请重新烧录含 SETCODE 的最新固件）'
         return false
       } finally { _release() }
     },
 
     /**
-     * ★ 本地验证绑定码：deriveBindKey(code,sn) === 本机持有的 _bindKey。
+     * ★ 本地验证绑定码：deriveBindKey(code,sn) === 本机持有的 B._bindKey。
      *   纯本地计算，零 BLE 往返，用于改码前"证明知道旧码"（不触发 bindDevice 的 isBound 抖动）。
      *   @param {string} code 待验证的绑定码
      *   @returns {boolean}
      */
     verifyBindCode(code) {
-      if (!_bindKey) return false
+      if (!B._bindKey) return false
       let sn = this.serialNumber
       // ★ 防御：serialNumber 为空时主动读一次 FF04（短超时 2s，避免用户等太久）
       if (!sn && this.connected && this.deviceId) {
@@ -3457,11 +3479,11 @@ export const useBleStore = defineStore('ble', {
     },
     /** 纯同步 KDF 比对（提取为独立方法，避免串行读 FF04 卡住 UI） */
     _verifyWithSerial(code, sn) {
-      if (!sn || !_bindKey) return false
+      if (!sn || !B._bindKey) return false
       try {
         const k = deriveBindKey(code, sn)
-        if (k.length !== _bindKey.length) return false
-        for (let i = 0; i < k.length; i++) { if (k[i] !== _bindKey[i]) return false }
+        if (k.length !== B._bindKey.length) return false
+        for (let i = 0; i < k.length; i++) { if (k[i] !== B._bindKey[i]) return false }
         return true
       } catch (e) { return false }
     },
@@ -3497,16 +3519,8 @@ export const useBleStore = defineStore('ble', {
      */
     async _throttledCommand(command, opts = {}) {
       const CMD_MIN_INTERVAL_MS = 600
-      if (!this.connected) {
-        const e = new Error('未连接设备')
-        e.code = 'NO_CONN'
-        throw e
-      }
-      if (this._cmdBusy) {
-        const e = new Error('操作太频繁，请稍候')
-        e.code = 'TOO_FAST'
-        throw e
-      }
+      if (!this.connected) throwError('NO_CONN')
+      if (this._cmdBusy) throwError('TOO_FAST')
       // ★ 立即置位，避免并发 await 期间被重复放行
       this._cmdBusy = true
       try {
@@ -3520,16 +3534,8 @@ export const useBleStore = defineStore('ble', {
         // ★ v3.27-fix ①: 区分 GATT 瞬时写冲突 —— 连接其实没断，仅本次写被拒
         //   （快速连点 / 配置下发与命令并发时易触发）。这类不该提示「检查连接」，
         //   改为提示「指令冲突，请重试」，避免用户误以为蓝牙断了。
-        if (_isGattConflict(err)) {
-          const e = new Error('指令冲突，请重试')
-          e.code = 'CONFLICT'
-          e.cause = err
-          throw e
-        }
-        const e = new Error('发送失败，请检查连接')
-        e.code = 'FAIL'
-        e.cause = err
-        throw e
+        if (isGattConflict(err)) throwError('CONFLICT', undefined, err)
+        throwError('FAIL', undefined, err)
       } finally {
         this._cmdBusy = false
       }
@@ -3547,12 +3553,42 @@ export const useBleStore = defineStore('ble', {
     },
 
     async trunk() {
-      if (!this.connected) {
-        const e = new Error('未连接设备')
-        e.code = 'NO_CONN'
-        throw e
-      }
+      if (!this.connected) throwError('NO_CONN')
       await this._throttledCommand('TRUNK')
+    },
+
+    async ride() {
+      if (!this.connected) throwError('NO_CONN')
+      // ★ Phase 2: 仅 ebike 模式有意义；car 模式提前拦截给友好提示
+      //   （固件侧亦有 DENY:NOT_SUPPORTED 兜底，防止被篡改绕过）
+      if (this.deviceMode !== 'ebike') throwError('NOT_SUPPORTED')
+      await this._throttledCommand('RIDE')
+    },
+
+    /**
+     * ★ Phase 2: 切换设备模式（汽车/电瓶车）。
+     *   经 FF03 签名下发 MODE:car / MODE:ebike（受绑定 + GATT 加密门控），
+     *   乐观更新 deviceMode 并写本地缓存（keygo_mode_<serial>）兜底。
+     *   设备回状态包(m 字段)后会经 _parseSingleStatus 校正。
+     */
+    async setDeviceMode(mode) {
+      if (mode !== 'car' && mode !== 'ebike') throwError('NOT_SUPPORTED')
+      if (!this.connected) throwError('NO_CONN')
+      if (this.deviceMode === mode) return   // 无变化，跳过下发
+      await this.sendCommand('MODE:' + mode)
+      this.deviceMode = mode                 // 乐观更新
+      if (this.serialNumber) {
+        try { uni.setStorageSync('keygo_mode_' + this.serialNumber, mode) } catch (e) {}
+      }
+    },
+
+    /** ★ Phase 2: 连接时用本地缓存恢复设备模式（设备 m 上报前即可渲染正确 UI） */
+    _loadCachedDeviceMode() {
+      if (!this.serialNumber) return
+      try {
+        const cached = uni.getStorageSync('keygo_mode_' + this.serialNumber)
+        if (cached === 'car' || cached === 'ebike') this.deviceMode = cached
+      } catch (e) {}
     },
 
     /**

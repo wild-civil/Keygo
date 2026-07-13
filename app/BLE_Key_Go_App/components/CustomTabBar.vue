@@ -39,7 +39,7 @@ const tabs = [
   { path: '/pages/index/index',   icon: '📡', text: '连接' },
   { path: '/pages/control/control', icon: '🎮', text: '控制' },
   { path: '/pages/config/config',   icon: '⚙️', text: '配置' },
-  { path: '/pages/login/login',     icon: '👤', text: '我的' },
+  { path: '/pages/help/help',     icon: '❓', text: '帮助' },
 ]
 
 function switchTab(path) {

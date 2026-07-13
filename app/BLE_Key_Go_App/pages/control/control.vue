@@ -14,7 +14,7 @@
 
       <!-- ★ 车辆状态大卡 -->
       <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
-        <view class="car-icon">🚗</view>
+        <view class="car-icon">{{ carIcon }}</view>
         <view class="car-status">
           <text class="car-state-text">{{ bleStore.stateText }}</text>
           <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
@@ -75,9 +75,9 @@
       </view>
 
       <view class="secondary-actions">
-        <button class="sec-btn" @tap="handleTrunk">
-          <text class="sec-icon">🚗</text>
-          <text class="sec-text">后备箱</text>
+        <button class="sec-btn" @tap="handleThird">
+          <text class="sec-icon">{{ thirdBtn.icon }}</text>
+          <text class="sec-text">{{ thirdBtn.text }}</text>
         </button>
         <button class="sec-btn" @tap="handleStatus">
           <text class="sec-icon">🔄</text>
@@ -114,6 +114,34 @@
           </button>
         </view>
       </view>
+
+      <!-- ★ Phase 2: 设备模式（汽车/电瓶车）— 控制模式切换，置于控制页底部 -->
+      <view class="mode-section">
+        <view class="section-title">🚗/🛵 设备模式（汽车 / 电瓶车）</view>
+        <view class="mode-cards">
+          <view class="mode-card"
+            :class="{ active: bleStore.deviceMode === 'car' }"
+            @tap="handleDeviceModeChange('car')">
+            <view class="mode-card-header">
+              <text class="mode-icon">🚗</text>
+              <text class="mode-name">汽车</text>
+              <text class="mode-badge" v-if="bleStore.deviceMode === 'car'">当前</text>
+            </view>
+            <text class="mode-desc">解锁 / 锁车 / 后备箱</text>
+          </view>
+          <view class="mode-card"
+            :class="{ active: bleStore.deviceMode === 'ebike' }"
+            @tap="handleDeviceModeChange('ebike')">
+            <view class="mode-card-header">
+              <text class="mode-icon">🛵</text>
+              <text class="mode-name">电瓶车</text>
+              <text class="mode-badge" v-if="bleStore.deviceMode === 'ebike'">当前</text>
+            </view>
+            <text class="mode-desc">解锁 / 锁车 / 骑行（双击）</text>
+          </view>
+        </view>
+        <view class="config-desc" style="margin-top:10rpx;">模式存于设备，切换后重启仍保持；首次使用建议在「帮助」页了解两种模式差异。</view>
+      </view>
     </template>
   </view>
 </template>
@@ -125,6 +153,7 @@ import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
 import { sendConfig } from '@/utils/ble.js'
+import { cmdErrorMsg } from '@/utils/readable-errors.js'
 
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
@@ -133,17 +162,6 @@ const themeClass = computed(() => themeStore.themeClass)
 onShow(() => {
   themeStore.applyNavBar()
 })
-
-// ★ v3.27: 根据命令错误码返回诚实文案（不再把所有失败都说成"请检查连接"）
-function cmdErrorMsg(err) {
-  const code = err && err.code
-  if (code === 'NO_CONN') return '未连接，请先连接设备'
-  if (code === 'TOO_FAST') return '操作太频繁，请稍候'
-  if (code === 'CONFLICT') return '指令冲突，请重试'
-  if (code === 'NOT_BOUND') return '设备未绑定，请先到「配置」绑定'
-  if (code === 'AUTH_FAIL') return '设备验证失败，请重新绑定'
-  return '发送失败，请检查连接'
-}
 
 async function handleUnlock() {
   try {
@@ -171,6 +189,30 @@ async function handleTrunk() {
     toast.error(cmdErrorMsg(err))
   }
 }
+
+async function handleRide() {
+  try {
+    await bleStore.ride()
+    toast.success('骑行已触发')
+  } catch (err) {
+    toast.error(cmdErrorMsg(err))
+  }
+}
+
+// ★ Phase 2: 第三键按设备模式切换（car=后备箱 / ebike=骑行）
+const thirdBtn = computed(() => {
+  if (bleStore.deviceMode === 'ebike') {
+    return { icon: '🛵', text: '骑行', handler: handleRide }
+  }
+  return { icon: '🚗', text: '后备箱', handler: handleTrunk }
+})
+
+function handleThird() {
+  thirdBtn.value.handler()
+}
+
+// ★ Phase 2: 顶部大卡图标随模式切换
+const carIcon = computed(() => bleStore.deviceMode === 'ebike' ? '🛵' : '🚗')
 
 async function handleStatus() {
   try {
@@ -204,6 +246,20 @@ async function handleCooldownChange(value) {
     toast.info(`冷却时间已设为 ${value / 1000}s`)
   } catch {
     toast.error('设置失败')
+  }
+}
+
+// ★ Phase 2: 设备模式切换（汽车/电瓶车）— 从配置页迁移至控制页底部
+async function handleDeviceModeChange(mode) {
+  if (mode === bleStore.deviceMode) return
+  uni.showLoading({ title: '切换中...' })
+  try {
+    await bleStore.setDeviceMode(mode)
+    uni.hideLoading()
+    toast.success('已切换为' + (mode === 'ebike' ? '电瓶车' : '汽车') + '，设备响应后生效')
+  } catch (err) {
+    uni.hideLoading()
+    toast.error(cmdErrorMsg(err))
   }
 }
 </script>
@@ -488,4 +544,81 @@ async function handleCooldownChange(value) {
 .rssi-preset.far { background: var(--rssi-far-bg); color: var(--rssi-far-color); border-color: var(--rssi-far-border); }
 
 .rssi-preset:active { opacity: 0.7; }
+
+/* ===== ★ Phase 2: 设备模式切换（控制页底部） ===== */
+.mode-section {
+  margin-top: 30rpx;
+}
+
+.section-title {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 16rpx;
+}
+
+.config-desc {
+  font-size: 22rpx;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.mode-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+}
+
+.mode-card {
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  padding: 24rpx;
+  border: 2rpx solid var(--border);
+  transition: all 0.25s ease;
+}
+
+.mode-card:active {
+  opacity: 0.7;
+  transform: scale(0.98);
+}
+
+.mode-card.active {
+  border-color: var(--accent);
+  background: var(--alpha-05);
+}
+
+.mode-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 8rpx;
+}
+
+.mode-icon {
+  font-size: 36rpx;
+}
+
+.mode-name {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.mode-badge {
+  background: var(--accent);
+  color: #fff;
+  font-size: 20rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 20rpx;
+  font-weight: 500;
+}
+
+.mode-desc {
+  display: block;
+  font-size: 24rpx;
+  color: var(--text-secondary);
+  margin-bottom: 6rpx;
+  line-height: 1.5;
+}
 </style>

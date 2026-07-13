@@ -1,27 +1,62 @@
 # KeyGo · 钥启程 （BLE 智能车钥匙）
 
-> 一个基于 BLE 的车钥匙替代方案：用手机 App 连接 BLE MCU/SOC 固件模块，通过 RSSI 距离判断实现「走近解锁、走远锁车」的舒适进入体验。
+> English version: [README_EN.md](README_EN.md)
+
+> 一个基于 BLE 的车钥匙替代方案：用手机 App 连接 BLE MCU/SOC 固件模块，通过 RSSI 距离判断实现「走近解锁、走远锁车」的舒适进入体验；并支持与设备做**真实绑定鉴权**（绑定码 + HMAC 挑战应答），不再是裸连即开。
 
 **两大部分**：
-- **固件**：运行在 BLE MCU/SOC 上，接管原车钥匙的解锁 / 锁车 / 后备箱三个物理按钮
+- **固件**：运行在 BLE MCU/SOC 上，接管原车钥匙的解锁 / 锁车 / 第三键（后备箱或骑行）三个物理按钮
   - 早期用 **ESP32C3**（Arduino）完成原型验证
   - 当前主力平台 **WCH CH582M**（RISC-V BLE SoC, MounRiver Studio）
   - 后续计划移植到 **nRF528xx** 等其他 BLE MCU/SOC
-- **App**：**uni-app（Vue 3 + Pinia）** Android 应用，负责 BLE 连接、RSSI 监测、智能重连策略
+- **App**：**uni-app（Vue 3 + Pinia）** Android 应用，负责 BLE 连接、RSSI 监测、智能重连、绑定鉴权、双模式切换
+
+---
+
+## 当前主线
+
+- **主分支（mainline）**：`main` —— 稳定主线，汇总 `codex`（安全加固 / Codex 接手）与 `workbuddy`（本期优化 / UI 打磨 / 双模式）的工作。
+- **开发分支**：
+  - `workbuddy`（当前所在）：基于 `main`，承载本期「优化逻辑 + 美化 UI」增量（手动模式重启自动验证绑定 / 禁用断连自动锁 UI / 绑定页版本文案 / 主按钮禁用态美化 / 双模式切换入口迁移到控制页）。
+  - `codex`：基于 `main`，承载 v3.32.x 安全加固（先配对后 BIND、HMAC 挑战应答恢复）与 Codex 接手探索。
+- 固件 `KEYGO_FW_VERSION`：`3.32.2`（与 App 版本号一致，无需重烧）。
+- App 版本标注：`v3.32.2`（与固件一致；见 `stores/ble.js` 的 `APP_VERSION` 常量）。
+- 本版状态：**【此版可用 优化逻辑 美化UI】**
+- 下阶段准备优化：**Phase 3: 连接可靠性增强；Phase 4: GATT 加密门控（重做）**
 
 ---
 
 ## 实际功能
 
-| 功能 | 怎么做的 | 限制 |
+| 功能 | 怎么做的 | 限制 / 状态 |
 |------|----------|------|
 | **走近自动解锁** | App 持续连接设备，根据 RSSI 信号强度判断距离，超过阈值 + 连续确认次数后自动发解锁命令 | 仅当 App 与设备保持 BLE 连接时生效 |
-| **离开自动锁车** | RSSI 低于锁车阈值 + 连续确认次数 → 自动发锁车命令；BLE 意外断连也触发锁车 | BLE 断连时可能已离开很远，属于兜底保护 |
-| **手动控制** | App 上点击按钮，通过 BLE GATT Write 发送 UNLOCK / LOCK / TRUNK 命令 | 需要设备在蓝牙范围内 |
-| **设备绑定** | 过渡期：App 仅自动连接缓存的已知设备（`ble_device_id`）。真正的「序列号 + 物理按键配对」绑定鉴权**尚未落地** | 防误连陌生车钥匙（基于缓存），但当前**无固件级鉴权**，见下方安全说明 |
+| **离开自动锁车** | RSSI 低于锁车阈值 + 连续确认次数 → 自动发锁车命令；BLE 意外断连也触发锁车 | 断连时可能已离开很远，属兜底保护 |
+| **手动控制** | App 上点击按钮，通过 BLE GATT Write 发送 `UNLOCK` / `LOCK` / 第三键 | 需要设备在蓝牙范围内 |
+| **设备绑定（真实鉴权）** | 绑定码 → `SHA256(绑定码‖序列号)` 派生 16B 密钥写入设备 DataFlash；后续每次连接设备发 `NONCE` → App 回 `AUTH:HMAC-SHA256(nonce, key)` 完成会话鉴权 | 已落地（v3.32.0）；绑定码默认 `123456`，**建议首绑后强制改 `[待完成]`** |
 | **参数可调** | RSSI 解锁/锁车阈值、确认次数、采样间隔、Kalman 滤波参数均可在 App 上修改并下发到设备 | 参数调不好可能导致误触发或延迟 |
 | **电池监测** | 设备通过 BLE Notify 上报电压/电量，App 显示并低于 20% 提醒 | 仅支持 18650 锂电池（电压→电量映射基于放电曲线） |
-| **Android 前台服务** | 通过原生 Android Foreground Service + 常驻通知 + 电池优化豁免引导，尽可能不被系统杀死 | 荣耀/小米等深度管控机型锁屏 2h+ 仍可能被杀 |
+| **Android 前台服务** | 原生 Android Foreground Service + 常驻通知 + 电池优化豁免引导，尽可能不被系统杀死 | 荣耀/小米等深度管控机型锁屏 2h+ 仍可能被杀 |
+| **设备双模式（汽车/电瓶车）** | 模式存设备 DataFlash（非物理拨档）；前两键相同（解锁/锁车），第三键差异：car=后备箱、`ebike`=骑行（双脉冲） | Phase 2 代码已落地，待重烧联调 |
+| **未授权连接 30s 超时** | 连上但不绑定/不鉴权的连接，30s 后设备主动强断，防单连接槽被占（DoS 防护） | 已落地（commit 31f3f59） |
+| **RSSI 自动解锁安全闸门** | 解锁前要求「链路已加密（配对）」或「会话已鉴权（AUTH）」其一，防陌生人用 RSSI 蹭开 | 已落地（2026-07-12） |
+
+---
+
+## 设备双模式（Phase 2：汽车 / 电瓶车）
+
+一机两用，差异仅第三键：
+
+| 模式 | 前两键 | 第三键 | 固件行为 |
+|------|--------|--------|----------|
+| **汽车 `car`（默认）** | 解锁 / 锁车 | 🚗 后备箱（`TRUNK`） | 单脉冲触发后备箱 |
+| **电瓶车 `ebike`** | 解锁 / 锁车 | 🛵 骑行（`RIDE`） | 快速双击脉冲（2×100ms@150ms），LED 同步亮灭模拟「按了两下开关」 |
+
+- **模式存储**：DataFlash 新增 `MODE_ADDR`（偏移 `0x7300` / 物理 `0x77300`），App 首绑或控制页底部切换（非物理拨档）。
+- **切换入口**：控制页底部「设备模式」卡片（`control.vue`），属控制范畴。
+- **状态同步**：FF02 状态 JSON 新增 `"m":0|1` 字段；控制页顶部大卡图标随模式切换（🚗/🛵）；连接页第三快捷键也模式驱动。
+- **接口**：配置命令 `MODE:car`/`MODE:ebike`（走 FF03，受加密门控 + 绑定保护）；控制命令 `RIDE`（电瓶车双脉冲 / 汽车回 `DENY:NOT_SUPPORTED`）。
+- `[待完成]` 管理员锁定模式列（防误切）；多管理员。
 
 ---
 
@@ -31,7 +66,7 @@
 
 | | 极速模式 | 舒适模式（默认） | 手动模式（原「省电模式」） |
 |:--|:--|:--|:--|
-| **怎么工作的** | 蓝牙断开时记录停车 GPS 位置 → 建围栏 → 进入围栏时触发 BLE 扫描；同时加速度计检测运动 → 条件触发扫描 | 断开后注册 `ACTION_SCREEN_ON` 广播 → 用户亮屏/解锁手机时触发 8s BLE 扫描并连接 | 完全手动：不自动连接、也不自动锁车。连接后向固件下发 `autolock=0` 关闭 RSSI 自动锁，仅响应手动 UNLOCK/LOCK/TRUNK |
+| **怎么工作的** | 蓝牙断开时记录停车 GPS 位置 → 建围栏 → 进入围栏时触发 BLE 扫描；同时加速度计检测运动 → 条件触发扫描 | 断开后注册 `ACTION_SCREEN_ON` 广播 → 用户亮屏/解锁手机时触发 8s BLE 扫描并连接 | 完全手动：不自动连接、也不自动锁车。连接后向固件下发 `autolock=0` 关闭 RSSI 自动锁，仅响应手动 UNLOCK/LOCK/第三键 |
 | **什么时候能连上** | 走到车附近（进入 GPS 围栏）时自动连，理想情况到车边就已连好 | 亮屏后 2-8 秒内连上 | 用户手动点击连接 / 开锁时 |
 | **需要什么权限** | 后台定位 + 加速度计 | 无额外权限 | 无额外权限 |
 | **后台干了什么** | GPS 围栏（Google Geofence API）+ AlarmManager 心跳兜底（无 GMS 设备降级） | 无任何后台任务（纯事件驱动，亮屏才触发） | 无（不启动任何保活 / 后台扫描，切换时停前台服务） |
@@ -78,11 +113,39 @@ connectDevice() → 成功后停扫描
 | `idle` | 空闲，允许自动重连 | 连接成功、或重连彻底放弃后 |
 | `active` | 正在重连循环（指数退避） | 异常断连 `_handleDisconnect` → `_startReconnect` |
 | `paused` | 临时挂起（退避等待 / 蓝牙关闭） | 退避等待期、蓝牙关闭时 |
-| `dormant` | **用户主动断开**，禁止一切自动重连 | `disconnect()` |
+| `dormant` | **用户主动断开 / 未授权连接被踢**，禁止一切自动重连 | `disconnect()` / 收到 `BIND:TIMEOUT` |
 
 统一闸门 `_shouldAutoReconnect()`：`connected` / `dormant` / `btState=off` 任一成立 → 返回 `false`，`tryAutoConnect`、`autoConnectBest`、`_onScreenOn` 均先过此闸门。
 
-> ⚠️ **已知限制（待优化）**：`dormant` 是内存态，App 进程被杀后随 `reconnectMode` 重置回 `idle`；而 `ble_device_id` 缓存持久化在本地存储。因此**当前手动断开仅在「同一 App 会话内」有效**——重新打开 App 会按已知设备缓存再次自动连接。若希望「手动断开 = 跨重启都不自动连」，需把「用户主动断开」意图持久化（新增 `ble_manual_disconnect` 标记，受 `_shouldAutoReconnect` 与 `connect()` 共同管控），见下方「断连逻辑修复」讨论。
+> ⚠️ **已知限制（待优化）**：`dormant` 是内存态，App 进程被杀后随 `reconnectMode` 重置回 `idle`；而 `ble_device_id` 缓存持久化在本地存储。因此**当前手动断开仅在「同一 App 会话内」有效**——重新打开 App 会按已知设备缓存再次自动连接。若希望「手动断开 = 跨重启都不自动连」，需把「用户主动断开」意图持久化（新增 `ble_manual_disconnect` 标记），见下方「断连逻辑修复」讨论。`[待完成 / Phase 3]`
+
+---
+
+## 设备绑定与安全模型
+
+### 信任模型
+- 信任列表容量 8，存 DataFlash（偏移 `KEYGO_BOND_ADDR = 0x7100` 相对 / 物理 `0x77100`）；LTK 由协议栈经 SNV（偏移 `0x07E00`）自动持久化。
+- **KDF**：`bindKey[16] = SHA256(utf8(绑定码) ‖ utf8(序列号))[0:16]`，序列号 = FF04 MAC 十六进制（12 位大写）。固件 `Bonding_DeriveKey` 与 App `utils/crypto.js.deriveBindKey` 同源。
+- **挑战应答**：设备发 `NONCE(16B)` → 手机回 `AUTH:<HMAC-SHA256(nonce, bindKey) 十六进制>`；`NONCE` 一次性。
+- 手动控车门控：设备端 `Bonding_Count()==0` → `DENY:NOT_BOUND`；否则 `!会话已鉴权` → `DENY:AUTH_REQ` 并下发 `NONCE`。
+- 默认绑定码 `123456`（占位，**建议首绑后强制改 `[待完成]`**）。信任基于共享密钥（非 MAC，因随机私有地址）。
+
+### 安全加固时间线
+- **RSSI 自动解锁缺口（2026-07-12 落地）**：`KeyGo_ProcessStateMachine()` 闸门改为「链路已加密（配对）」或「会话已鉴权（AUTH）」其一成立才允许 RSSI 解锁，杜绝陌生人用 RSSI 蹭开。
+- **DoS 防护：未授权连接 30s 超时（2026-07-12，commit 31f3f59）**：连上不绑定占槽 → 超时先发 `BIND:TIMEOUT:30S` 通知，再延迟强断，App 收到后停重连。
+- **v3.32.0（2026-07-13，commit 77c6806）**：① 先配对再 `BIND`（Just Works 配对 → 链路加密 → 发 `BIND:code`，堵明文嗅探）；② BIND 成功后补 `NONCE → AUTH(HMAC)` 兜底鉴权；③ 改码前置 `_authWithKey` 校验。
+- **v3.32.1（GATT 加密门控，已回退）**：曾把 FF01/FF02-CCCD/FF03 权限升为 `GATT_PERMIT_AUTHEN_WRITE/READ`，未配对连接读不了。后因配对后补订 FF02 的时序问题在 `codex` 分支 `git revert`，**待 Phase 4 重做 `[待完成]`**。
+
+### 关键安全认知（实测纠偏）
+- 普通手机蓝牙设置**搜不到** KeyGo（需 nRF Connect 等工具主动连），故「路人随手开」不成立。
+- 真实残余风险（窄化）：已配对（bonded）过的攻击者手机，OS 自动重连 → `LINK_ENCRYPTED` → 满足 RSSI 闸门 → 走近解锁。配对与绑定码相互独立，30s 超时只防占槽，挡不住已配对者。
+- **App 被杀后 RSSI 解锁实测不生效**：解锁需活跃连接，连接靠前台服务维持；App 死 → 无连接 → 不解锁。故该漏洞门槛 = 「运行 KeyGo App + 曾用工具配对的蓄意者」，非路人。
+- 控制命令 `UNLOCK/LOCK` 的 **C1 签名（per-command HMAC + 会话盐 + 自增序号）防重放一直开着**，非「HMAC 被注释」。
+
+### `[待完成]` 安全增强
+- **认证配对 Passkey = 绑定码**（收口「已配对者也能 RSSI 解锁」缺口）：需先验证 CH582 SMP 支持「无头设备 + 固定 passcode + mitm=1 不回退 Just Works」。
+- **AUTH 失败限流**、**绑定码强制改**、**多管理员**。
+- **Phase 4：GATT 加密门控重做**（修复 v3.32.1 的订阅时序问题）。
 
 ---
 
@@ -93,23 +156,21 @@ connectDevice() → 成功后停扫描
 | UUID | 类型 | 方向 | 用途 | 数据格式 |
 |------|------|------|------|----------|
 | `0000FF00-...` | Service | — | KeyGo 主服务 | — |
-| `0000FF01-...` | Write | App→设备 | 配置下发 | `unlock=-45 lock=-65 uc=5 lc=10 interval=500 kf_r=15.0 autolock=1`（`autolock=0` 关闭固件 RSSI 自动锁，手动模式使用） |
-| `0000FF02-...` | Read, Notify | 设备→App | 状态上报 | JSON: `{"c":"LOCKED","r":-52,"f":-52,"b":85,"d2":0}` |
-| `0000FF03-...` | Write | App→设备 | 控制命令 | `UNLOCK` / `LOCK` / `TRUNK` / `UNBIND` / `STATUS` |
+| `0000FF01-...` | Write | App→设备 | 配置下发 | `unlock=-45 lock=-65 uc=3 lc=5 interval=500 kf_r=15.0 autolock=1 mode=car`（`autolock=0` 关闭固件 RSSI 自动锁；`mode=car|ebike` 切换双模式） |
+| `0000FF02-...` | Read, Notify | 设备→App | 状态上报 | JSON：`{"c":1,"st":"LOCKED","r":-52,"f":-52,"b":85,"d2":"","cd":8000,"kr":15,"al":1,"bn":1,"v":"...","m":0,"uc":3,"lc":5,"ucnt":1,"lcnt":0,"th":1}` |
+| `0000FF03-...` | Write | App→设备 | 控制 / 绑定命令 | `UNLOCK` / `LOCK` / `TRUNK` / `RIDE` / `BIND:code` / `SETCODE:new` / `UNBIND` / `STATUS` / `MODE:car|ebike` |
 | `0000FF04-...` | Read | 设备→App | 设备序列号（永久唯一） | ASCII 字符串，配对绑定用 |
 
 - 广播间隔：50ms，任意 ≥1s 扫描窗口能捕获
-- ⚠️ **安全机制（当前未实现）**：当前固件对 `UNLOCK`/`LOCK` 等控制命令**无任何鉴权**（无配对、无密码、无 challenge-response），任意设备连上即可直开。MAC 白名单 / 物理按键配对 / 绑定鉴权均在规划中，详见 `docs/02-技术方案与专项设计/KeyGo_安全加固与加密规划_v1.0.0.md`。
+- FF01 / FF02-CCCD / FF03 当前权限：`GATT_PERMIT_READ` + `GATT_PERMIT_WRITE`（**未加密门控**，见 Phase 4 `[待完成]`）；FF04 保留可读。
 
 ### FF02 状态字段说明（设备→App，周期上报）
 
-> ⚠️ 这是**状态上报**——固件把"当前情况"告诉 App 的窗口；它**不参与、也不影响**解锁/锁车的实际决策（决策在固件状态机，见下节「FF02 显示层 vs 固件内部运行逻辑」）。
-
-当前 JSON 字段（`KeyGo_NotifyStatus`，`keygo_core.c`）：
+> ⚠️ 这是**状态上报**窗口，不参与解锁/锁车决策（决策在固件状态机）。
 
 | 键 | 含义 | 示例值 |
 |----|------|--------|
-| `c` | 连接标志（恒为 1，表示有连接） | `1` |
+| `c` | 连接标志（恒为 1） | `1` |
 | `st` | 当前锁状态 | `LOCKED` / `UNLOCKED` / `ACTION` |
 | `r` | 实时 RSSI (dBm) | `-52` |
 | `f` | Kalman 滤波后 RSSI | `-52` |
@@ -118,68 +179,97 @@ connectDevice() → 成功后停扫描
 | `kr` | Kalman R 参数（滤波强度） | `15` |
 | `al` | 自动锁使能状态 | `1`=开启（舒适/极速模式）/ `0`=关闭（手动模式） |
 | `bn` | 已绑定标志 | `1`=已绑定 / `0`=未绑定 |
-| `v` | 固件版本号 | `...` |
-| `uc` | 设备当前解锁确认次数配置（回显验证 App 下发是否落地） | `3` |
+| `v` | 固件版本号 | `3.32.2` |
+| `m` | 设备模式 | `0`=汽车 / `1`=电瓶车 |
+| `uc` | 设备当前解锁确认次数配置（回显验证下发是否落地） | `3` |
 | `lc` | 设备当前锁车确认次数配置 | `5` |
-| `ucnt` | 当前解锁进度计数（连续几次滤波 RSSI 在解锁区） | `1` |
+| `ucnt` | 当前解锁进度计数 | `1` |
 | `lcnt` | 当前锁车进度计数 | `0` |
 | `th` | 当前区间：`0` 中性 / `1` 解锁区 / `2` 锁车区 | `1` |
 
-### FF02 显示层 vs 固件内部运行逻辑（重要）
+### 确认进度上报（方案 B，已落地）
+FF02 已增加 `uc/lc/ucnt/lcnt/th` 字段，状态机在计数器变化时立即上报 + 1s 心跳保活，流量与采样间隔解耦。App 主界面据此显示「🔓 解锁进度 ucnt/uc」进度条，并在 `uc` 与 App 设置不一致时提示「配置可能未下发」。
 
-很多「看着像只确认 1 次就解锁」的疑惑，根因是**显示节拍 ≠ 运行节拍**：
-
-- **运行节拍（固件状态机）**：`keygo_core.c` 的 `KeyGo_ProcessStateMachine` 每来一个新 RSSI 样本（每 ~`interval` ms，默认 500ms）才计一次数；`uc`/`lc` = 连续几次滤波 RSSI 在阈值内才动作。解锁/锁车时机**完全由固件内部计数决定**，与 FF02 毫无关系。
-- **显示节拍（App）**：FF02 状态包每 ~1s 才发一次（`SBP_PERIODIC_EVT_PERIOD`），且**当前不含计数器字段**。所以在 1.5s（uc=3 × 500ms）的解锁窗口里，App 只渲染了 1~2 次 `f`，视觉上像「一下就开」——**实际内部已按 3 次计数完成**。
-
-结论：**FF02 是「看」的窗口，不是「算」的引擎。** 要确认设备真实跑着 `uc=几`、看到实时确认进度，见下方「方案 B（计划中）」。
-
-### 方案 B（已实现，固件 + App 均已落地）：FF02 上报确认进度
-
-为让 App 精确显示「解锁进度 N/总」并验证设备真实配置，FF02 已增加字段（见上表）：
-- `uc` / `lc`：设备当前确认次数配置（回显，用于验证 App 下发的 `uc` 是否真落到设备）；
-- `ucnt` / `lcnt`：当前解锁 / 锁车进度计数（实时进度）；
-- `th`：当前区间（`0` 中性 / `1` 解锁区 / `2` 锁车区）。
-
-上报策略为**变更才上报 + 1s 心跳**：状态机在 `ucnt`/`lcnt` 变化时立即 `KeyGo_NotifyStatus()`，固定 1s 的 `SBP_PERIODIC_EVT` 仍保留作在线保活。二者结合使流量与采样间隔（`interval`）解耦，不再用固定周期 flood。App 主界面据此显示「🔓 解锁进度 ucnt/uc」进度条，并在 `uc` 与 App 设置不一致时给出「配置可能未下发」告警。
+> ⚠️ **已知偏差（待修 `[待完成]`）**：配置项 `uc/lc/阈值` 仅在 `cooldown` 变化时落盘（`KeyGo_SaveConfig` 仅 `cooldown_changed` 触发），只改 `uc` 不持久化 → 重启 revert 回默认值；App 重连也**未自动回推配置**。修复方向：① `if(cooldown_changed)` → `if(changed)`；② 对齐默认值（固件 `uc` 默认 → 3）；③ 补 App 重连自动回推。记录见 `docs/KeyGo_v3.33_实现状态与待办核对.md`。
 
 ---
 
-## 目录结构
+## 目录结构（当前真实文件）
 
 ```
 KeyGo/
-├── app/BLE_Key_Go_App/            # uni-app 手机端工程（HBuilderX）
+├── README.md                         # 本文件
+├── app/BLE_Key_Go_App/               # uni-app 手机端工程（HBuilderX + Vite）
 │   ├── pages/
-│   │   ├── index/                 # 设备扫描 & 连接
-│   │   ├── control/               # 手动解锁/锁车/后备箱
-│   │   └── config/                # RSSI阈值/确认次数/Kalman参数
+│   │   ├── index/                    # 设备扫描 & 连接（第三快捷键模式驱动）
+│   │   ├── control/                  # 手动解锁/锁车/第三键 + 底部双模式切换 + 顶部大卡图标
+│   │   ├── config/                   # RSSI阈值/确认次数/Kalman参数/断连自动锁滑块
+│   │   ├── help/                     # 帮助页（3步上手向导 + 绑定安全模型 + 模式说明，由 login.vue 迁来）
+│   │   ├── login/                    # 遗留帮助页（已迁 help.vue，待清理 [待完成]）
+│   │   └── main/                     # TabBar 容器
 │   ├── stores/
-│   │   └── ble.js                 # ★ 核心状态机（~2500行，连接/重连/三种模式）
+│   │   ├── ble.js                    # ★ 核心状态机（~4100行，连接/重连/三种模式/会话鉴权）
+│   │   ├── ble-binding.js            # 绑定层模块级状态（B 命名空间：_bindKey/_sessionSalt/waiter 等）
+│   │   ├── theme.js                  # 主题（暗色/亮色）
+│   │   └── user.js                   # 用户偏好（如进度条开关）
 │   ├── utils/
-│   │   ├── ble.js                 # uni BLE API 封装
-│   │   ├── foreground-service.js  # Android 前台服务 + 亮屏广播
-│   │   ├── geofence.js            # 极速模式 GPS 围栏
-│   │   └── power-saver.js         # 手动模式逻辑（原「省电模式」，v3.24 更名）
-│   └── nativeplugins/             # 原生插件（前台服务保活）
+│   │   ├── ble.js                    # uni BLE API 封装（startScan 二次过滤发现）
+│   │   ├── ble-native.js             # 原生 BLE 调用封装
+│   │   ├── command-queue.js          # GATT 写队列 enqueueWrite + isGattConflict（防 GATT_BUSY 抢通道）
+│   │   ├── crypto.js                 # deriveBindKey（SHA256 KDF，与固件同源）
+│   │   ├── firmware.js               # 固件版本比较 isFirmwareAtLeast（≥3.30.2 支持延迟回包）
+│   │   ├── foreground-service.js     # Android 前台服务 + 亮屏广播
+│   │   ├── geofence.js               # 极速模式 GPS 围栏（GEOFENCE_RADIUS 等）
+│   │   ├── power-saver.js            # 手动模式逻辑（原「省电模式」）
+│   │   ├── readable-errors.js        # 错误码 → 用户可读文案（ERROR_MSGS / cmdErrorMsg / throwError）
+│   │   ├── debug-panel.js            # DEV 调试面板逻辑
+│   │   ├── swipe.js                  # Tab 滑动管理
+│   │   └── toast.js                  # 统一 toast（success/error）
+│   ├── components/
+│   │   ├── BindModal.vue             # ★ 绑定弹窗（首绑/接管/重新验证/改码/解绑/恢复出厂 + 诊断区 + 固件版本徽标）
+│   │   ├── CustomTabBar.vue          # 自定义底部 Tab（Ⓠ 帮助）
+│   │   └── DebugFloatPanel.vue       # 浮层调试面板
+│   ├── nativeplugins/
+│   │   └── Keygo-Foreground/         # 原生 Android 插件（前台扫描/重连/自动 AUTH）
+│   │       ├── android/keygo-foreground.aar  # 编译产物（改 _build/source/*.java 需 Python 直写 + build_aar.bat）
+│   │       ├── _build/source/        # Java 源（KeygoBleScanService / KeygoForegroundModule）
+│   │       └── package.json          # 插件 manifest
+│   ├── manifest.json                 # App 权限/原生插件声明（versionCode 改 .java 后须 +1）
+│   ├── pages.json / main.js / App.vue / index.html / vite.config.js
+│   └── static/                       # 图片资源
 │
 ├── code/
-│   ├── ESP32C3/                    # 早期原型（Arduino .ino，v1 ~ v3.13）
-│   │   ├── BLE_Key_Go/            #   v1 初版
-│   │   ├── BLE_Key_Go_v2/ ... v3_13/  # v2 ~ v3.13 演进
-│   │   └── ...
-│   └── CH582M/CH582M_BLE_Slave/   # 当前主力固件（MounRiver Studio，v3.13+）
+│   ├── ESP32C3/                      # 早期原型（Arduino .ino，v1 ~ v3.13，已归档）
+│   └── CH582M/CH582M_BLE_Slave/      # 当前主力固件（MounRiver Studio，v3.13+）
 │       ├── APP/
-│       │   ├── peripheral.c       # GAP/GATT 服务、广播、连接管理
-│       │   ├── keygo_core.c       # 业务核心（RSSI判断/命令执行/绑定/看门狗喂狗）
-│       │   └── peripheral_main.c  # main() + WWDG 软看门狗
-│       ├── HAL/                   # LED、按键等硬件抽象
-│       └── Profile/               # Battery / DeviceInfo / GATT 服务实现
+│       │   ├── peripheral.c          # GAP/GATT 服务、广播、连接管理、断连自动锁闸门、未授权30s超时
+│       │   ├── keygo_core.c          # 业务核心（RSSI状态机/Kalman/命令执行/绑定/双模式/RIDE双脉冲/配置持久化）
+│       │   ├── bonding.c             # 绑定/配对（Just Works；GAPBOND_PERI_BONDING_ENABLED）
+│       │   ├── crypto_sha256.c       # 自研 SHA256（WCH 库无 SHA/HMAC/HWRNG）
+│       │   ├── peripheral_main.c     # main() + WWDG 软看门狗
+│       │   └── include/
+│       │       ├── appearance.h      # 广播/外观
+│       │       ├── bonding.h
+│       │       ├── crypto_sha256.h
+│       │       ├── keygo_core.h      # 业务常量/偏移（MODE_ADDR 等）/ extern 声明
+│       │       └── peripheral.h      # TMOS 事件位分配（★ 新增事件位必须核对无冲突）
+│       ├── HAL/                       # LED、按键等硬件抽象
+│       └── Profile/                   # Battery / DeviceInfo / GATT 服务实现
 │
-└── docs/                          # 设计文档 & 复盘（已按主题分类，见 docs/README.md 索引）
-    ├── 01-项目规划与立项/          # 项目规划、立项书、硬件方案、市场对比
-    ├── 02-技术方案与专项设计/      # 电池 Service、安全加固规划、智能重连模式设计
-    └── 03-复盘与问题分析/          # 版本总结、专题分析、BLE 连接/扫描复盘
+└── docs/                             # 设计文档 & 复盘（详见 docs/README.md 索引）
+    ├── 01-项目规划与立项/            # 项目规划、立项书、硬件方案、市场对比
+    ├── 02-技术方案与专项设计/        # 电池 Service、安全加固规划、智能重连模式设计
+    ├── 03-复盘与问题分析/            # 版本总结、专题分析、BLE 连接/扫描复盘
+    ├── 自己看/                       # 个人随笔
+    ├── Phase2_UI打磨与双模式兼容设计.md
+    ├── KeyGo_v3.32.2_实现状态与待办核对.md   # ✅已落地 / 🔲未实现(T1~T11) / ⚠️已知偏差 台账
+    ├── KeyGo_v3.33_实现状态与待办核对.md
+    ├── 加密绑定优化方案设计.md
+    ├── 已验证事实_安全模型实测与纠偏.md
+    ├── Codex接手指南_已完成与待办.md
+    ├── Android离线打包与插件集成checklist.md
+    ├── Android屏幕检测方案参考.md
+    └── 绑定安全设计与码长方案.md
 ```
 
 ---
@@ -203,22 +293,24 @@ KeyGo/
 - 用 Arduino IDE 打开 `.ino` 文件即可编译烧录
 - ESP32C3 完成了全部核心功能的原型验证，v3.13 后主线迁移到 CH582M
 
-**计划移植**：nRF528xx（Nordic nRF5 SDK / Zephyr）等其他 BLE MCU/SOC，欢迎贡献。
+**计划移植**：nRF528xx（Nordic nRF5 SDK / Zephyr）等其他 BLE MCU/SOC `[待完成]`，欢迎贡献。
 
 ### App
 
 1. 用 **HBuilderX** 打开 `app/BLE_Key_Go_App`
 2. 运行到 Android 真机（需开启开发者模式 + USB 调试）
-3. 授予蓝牙、定位、通知权限
-4. 打开 App → 扫描 KeyGo 设备 → 连接 → 控制 / 配置
+3. 原生插件（前台服务）**必须用「自定义调试基座」或「离线打包」**构建，标准基座不生效
+4. 授予蓝牙、定位、通知权限
+5. 打开 App → 扫描 KeyGo 设备 → 连接 → 控制 / 配置 / 绑定
 
-AndroidManifest 已声明权限：蓝牙、定位（含后台定位，仅极速模式需要）、前台服务、通知、电池优化豁免请求。
+> ⚠️ **原生插件改动铁律**：改 `_build/source/*.java` 重编 `android/keygo-foreground.aar` 后，必须 ① `manifest.json` 的 `versionCode` +1；② 重新制作自定义调试基座并重装；③ 标准基座不支持原生插件。否则 HBuilderX 缓存旧基座，新 aar 永远上不了手机。
 
 ### 快速自检
 
 1. 固件上电，手机蓝牙扫描应能看到 `KeyGo-XXXXXX`
 2. App 连接成功后，`FF02` 应持续推送 RSSI 状态 JSON
 3. 靠近/远离设备，RSSI 应相应变化（越近数值越大，如 -30 > -60）
+4. 绑定后断连重连，应在「保护范围内」自动完成 AUTH（诊断区显示「已通过 AUTH」）
 
 ---
 
@@ -235,9 +327,38 @@ v3.16 软看门狗（WWDG 2.5s 超时复位，防固件卡死）
 v3.22 电池优化豁免引导（对抗 Android 系统后台查杀）
 v3.23 智能重连三种模式框架（极速/舒适/省电）
   └─ v1.0.1 舒适模式重构：定时轮询 → 亮屏触发，零后台 polling
-v3.24 三种重连模式更名（省电 → 手动）+ 固件自动锁开关（autolock）：手动模式下发 autolock=0 关闭 RSSI 自动锁
-v3.31 App：RSSI 显示层节流联动固件采样间隔 + 回前台保留旧值 + 确认次数→时间换算提示（详见「FF02 显示层 vs 固件内部运行逻辑」）
+v3.24 三种重连模式更名（省电 → 手动）+ 固件自动锁开关（autolock）
+v3.31 App：RSSI 显示层节流联动 + 回前台保留旧值 + 确认次数→时间换算；FF02 上报确认进度（方案B）
+v3.32.0 安全：先配对再 BIND + HMAC 挑战应答恢复（commit 77c6806）
+v3.32.1 GATT 加密门控（已回退，待 Phase 4 重做）
+v3.32.2-fix 手动模式断连不自动锁 + 帮助页重构(login→help, 合并上手向导)（commit 6a61787）
+  └─ workbuddy 分支增量：①手动模式重启后自动验证绑定 ②手动模式禁用断连自动锁(UI) ③绑定页固件版本文案修正 + 主按钮禁用态美化
 ```
+
+---
+
+## 下阶段规划（Next Phase）
+
+> 本版（workbuddy 分支，主线 `main`）目标已达成：**【此版可用 优化逻辑 美化UI】**。下一阶段聚焦连接可靠性与加密。
+
+### Phase 3：连接可靠性增强 `[待完成]`
+- `command-queue.js` GATT 写队列已落地（防 `_cmdBusy`/`_configWriteBusy` 抢通道 → GATT_BUSY），继续增强：
+  - 配置项 `uc/lc/阈值` 持久化修复（仅 cooldown 变化才落盘的问题）
+  - App 重连后自动回推配置（注释声称但未实际调用）
+  - `dormant` 跨重启持久化（手动断开 = 跨重启都不自动连）
+  - 极偶发：CH582M 未连接但 App 扫描不到（疑似固件停广播 / 国产 ROM 扫描栈静默失败 / `_coolingDown` 永久持有）
+
+### Phase 4：GATT 加密门控（重做） `[待完成]`
+- 重做 v3.32.1 被回退的 FF01/FF02-CCCD/FF03 加密门控，修复「配对后补订 FF02 订阅时序」问题
+- 认证配对 Passkey = 绑定码（需先验证 CH582 SMP 支持「无头设备 + 固定 passcode + mitm=1 不回退 Just Works」）
+- 目标：未配对连接连读都读不了，且「已配对者 RSSI 解锁」缺口收口
+
+### 其他待办 `[待完成]`
+- 绑定码强制改、多管理员、设备模式管理员锁定
+- AUTH 失败限流
+- iOS 支持（前台服务/亮屏广播原生插件仅 Android）
+- nRF528xx 移植
+- `login/` 遗留页面清理
 
 ---
 
@@ -256,14 +377,16 @@ v3.31 App：RSSI 显示层节流联动固件采样间隔 + 回前台保留旧值
 
 完整文档已按主题分类，详见 [`docs/README.md`](docs/README.md) 总索引。精选：
 
-- **智能重连**：`docs/02-技术方案与专项设计/KeyGo_v3.23_智能重连模式设计v1.0.1.md`（最新）/ `v1.0.0.md`（旧版备份）
-- **安全加固规划**：`docs/02-技术方案与专项设计/KeyGo_安全加固与加密规划_v1.0.0.md` ⚠️ 当前最高优先级
+- **实现状态台账**：`docs/KeyGo_v3.32.2_实现状态与待办核对.md` / `docs/KeyGo_v3.33_实现状态与待办核对.md`（✅已落地 / 🔲未实现 / ⚠️已知偏差）
+- **智能重连**：`docs/02-技术方案与专项设计/KeyGo_v3.23_智能重连模式设计v1.0.1.md`
+- **安全加固规划**：`docs/02-技术方案与专项设计/KeyGo_安全加固与加密规划_v1.0.0.md`
+- **加密绑定优化**：`docs/加密绑定优化方案设计.md`
+- **已验证事实**：`docs/已验证事实_安全模型实测与纠偏.md`
+- **Codex 接手指南**：`docs/Codex接手指南_已完成与待办.md`
+- **双模式设计**：`docs/Phase2_UI打磨与双模式兼容设计.md`
 - **后台保活**：`docs/03-复盘与问题分析/KeyGo_v3.22_电池优化豁免机制详解.md`
 - **BLE 稳定性**：`docs/03-复盘与问题分析/BLE连接稳定性问题复盘_v2.2.md` / `BLE扫描_设备发现机制复盘_v2.2.md`
 - **硬件**：`docs/01-项目规划与立项/BLE车钥匙_舒适进入_硬件方案设计.md`
-- **电池**：`docs/02-技术方案与专项设计/KeyGo_Battery_Service_实施方案.md` / `docs/03-复盘与问题分析/KeyGo_v3.14_18650电池电压检测方案.md`
-- **看门狗**：`docs/03-复盘与问题分析/KeyGo_v3.16_看门狗方案分析.md`
-- **项目规划**：`docs/01-项目规划与立项/BLE车钥匙_舒适进入_项目立项书.md` / `BLE_Key_Go_项目规划.md`
 
 ---
 

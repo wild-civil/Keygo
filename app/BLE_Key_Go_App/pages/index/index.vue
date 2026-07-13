@@ -202,9 +202,9 @@
         <text class="action-icon">🔒</text>
         <text class="action-text">锁车</text>
       </button>
-      <button class="action-btn trunk-btn" @tap="handleTrunk">
-        <text class="action-icon">🚗</text>
-        <text class="action-text">后备箱</text>
+      <button class="action-btn" :class="thirdAction.cls" @tap="thirdAction.handler">
+        <text class="action-icon">{{ thirdAction.icon }}</text>
+        <text class="action-text">{{ thirdAction.text }}</text>
       </button>
     </view>
 
@@ -580,6 +580,23 @@ async function handleTrunk() {
     toast.error('发送失败')
   }
 }
+
+async function handleRide() {
+  try {
+    await bleStore.ride()
+    toast.success('骑行指令已发送')
+  } catch {
+    toast.error('发送失败')
+  }
+}
+
+// ★ Phase 2: 连接页第三键按设备模式驱动（car=后备箱 / ebike=骑行）
+const thirdAction = computed(() => {
+  if (bleStore.deviceMode === 'ebike') {
+    return { icon: '🛵', text: '骑行', handler: handleRide, cls: 'ride-btn' }
+  }
+  return { icon: '🚗', text: '后备箱', handler: handleTrunk, cls: 'trunk-btn' }
+})
 
 // ==================== 设备名称 ====================
 
@@ -998,6 +1015,7 @@ async function handleSetName() {
 .unlock-btn { border-color: var(--alpha-27); }
 .lock-btn { border-color: var(--orange-alpha-27); }
 .trunk-btn { border-color: var(--green-alpha-27); }
+.ride-btn { border-color: var(--accent); }
 
 /* ===== 断开连接 ===== */
 .disconnect-section {
