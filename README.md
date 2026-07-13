@@ -1,5 +1,7 @@
 # KeyGo · 钥启程 （BLE 智能车钥匙）
 
+> English version: [README_EN.md](README_EN.md)
+
 > 一个基于 BLE 的车钥匙替代方案：用手机 App 连接 BLE MCU/SOC 固件模块，通过 RSSI 距离判断实现「走近解锁、走远锁车」的舒适进入体验；并支持与设备做**真实绑定鉴权**（绑定码 + HMAC 挑战应答），不再是裸连即开。
 
 **两大部分**：
