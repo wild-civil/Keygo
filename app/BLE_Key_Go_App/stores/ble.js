@@ -2885,9 +2885,10 @@ export const useBleStore = defineStore('ble', {
 
     async sendCommand(command) {
       if (!this.deviceId) throw new Error('未连接设备')
-      // ★ 阶段1(明文绑定): 控制类指令仅要求本连接已完成 BIND（sessionAuthed 由 BIND:OK 置位），
-      //   暂不走 NONCE/AUTH 加密握手。阶段3 恢复 ensureSession() 调用。
-      //   （原函数 ensureSession / _authWithKey 保留未删，阶段3 取消注释即可恢复加密路径。）
+      // ★ 控制类指令要求本连接已完成会话鉴权（sessionAuthed 由 BIND:OK 或 AUTH:OK 置位；
+      //   重连时由 _maybeAutoAuth→ensureSession 经 NONCE→AUTH 的 HMAC 挑战应答自动重建）。
+      //   指令本身经 C1 签名（per-command HMAC + 会话盐 + 自增序号）防重放，
+      //   固件 Peripheral_HandleFF03→Bonding_VerifySignedCmd 校验；未签名一律 CMD:FAIL:NO_SIG。
       if (!/^(BIND:|AUTH:|NONCE|UNBIND|SETCODE:)/.test(command)) {
         if (!this.sessionAuthed) {
           const e = new Error('设备未绑定，请先绑定')
@@ -3068,11 +3069,7 @@ export const useBleStore = defineStore('ble', {
         if (_bokParts.length >= 3) _sessionSalt = _bokParts[2]
         _cmdSeq = 0
         _resolveWaiter('BIND', true)
-        // ★ 方案A（2026-07-12）：BIND 成功后发起 BLE 配对（bond）。
-        //   配对完成后 LTK 存 OS KeyStore + 固件 SNV，
-        //   此后 OS 自动在每次重连时加密链路（无需 App 进程），
-        //   RSSI 自动解锁的 LINK_ENCRYPTED 闸门自动放行 → 走近即开。
-        this._triggerBond()
+        // ★ 配对(bond)已前置到 bindDevice 发 BIND 之前（见 ① 先配对再 BIND），此处不再触发。
       } else if (text.startsWith('BIND:FAIL')) {
         if (text.includes('ALREADY_BOUND')) {
           // ★ 设备已有 owner，提供的码不匹配当前有效码：必须先接管/解绑，再用『修改绑定码』切换
@@ -3148,24 +3145,33 @@ export const useBleStore = defineStore('ble', {
      * 非阻塞：配对失败不影响绑定已成功（仅暂时无法享受"走近自动解锁"，
      * 仍可通过 App 手动操控。配对成功后会记 log 方便排查）。
      */
-    async _triggerBond() {
-      if (!this.deviceId) return
-      try {
-        const fg = uni.requireNativePlugin('Keygo-Foreground')
-        if (!fg) {
-          console.warn('[Bond] 原生插件不可用，跳过硬连接配对')
-          return
+    /**
+     * ★ 方案A + ①(2026-07-13)：BIND 之前先发起 BLE 配对(bond)，返回 Promise<{ok,message}>。
+     * 配对完成后链路加密，之后发送的 BIND:code 即为密文（堵明文嗅探，见 docs/...F3）。
+     * 内部带超时（默认 8s），超时或失败均 resolve 而非 reject，由调用方决定是否降级。
+     */
+    _triggerBond(timeoutMs = 8000) {
+      return new Promise((resolve) => {
+        if (!this.deviceId) return resolve({ ok: false, message: '无 deviceId' })
+        let settled = false
+        const finish = (res) => {
+          if (!settled) { settled = true; resolve(res || { ok: false, message: '无回传' }) }
         }
-        fg.createBond({ mac: this.deviceId }, (res) => {
-          if (res && res.ok) {
-            console.log('[Bond] ✅ BLE 配对成功，此后重连自动加密（走近自动解锁）')
-          } else {
-            console.warn('[Bond] ⚠️ BLE 配对未完成', res && res.message)
-          }
-        })
-      } catch (e) {
-        console.warn('[Bond] 配对调用异常（非阻塞）:', e)
-      }
+        let timer = null
+        try {
+          const fg = uni.requireNativePlugin('Keygo-Foreground')
+          if (!fg) return finish({ ok: false, message: '原生插件不可用' })
+          // 超时兜底：防止部分 ROM 静默丢弃配对导致 Promise 永久挂起
+          timer = setTimeout(() => finish({ ok: false, message: '配对超时' }), timeoutMs)
+          fg.createBond({ mac: this.deviceId }, (res) => {
+            if (timer) clearTimeout(timer)
+            finish(res)
+          })
+        } catch (e) {
+          if (timer) clearTimeout(timer)
+          finish({ ok: false, message: String((e && e.message) || e) })
+        }
+      })
     },
 
     /** 从本地存储恢复 bindKey；存在则置 isBound=true */
@@ -3227,6 +3233,16 @@ export const useBleStore = defineStore('ble', {
       console.log('[BIND] === 开始绑定 === fwVersion=', JSON.stringify(this.fwVersion),
                   ' sn=', sn, ' 已持有本地key=', !!_bindKey, ' isBound=', this.isBound)
 
+      // ★ ①(2026-07-13) 先配对(bond)再发 BIND：配对完成后链路加密，
+      //   随后 BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞（见 docs/已验证事实_安全模型实测与纠偏.md F3）。
+      const bondRes = await this._triggerBond()
+      if (bondRes && bondRes.ok) {
+        console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
+      } else {
+        console.warn('[BIND] ⚠ 配对未完成（', (bondRes && bondRes.message) || '未知', '），绑定码将以明文传输',
+          '（若设备此前已配对过则链路本身已加密，仍安全）')
+      }
+
       // 0) ★ 先注册 BIND waiter（关键修复：消除"固件回包早于 waiter 注册"的竞态）。
       //    旧逻辑先写 BIND 再 _waitBind，若固件回包极快可能错过；提前注册 waiter 更稳。
       //    ★ 2026-07-11: 超时 1200→2500ms，吸收观察到的 FF02 通知延迟（固件回包经延迟任务
@@ -3249,23 +3265,16 @@ export const useBleStore = defineStore('ble', {
 
       let bound = (bindOk === true)
 
-      // 3) ★ 阶段1(明文绑定): 注释掉加密兜底握手，隔离加密变量。
-      //    若 BIND:OK 没拿到就直接 bound=false，让失败提示反映真实情况，不再偷偷走 AUTH。
-      //    （原函数 _authWithKey 保留未删，阶段3 取消注释即可恢复：
-      //     if (!bound) {
-      //       await new Promise(r => setTimeout(r, 250))
-      //       bound = await this._authWithKey(key)
-      //       if (bound) console.log('[Store] BIND:OK 未收到，但 AUTH 握手成功 → 确证绑定已生效')
-      //     }
-      //    ）
-      // if (!bound) {
-      //   // 给固件一点时间完成 BIND 处理 + Flash 写入
-      //   await new Promise(r => setTimeout(r, 250))
-      //   bound = await this._authWithKey(key)
-      //   if (bound) {
-      //     console.log('[Store] 🔒 BIND:OK 未收到，但 AUTH 握手成功 → 确证绑定已生效（BIND:OK 可能丢包）')
-      //   }
-      // }
+      // 3) ★ ②(2026-07-13) 恢复 HMAC 挑战应答兜底：BIND:OK 未达时，
+      //    用 NONCE→AUTH(HMAC) 确证绑定已生效，防 BIND:OK 丢包导致"绑上却显示失败"。
+      if (!bound) {
+        // 给固件一点时间完成 BIND 处理 + Flash 写入
+        await new Promise(r => setTimeout(r, 250))
+        bound = await this._authWithKey(key)
+        if (bound) {
+          console.log('[Store] 🔒 BIND:OK 未收到，但 AUTH 握手成功 → 确证绑定已生效（BIND:OK 可能丢包）')
+        }
+      }
 
       _bindInProgress = false
 
@@ -3378,18 +3387,15 @@ export const useBleStore = defineStore('ble', {
         if (!_bindKey) {
           const e = new Error('设备未绑定，请先绑定'); e.code = 'NOT_BOUND'; throw e
         }
-        // ★ 阶段1(明文绑定): 注释掉改码前置的 NONCE→AUTH 加密握手（3078-3089 原逻辑）。
-        //   本次会话已因 BIND 置位 sessionAuthed，固件 s_sessionAuthed 亦满足 SETCODE 前置，
-        //   无需再 AUTH。原函数 _authWithKey 保留未删，阶段3 取消注释即可恢复：
-        //   const authed = await this._authWithKey(_bindKey)
-        //   if (!authed) { const e = new Error('无法验证当前绑定码，请先用「当前绑定码」重新绑定'); e.code='AUTH_FAIL'; throw e }
+        // ★ ②(2026-07-13) 恢复 HMAC 前置校验：改码前先 NONCE→AUTH 证明持有当前绑定码，
+        //   防止"会话已失效却仍能改码"的边界。失败即拒绝，由用户先用当前码重绑。
+        const authed = await this._authWithKey(_bindKey)
+        if (!authed) {
+          const e = new Error('无法验证当前绑定码，请先用「当前绑定码」重新绑定')
+          e.code = 'AUTH_FAIL'
+          throw e
+        }
         _lastBindRaw = ''   // ★ 清空陈旧回包，使失败提示只反映本次操作（避免误显旧 BIND:OK）
-        // const authed = await this._authWithKey(_bindKey)
-        // if (!authed) {
-        //   const e = new Error('无法验证当前绑定码，请先用「当前绑定码」重新绑定')
-        //   e.code = 'AUTH_FAIL'
-        //   throw e
-        // }
         this.sessionAuthed = true
         const p = _waitFor('SETCODE')
         let done = false
