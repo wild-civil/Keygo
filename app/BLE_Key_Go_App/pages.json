@@ -25,7 +25,7 @@
       }
     },
     {
-      "path": "pages/login/login",
+      "path": "pages/help/help",
       "style": {
         "navigationBarTitleText": "帮助"
       }

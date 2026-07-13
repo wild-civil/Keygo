@@ -7,32 +7,48 @@
       <text class="login-subtitle">使用帮助 · v3.32.2</text>
     </view>
 
-    <!-- 快速上手卡片 -->
+    <!-- ★ v3.32.2-fix: 快速上手 + 首次绑定向导 合并为一张卡 -->
     <view class="login-card">
-      <text class="card-title">📖 快速上手</text>
+      <text class="card-title">🚀 快速上手（首次绑定）</text>
 
       <view class="guide-steps">
         <view class="guide-step">
           <text class="step-num">1</text>
           <view class="step-content">
-            <text class="step-title">连接设备</text>
-            <text class="step-desc">打开「连接」页 → 扫描 → 点击你的 KeyGo 设备</text>
+            <text class="step-title">开蓝牙 + 定位</text>
+            <text class="step-desc">系统蓝牙开启，并授予 App「始终允许」定位权限（后台扫描重连需要）</text>
           </view>
         </view>
 
         <view class="guide-step">
           <text class="step-num">2</text>
           <view class="step-content">
-            <text class="step-title">绑定钥匙</text>
-            <text class="step-desc">输入绑定码 <text class="highlight">123456</text>（默认）→ 系统自动配对 → App 完成密钥验证</text>
+            <text class="step-title">连接设备</text>
+            <text class="step-desc">前往「连接」页扫描，点击你的 KeyGo 设备</text>
           </view>
         </view>
 
         <view class="guide-step">
           <text class="step-num">3</text>
           <view class="step-content">
+            <text class="step-title">选择设备模式</text>
+            <text class="step-desc">汽车（解锁/锁车/后备箱）或电瓶车（解锁/锁车/骑行），可在「控制」页底部随时切换</text>
+          </view>
+        </view>
+
+        <view class="guide-step">
+          <text class="step-num">4</text>
+          <view class="step-content">
+            <text class="step-title">输入绑定码</text>
+            <text class="step-desc">默认 <text class="highlight">123456</text>（建议首次绑定后修改）→ 手机弹出系统配对框 → 配对成功 → App 自动完成密钥验证</text>
+          </view>
+        </view>
+
+        <view class="guide-step">
+          <text class="step-num">5</text>
+          <view class="step-content">
             <text class="step-title">当钥匙用</text>
-            <text class="step-desc">返回「控制」页解锁 / 锁车；手机靠近自动连接，无需操作</text>
+            <text class="step-desc">返回「控制」页解锁 / 锁车；自动/极速模式手机靠近自动连接，手动模式需手动点按</text>
           </view>
         </view>
       </view>
@@ -121,19 +137,6 @@
         当前生效：{{ themeStore.isDark ? '🌙 深色模式' : '☀️ 浅色模式' }}
         <text v-if="themeStore.mode === 'auto'">（跟随系统）</text>
       </text>
-    </view>
-
-    <!-- ★ Phase 2: 首次绑定向导 -->
-    <view class="login-card" style="margin-top: 24rpx;">
-      <text class="card-title">🔗 首次绑定向导（6 步）</text>
-      <view class="guide-steps">
-        <view class="guide-step"><text class="step-num">1</text><view class="step-content"><text class="step-title">开蓝牙 + 定位</text><text class="step-desc">系统蓝牙开启，并授予 App「始终允许」定位权限（后台扫描重连需要）</text></view></view>
-        <view class="guide-step"><text class="step-num">2</text><view class="step-content"><text class="step-title">扫描并选择设备</text><text class="step-desc">前往「连接」页扫描，点击你的 KeyGo 设备</text></view></view>
-        <view class="guide-step"><text class="step-num">3</text><view class="step-content"><text class="step-title">选择设备模式</text><text class="step-desc">汽车（解锁/锁车/后备箱）或电瓶车（解锁/锁车/骑行），可在「控制」页底部随时切换</text></view></view>
-        <view class="guide-step"><text class="step-num">4</text><view class="step-content"><text class="step-title">输入绑定码</text><text class="step-desc">默认 <text class="highlight">123456</text>（建议首次绑定后修改）。点击「一键默认码绑定」可快速绑定</text></view></view>
-        <view class="guide-step"><text class="step-num">5</text><view class="step-content"><text class="step-title">自动配对 + 验证</text><text class="step-desc">手机弹出系统配对框 → 配对成功 → App 自动完成密钥验证</text></view></view>
-        <view class="guide-step"><text class="step-num">6</text><view class="step-content"><text class="step-title">完成</text><text class="step-desc">返回「控制」页即可用手机当钥匙</text></view></view>
-      </view>
     </view>
 
     <!-- ★ Phase 2: 设备模式说明 -->

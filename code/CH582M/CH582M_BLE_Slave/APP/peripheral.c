@@ -640,16 +640,22 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
          *   重连成功后由 Peripheral_LinkEstablished 取消此定时器
          *   定时器到期时若仍断连则执行锁车 */
         if (g_keyState == KSTATE_UNLOCKED) {
-            uint16_t dlockTicks = KeyGo_GetDisconnectLockTicks();
-            if (dlockTicks > 0) {
-                PRINT("[SAFETY] disconnected unlocked, scheduling auto lock in %lums\n",
-                      (unsigned long)g_cfgDisconnectLockMs);
-                tmos_start_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT, dlockTicks);
+            // ★ v3.32.2-fix: 手动模式(autolock=0)完全不自动锁车，连断连场景也不锁
+            //   此前仅 RSSI 状态机受 autolock 闸门保护，断连自动锁未受控，导致手动模式
+            //   下设备解锁后断连仍会在 dlock 后自动上锁，与「完全手动：也不自动锁车」矛盾。
+            if (g_cfgAutoLockEnable) {
+                uint16_t dlockTicks = KeyGo_GetDisconnectLockTicks();
+                if (dlockTicks > 0) {
+                    PRINT("[SAFETY] disconnected unlocked, scheduling auto lock in %lums\n",
+                          (unsigned long)g_cfgDisconnectLockMs);
+                    tmos_start_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT, dlockTicks);
+                } else {
+                    // ★ v3.32.2-fix: dlock==0 表示「不自动锁车」（与配置页 UI 文案一致），
+                    //   不再立即锁车（旧行为会误锁）。重连成功由 LinkEstablished 取消定时器。
+                    PRINT("[SAFETY] dlock==0, skip auto lock on disconnect\n");
+                }
             } else {
-                // dlockMs==0 → 立即锁车（传统行为，向后兼容）
-                PRINT("[SAFETY] disconnected while unlocked, auto lock\n");
-                KeyGo_Lock();
-                g_keyState = KSTATE_LOCKED;
+                PRINT("[SAFETY] manual mode (autolock=0), skip disconnect auto lock\n");
             }
         }
 

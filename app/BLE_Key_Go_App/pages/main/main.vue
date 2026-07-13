@@ -25,7 +25,8 @@
       </swiper-item>
       <swiper-item>
         <scroll-view scroll-y class="swiper-scroll">
-          <LoginPage />
+          <HelpPage />
+
         </scroll-view>
       </swiper-item>
     </swiper>
@@ -57,7 +58,7 @@ import { useThemeStore } from '@/stores/theme.js'
 import IndexPage from '@/pages/index/index.vue'
 import ControlPage from '@/pages/control/control.vue'
 import ConfigPage from '@/pages/config/config.vue'
-import LoginPage from '@/pages/login/login.vue'
+import HelpPage from '@/pages/help/help.vue'
 import DebugFloatPanel from '@/components/DebugFloatPanel.vue'
 import { DEV_PANEL_ENABLED } from '@/utils/debug-panel.js'
 
@@ -69,7 +70,7 @@ const tabs = [
   { icon: '📡', name: '连接', path: '/pages/index/index' },
   { icon: '🎮', name: '控制', path: '/pages/control/control' },
   { icon: '⚙️', name: '配置', path: '/pages/config/config' },
-  { icon: '❓', name: '帮助', path: '/pages/login/login' },
+  { icon: '❓', name: '帮助', path: '/pages/help/help' },
 ]
 
 const tabIndex = ref(0)
