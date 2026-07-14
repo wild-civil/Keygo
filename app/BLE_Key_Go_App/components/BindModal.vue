@@ -242,11 +242,30 @@ async function handleUnbind(all) {
   uni.showModal({
     title: all ? '恢复出厂设置？' : '解绑本机？',
     content: all
-      ? '将清除设备的全部绑定记录，所有手机都需重新绑定后才能控车。'
+      ? '将清除设备的全部绑定记录，所有手机都需重新绑定后才能控车。此操作需验证当前绑定码。'
       : '本机将失去对该设备的控制权，之后需重新输入绑定码才能控车。',
     confirmText: '确认',
     success: async (res) => {
       if (!res.confirm) { unbindAll.value = false; return }
+      // ★ 2026-07-14 安全：恢复出厂(UNBIND:ALL)是破坏性操作，强制先输入当前绑定码，
+      //   即使本机已持有密钥（如他人临时拿到手机）也无法直接清空信任列表，
+      //   须与「修改绑定码」同级身份核验。仅恢复出厂需要；解绑本机沿用既有 AUTH 即可。
+      if (all) {
+        const entered = await new Promise((resolve) => {
+          uni.showModal({
+            title: '验证绑定码',
+            content: '请输入当前绑定码以确认恢复出厂',
+            editable: true,
+            placeholderText: '当前绑定码',
+            confirmText: '确认',
+            success: (r) => resolve(r.confirm ? (r.content || '').trim() : null)
+          })
+        })
+        if (entered === null) { unbindAll.value = false; return }   // 取消
+        if (!entered) { toast.error('请输入绑定码'); unbindAll.value = false; return }
+        const verified = await bleStore.verifyBindCode(entered)
+        if (!verified) { toast.error('绑定码错误，无法恢复出厂'); unbindAll.value = false; return }
+      }
       unbinding.value = true
       try {
         const ok = await bleStore.unbindDevice(all)

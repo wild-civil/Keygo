@@ -1,6 +1,6 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : peripheral.c
- * Author             : KeyGo v3.13 (CH582M)
+ * Author             : KeyGo v3.33.0 (CH582M)
  * Date               : 2026/07/02
  * Description        : BLE Key-Go 主程序 — 全局状态 + 初始化 + 事件循环 + 连接回调
  *
@@ -289,7 +289,7 @@ void Peripheral_Init(void)
     // 启动
     tmos_set_event(Peripheral_TaskID, SBP_START_DEVICE_EVT);
 
-    PRINT("==== KEYGO v3.13 (CH582M) ====\n");
+    PRINT("==== KEYGO %s (CH582M) ====\n", KEYGO_FW_VERSION);
 }
 
 /*********************************************************************

@@ -183,6 +183,7 @@ export const useBleStore = defineStore('ble', {
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
     _lastCmdAt: 0,               // 上次命令发起时间戳(ms)，用于最小间隔节流
     _configWriteBusy: false,      // 配置写下发在途（串行化，避免并发写特征值）
+    _configSyncPending: false,    // ★ v3.33.0: 配置回推待补发标志（在途时收到再次请求则落地后补发，防抢跑丢配置）
     _modeDebounceTimer: null,     // 模式切换防抖定时器
 
 
@@ -2100,8 +2101,11 @@ export const useBleStore = defineStore('ble', {
       if (!this.deviceId || !this.connected) return
       // ★ v3.27: 串行化——若已有配置写下发在途，跳过本次（最终态由调用方保证再触发一次）。
       //   防止模式切换/提交配置并发写同一特征值导致 GATT busy 丢命令。
+      // ★ v3.33.0: 在途时不再静默丢弃，而是置 _configSyncPending，等本次写完成（finally）后补发，
+      //   确保「重连抢跑失败 / 并发」场景最终态一定写下去（T4 断电重启回推不丢）。
       if (this._configWriteBusy) {
-        console.log('[Store] 配置写下发中，跳过本次 _syncConfigToDevice')
+        console.log('[Store] 配置写下发中，标记待补发 _syncConfigToDevice')
+        this._configSyncPending = true
         return
       }
       this._configWriteBusy = true
@@ -2124,6 +2128,12 @@ export const useBleStore = defineStore('ble', {
         console.warn('[Store] 配置下发失败:', e?.message || e)
       } finally {
         this._configWriteBusy = false
+        // ★ v3.33.0: 若在途期间又来过一次回推请求，本次落地后立即补发，保证最终态一致
+        if (this._configSyncPending) {
+          this._configSyncPending = false
+          console.log('[Store] 补发配置回推（在途期间累计请求）')
+          this._syncConfigToDevice()
+        }
       }
     },
 
@@ -3109,6 +3119,11 @@ export const useBleStore = defineStore('ble', {
         //   持久化抑制标记，恢复后续自动重连（含 App 重启）。否则该标记一旦写入便
         //   永久屏蔽自动重连，导致正常 owner 在重烧固件/瞬时超时后无法自动重连（舒适模式失效）。
         this._clearUnboundKicked()
+        // ★ v3.33.0: AUTH 成功 = 安全通道已建立（链路加密 + 会话鉴权均就绪）。
+        //   重连时 _finalizeConnection 里的 _syncConfigToDevice 可能因 FF01 加密门控在链路加密前
+        //   抢跑失败，此处补发一次，确保断电重启后阈值被可靠回推（T4 核心）。
+        //   会话已建立 + 串行化(_configWriteBusy/_configSyncPending)保证不重复、不竞态。
+        this._syncConfigToDevice()
         B._sessionSalt = B._lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
         B._cmdSeq = 0
         _resolveWaiter('AUTH', true)
@@ -3287,6 +3302,17 @@ export const useBleStore = defineStore('ble', {
        *   下被浅通知队列丢弃）。改为「BIND 写入(串行队列) → 短等 BIND:OK → 兜底走 AUTH 握手」：
        *   BIND 成功后固件 s_bondCount=1，紧接着的 AUTH 握手必然成功 → 确证绑定生效。
        *   此路径不依赖 BIND:OK 是否送达，也不依赖重烧固件，彻底解决"6 秒超时绑不上"。 */
+      /* ★ 2026-07-14 方案a：已绑定设备「重绑失败」保持原信任不变。
+       *   捕获重绑前的信任态与密钥/会话盐，失败且本机原已绑定时回滚，
+       *   避免「输错码重绑」把 owner 的 isBound/sessionAuthed 误清成未绑定——
+       *   否则 OS 配对(bond)与本地 key 仍有效，设备侧 RSSI 仍能解锁、App 重启后
+       *   _restoreBindKey 又置回 true，形成「显失败却能用」的矛盾体验。 */
+      const _wasBound = !!(this.isBound || this.deviceBound)
+      const _prevKey = B._bindKey
+      const _prevSalt = B._sessionSalt
+      const _prevSeq = B._cmdSeq
+      const _prevNonce = B._lastNonce
+
       B._bindInProgress = true
       B._bindKey = null
       this.isBound = false
@@ -3357,9 +3383,20 @@ export const useBleStore = defineStore('ble', {
         this.sessionAuthed = true
         this.bindHint = '绑定成功'
       } else {
-        this.bindHint = B._lastBindRaw
-          ? ('绑定失败，固件回包: ' + B._lastBindRaw)
-          : '绑定失败：BIND 写入后固件无回应（BIND:OK 与 AUTH 握手均未确认）'
+        // ★ 2026-07-14 方案a：已绑定设备本次重绑失败 → 保留原信任态，仅换提示语
+        if (_wasBound) {
+          B._bindKey = _prevKey
+          B._sessionSalt = _prevSalt
+          B._cmdSeq = _prevSeq
+          B._lastNonce = _prevNonce
+          this.isBound = true
+          this.sessionAuthed = true
+          this.bindHint = '绑定码错误，绑定关系保持不变'
+        } else {
+          this.bindHint = B._lastBindRaw
+            ? ('绑定失败，固件回包: ' + B._lastBindRaw)
+            : '绑定失败：BIND 写入后固件无回应（BIND:OK 与 AUTH 握手均未确认）'
+        }
       }
       return bound
       } finally { _release() }
