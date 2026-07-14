@@ -642,6 +642,14 @@ uint8_t Bonding_HandleUnbindCmd(uint16_t connHandle, const uint8_t *peerAddr, ui
     tmos_memset(s_sessionSalt, 0, BOND_NONCE_LEN);
     s_lastCmdSeq = 0;
     KeyGo_SendRawNotify("UNBIND:OK");
+    /* ★ v3.33.2 B3 fix: UNBIND 后信任列表为空 → 本连接变成"未绑定陌生人占槽"，
+     *   应重启未鉴权计时器，与新连接行为一致（30s 后强断防 DoS 占槽）。
+     *   之前 BIND/AUTH 成功时 CancelUnauthTimer 把 g_unauthConnStartMs 清零了，
+     *   UNBIND 后未重启 → 计时器永久 0 → 永不超时（用户实测：App 手动解绑后 30s+ 不断开，
+     *   必须重启 App 走新连接才被踢）。 */
+    if (s_bondCount == 0) {
+        g_unauthConnStartMs = Peripheral_GetSystemMs();
+    }
     return 0;
 }
 
