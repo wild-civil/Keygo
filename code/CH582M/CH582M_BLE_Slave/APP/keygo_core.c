@@ -227,7 +227,7 @@ void KeyGo_GPIO_Init(void)
 /* ─────────────────────────────────────────────────────────────────
  * ★ 长按恢复出厂 (隐藏按键 PB22/BOOT) — BLE 通知为主 + LED 为辅
  *
- *   【触发】PB22(BOOT) 被拉低(按钮接地) 持续 KEYGO_FR_HOLD_MS(默认 5000ms)。
+ *   【触发】PB22(BOOT) 被拉低(按钮接地) 持续 KEYGO_FR_HOLD_MS(默认 8000ms)。
  *   【前提】RST(PB23) 是硬件复位脚，**刻意不参与检测**——
  *          若按钮同时短接 RST，长按会误复位芯片导致无法累计 5s；
  *          仅在"按住按钮+上电/点按RST进入ISP"恢复路径上才有意义。
@@ -235,17 +235,19 @@ void KeyGo_GPIO_Init(void)
  *   【反馈】BLE 通知为主（RESET:ARM / RESET:HOLD:NN / RESET:CANCEL / RESET:OK），
  *          连接时手机 App 实时可见；LED 为辅（低功耗常态灭，按住时本地闪烁），
  *          即便断连不连手机也能靠 LED 确认。
- *   【安全】阈值 5s + 需持续按住（松开即取消），避免误触恢复出厂清掉绑定。
+ *   【安全】阈值 8s + 需持续按住（松开即取消），避免误触恢复出厂清掉绑定。
+ *   【LED 反馈】0~5s 灭(可自由松手取消) → 5~8s 慢闪(警示"再按住即复位") → ≥8s 快闪(复位已触发/完成确认)，即便断连不连手机也能靠 LED 确认。
  *   ★ 独立 TMOS 任务：自带 16 位事件空间，避免与 Peripheral 任务事件位冲突
  *     （Peripheral 任务的 16 个事件位已全部占用）。
  * ───────────────────────────────────────────────────────────────── */
 #ifndef KEYGO_FACTORY_RESET_PIN
 #define KEYGO_FACTORY_RESET_PIN    GPIO_Pin_22      // PB22 = BOOT (隐藏按键)
 #endif
-#define KEYGO_FR_HOLD_MS           5000             // 长按阈值(ms)
+#define KEYGO_FR_HOLD_MS           8000             // 长按阈值(ms)：持续按住 8s 才恢复出厂
+#define KEYGO_FR_SLOW_AT_MS        5000             // 5s 后开始慢闪(警示)，8s 后快闪(已完成)
 #define KEYGO_FR_POLL_TICKS        160              // ~100ms 轮询(1 tick≈0.625ms)
-#define KEYGO_FR_TOGGLE_SLOW_MS    500              // 慢闪半周期(进度<50%)
-#define KEYGO_FR_TOGGLE_FAST_MS    100              // 快闪半周期(进度≥50%)
+#define KEYGO_FR_TOGGLE_SLOW_MS    500              // 慢闪半周期(5~8s 警示)
+#define KEYGO_FR_TOGGLE_FAST_MS    100              // 快闪半周期(≥8s 复位确认)
 #define KEYGO_FR_CONFIRM_MS        600              // 到阈值后确认窗口(给 BLE 空口发 RESET:OK)
 
 #define KEYGO_FR_POLL_EVT          0x0001
@@ -317,13 +319,20 @@ static void KeyGo_FactoryReset_Poll(void)
         if      (pct >= 25 && pct < 50 && g_frLastPct < 25) { g_frLastPct = 25; KeyGo_FactoryReset_SendBle("RESET:HOLD:25"); }
         else if (pct >= 50 && pct < 75 && g_frLastPct < 50) { g_frLastPct = 50; KeyGo_FactoryReset_SendBle("RESET:HOLD:50"); }
         else if (pct >= 75 && pct < 100 && g_frLastPct < 75) { g_frLastPct = 75; KeyGo_FactoryReset_SendBle("RESET:HOLD:75"); }
-        /* LED 反馈：<50% 慢闪, ≥50% 快闪 */
-        uint8_t fast = (pct >= 50) ? 1 : 0;
-        if (fast != g_frFast) { g_frFast = fast; g_frLedNextMs = now; g_frLedOn = 0; }
-        if (now >= g_frLedNextMs) {
-            g_frLedOn ^= 1;
-            if (g_frLedOn) GPIOB_SetBits(GPIO_Pin_4); else GPIOB_ResetBits(GPIO_Pin_4);
-            g_frLedNextMs = now + (fast ? KEYGO_FR_TOGGLE_FAST_MS : KEYGO_FR_TOGGLE_SLOW_MS);
+        /* LED 反馈：0~5s 灭(可自由松手取消)；5~8s 慢闪(警示)；≥8s 快闪(复位已触发/完成确认) */
+        uint8_t fast = (held >= KEYGO_FR_HOLD_MS) ? 1 : 0;
+        uint8_t slow = (!fast && held >= KEYGO_FR_SLOW_AT_MS) ? 1 : 0;
+        if (!fast && !slow) {
+            /* 0~5s：保持 LED 灭，不闪烁 */
+            if (g_frLedOn) { g_frLedOn = 0; GPIOB_ResetBits(GPIO_Pin_4); g_frLedNextMs = now; }
+        } else {
+            uint8_t f = fast ? 1 : 0;
+            if (f != g_frFast) { g_frFast = f; g_frLedNextMs = now; g_frLedOn = 0; }
+            if (now >= g_frLedNextMs) {
+                g_frLedOn ^= 1;
+                if (g_frLedOn) GPIOB_SetBits(GPIO_Pin_4); else GPIOB_ResetBits(GPIO_Pin_4);
+                g_frLedNextMs = now + (f ? KEYGO_FR_TOGGLE_FAST_MS : KEYGO_FR_TOGGLE_SLOW_MS);
+            }
         }
         if (pct >= 100) {   // 阈值到达 → 进入确认窗口
             g_frState     = 2;
