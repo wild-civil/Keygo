@@ -80,21 +80,24 @@
         <template v-else-if="bleStore.thresholdZone === 1">
           <view class="progress-header">
             <text class="progress-label">🔓 解锁进度</text>
-            <text class="progress-value">{{ Math.min(bleStore.unlockProgress, bleStore.deviceUc) }}/{{ bleStore.deviceUc }}</text>
+            <!-- ★ v3.33.2 P1: 已解锁后固件计数器归零(ucnt=0)导致进度从 0 重新计数，
+                 但 LED 已亮、车已解锁 → 视觉矛盾。已解锁时定格 N/N 不再重计数。 -->
+            <text class="progress-value">{{ bleStore.isUnlocked ? bleStore.deviceUc : Math.min(bleStore.unlockProgress, bleStore.deviceUc) }}/{{ bleStore.deviceUc }}</text>
           </view>
           <view class="progress-bar-bg">
-            <view class="progress-bar-fill" :style="{ width: (bleStore.deviceUc > 0 ? Math.min(bleStore.unlockProgress, bleStore.deviceUc) / bleStore.deviceUc * 100 : 0) + '%' }"></view>
+            <view class="progress-bar-fill" :style="{ width: (bleStore.isUnlocked ? 100 : (bleStore.deviceUc > 0 ? Math.min(bleStore.unlockProgress, bleStore.deviceUc) / bleStore.deviceUc * 100 : 0)) + '%' }"></view>
           </view>
         </template>
 
         <!-- 锁车区 -->
+        <!-- ★ v3.33.2 P1: 已锁车后固件计数器归零→进度重计，与 LED 已灭矛盾。已锁时定格 N/N。 -->
         <template v-else>
           <view class="progress-header">
             <text class="progress-label">🔒 锁车进度</text>
-            <text class="progress-value lock">{{ Math.min(bleStore.lockProgress, bleStore.deviceLc) }}/{{ bleStore.deviceLc }}</text>
+            <text class="progress-value lock">{{ bleStore.deviceState === 'LOCKED' ? bleStore.deviceLc : Math.min(bleStore.lockProgress, bleStore.deviceLc) }}/{{ bleStore.deviceLc }}</text>
           </view>
           <view class="progress-bar-bg">
-            <view class="progress-bar-fill lock" :style="{ width: (bleStore.deviceLc > 0 ? Math.min(bleStore.lockProgress, bleStore.deviceLc) / bleStore.deviceLc * 100 : 0) + '%' }"></view>
+            <view class="progress-bar-fill lock" :style="{ width: (bleStore.deviceState === 'LOCKED' ? 100 : (bleStore.deviceLc > 0 ? Math.min(bleStore.lockProgress, bleStore.deviceLc) / bleStore.deviceLc * 100 : 0)) + '%' }"></view>
           </view>
         </template>
 
