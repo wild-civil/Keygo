@@ -2845,6 +2845,10 @@ export const useBleStore = defineStore('ble', {
         if (!bound && (B._bindKey !== null || this.isBound)) {
           console.log('[Store] 🔄 设备端已解绑(bn=0)但本机仍有密钥 → 判定设备被复位，忘记本地密钥')
           this._forgetDeviceKey('设备已恢复出厂或已解绑，本机密钥失效，请重新绑定')
+          // ★ 2026-07-14 修复：设备已复位(bn=0)，_finalizeConnection 的配置推送可能抢跑失败。
+          //   重置去重标志，使后续重绑成功(BIND:OK/AUTH:OK)时 _syncConfigToDevice 能重新推送，
+          //   避免 _configPushedThisConn 永久为 true 导致"确认次数不一致"（uc/lc 不匹配）。
+          this._configPushedThisConn = false
         }
         // ★ 2026-07-11 修复：status.bn=1 仅在「未绑定→已绑定」跃迁时兜底确认 BIND 成功。
         //   设备本就绑定时，bn=1 只反映既有状态，不能证明「本次用某特定码验证成功」——
@@ -3177,6 +3181,10 @@ export const useBleStore = defineStore('ble', {
         this.bindHint = '绑定成功'
         // ★ 2026-07-14 修复：绑定成功即 owner，清除被踢抑制标记（见 AUTH:OK 处说明）
         this._clearUnboundKicked()
+        // ★ 2026-07-14 修复：设备按键复位后重绑，_finalizeConnection 的配置推送可能抢跑失败，
+        //   但 _configPushedThisConn 被置 true 挡住后续补推 → uc/lc 不一致。
+        //   此处补推配置（_configPushedThisConn 已被 bn=0 检测重置为 false，不会重复）。
+        this._syncConfigToDevice()
         // ★ P0-2: BIND:OK 可能内联 C1 会话盐（BIND:OK:<32hex>），提取作为签名盐；旧固件无盐则跳过
         const _bokParts = text.split(':')
         if (_bokParts.length >= 3) B._sessionSalt = _bokParts[2]
