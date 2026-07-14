@@ -288,17 +288,8 @@ const geofenceBarPercent = computed(() => {
   return Math.max(0, Math.min(100, Math.round(pct)))
 })
 
-// // ★★★ v3.14-bug watcher 诊断：监听 connected 变化，定位 phantom 连接的来源 ★★★ 
-// 在每次 connected 状态变化时，会打印：
-// 前后值：false → true 或 true → false
-// 关键上下文：btState、reconnectMode、deviceId、重连次数/延迟
-// 完整调用栈：精确定位是哪行代码改的 connected
-// watch(() => bleStore.connected, (newVal, oldVal) => {
-//   console.log(`[DIAG] connected: ${oldVal} → ${newVal}`)
-//   console.log(`[DIAG] btState=${bleStore.btState} mode=${bleStore.reconnectMode} deviceId=${bleStore.deviceId}`)
-//   console.log(`[DIAG] reconnectAttempt=${bleStore.reconnectAttempt} reconnectNextDelay=${bleStore.reconnectNextDelay}`)
-//   console.log(new Error('[DIAG] 调用栈').stack)
-// }, { flush: 'sync' })
+// ★ v3.14 phantom-connected 诊断 watcher 已移除（根因修复见 commit d240db4：P1 进度条定格）。
+//   若日后再出现 connected 状态异常跳变，可在此临时恢复该 sync-watch 抓调用栈。
 
 // ★ 通用 pwModal
 const pwModal = reactive({

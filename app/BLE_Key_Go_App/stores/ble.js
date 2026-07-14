@@ -652,9 +652,7 @@ export const useBleStore = defineStore('ble', {
               clearTimeout(this._reconnectTimer)
               this._reconnectTimer = null
             }
-            this.reconnectMode = 'idle'
-            this.reconnectAttempt = 0
-            this.reconnectNextDelay = 0
+            this._resetReconnectCounters()
             this._reconnectGuard++
             console.log('[Store] 蓝牙恢复（原生广播），启动自动重连')
             this._startReconnect()
@@ -693,11 +691,9 @@ export const useBleStore = defineStore('ble', {
             clearTimeout(this._reconnectTimer)
             this._reconnectTimer = null
           }
-          this.reconnectMode = 'idle'
-          this.reconnectAttempt = 0
-          this.reconnectNextDelay = 0
-          this._reconnectGuard++
-          console.log('[Store] 蓝牙恢复（Uni-APP），启动自动重连')
+            this._resetReconnectCounters()
+            this._reconnectGuard++
+            console.log('[Store] 蓝牙恢复（Uni-APP），启动自动重连')
           this._startReconnect()
         }
       } else if (!available) {
@@ -1590,9 +1586,7 @@ export const useBleStore = defineStore('ble', {
               }
               stopScan().catch(() => {})
               this.scanning = false
-              this.reconnectMode = 'idle'
-              this.reconnectAttempt = 0
-              this.reconnectNextDelay = 0
+              this._resetReconnectCounters()
               this._stopDormantPoll()
               this._stopGeofenceMonitor()
               this._stopHeartbeat()
@@ -1671,9 +1665,7 @@ export const useBleStore = defineStore('ble', {
         try {
           await this._doReconnect()
           // 成功！
-          this.reconnectMode = 'idle'
-          this.reconnectAttempt = 0
-          this.reconnectNextDelay = 0
+          this._resetReconnectCounters()
           console.log('[Store] 重连成功！')
           setDebugReconnectResult(true, '\u5b9a\u65f6\u91cd\u8fde\u6210\u529f')
         } catch (e) {
@@ -1737,10 +1729,8 @@ export const useBleStore = defineStore('ble', {
         const macSuffix = macClean.slice(-6).toUpperCase()
         this.deviceName = 'KeyGo-' + macSuffix
       }
-      this.reconnectMode = 'idle'
-      this.reconnectAttempt = 0
-      this.reconnectNextDelay = 0
-      this._stopDormantPoll()
+          this._resetReconnectCounters()
+          this._stopDormantPoll()
       this._stopGeofenceMonitor()
       this._stopHeartbeat()
       this._ensureForegroundService()
@@ -2287,9 +2277,7 @@ export const useBleStore = defineStore('ble', {
           clearTimeout(this._reconnectTimer)
           this._reconnectTimer = null
         }
-        this.reconnectMode = 'idle'
-        this.reconnectAttempt = 0
-        this.reconnectNextDelay = 0
+        this._resetReconnectCounters()
         this._reconnectGuard++
         // ★ 方案A（2026-07-12 修正②）：用户主动连接即清除「未绑定超时被踢」抑制标记，
         //   恢复后续自动重连（配合 _shouldAutoReconnect 的持久化兜底）。
@@ -2312,10 +2300,8 @@ export const useBleStore = defineStore('ble', {
         this.lastDeviceId = deviceId
 
         // ★ v3.6: 连接成功后重置重连状态（允许后续异常断连自动重连）
-        this.reconnectMode = 'idle'
-        this.reconnectAttempt = 0
-        this.reconnectNextDelay = 0
-        // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳 + 亮屏监听器
+          this._resetReconnectCounters()
+          // ★ v3.23: 连接成功 → 停止舒适模式轮询 + 极速模式 GPS 围栏 + 心跳 + 亮屏监听器
         this._stopDormantPoll()
         this._stopGeofenceMonitor()
         this._stopHeartbeat()
@@ -2711,6 +2697,17 @@ export const useBleStore = defineStore('ble', {
       this._lastFf02Ms = 0
       this._lastRssiDisplayMs = 0
       this._startRssiStaleWatchdog()
+    },
+
+    // ★ Q3 (2026-07-14): 统一重置「重连计数三件套」，收敛 9+ 处散落的
+    //   reconnectMode / reconnectAttempt / reconnectNextDelay 重置代码，避免漏改或不一致。
+    //   ⚠️ 注意：_reconnectGuard（断连锁，用于使在途 _doReconnect 旧 session 失效）【不】在此处递增！
+    //   只有「蓝牙恢复 / 用户主动连接」这类需要让旧重连失效的场景才递增，
+    //   调用点请在 _resetReconnectCounters() 之后单独写 this._reconnectGuard++。
+    _resetReconnectCounters() {
+      this.reconnectMode = 'idle'
+      this.reconnectAttempt = 0
+      this.reconnectNextDelay = 0
     },
 
     _handleStatusNotify(jsonStr) {
@@ -3886,9 +3883,7 @@ export const useBleStore = defineStore('ble', {
           clearTimeout(this._reconnectTimer)
           this._reconnectTimer = null
         }
-        this.reconnectMode = 'idle'
-        this.reconnectAttempt = 0
-        this.reconnectNextDelay = 0
+        this._resetReconnectCounters()
       } else if (mode === 'speed') {
         // ★ Phase 3: 切换到极速模式 → 停止后台轮询，记录当前停车位置
         this._onSpeedModeEnter()
@@ -3921,9 +3916,7 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
-      this.reconnectMode = 'idle'
-      this.reconnectAttempt = 0
-      this.reconnectNextDelay = 0
+      this._resetReconnectCounters()
       this._geofenceBleTriggered = false
       // ★ v3.25: 重置实时距离状态
       this.geofenceDistance = -1
@@ -4309,9 +4302,7 @@ export const useBleStore = defineStore('ble', {
       console.log(`[Store] ⚡ 🚀 围栏进入（${distance}m）→ 启动 BLE 扫描`)
 
       // 重置重连状态，立即启动激进扫描
-      this.reconnectMode = 'idle'
-      this.reconnectAttempt = 0
-      this.reconnectNextDelay = 0
+      this._resetReconnectCounters()
       this._startReconnect()
     },
 
@@ -4339,9 +4330,7 @@ export const useBleStore = defineStore('ble', {
         clearTimeout(this._reconnectTimer)
         this._reconnectTimer = null
       }
-      this.reconnectMode = 'idle'
-      this.reconnectAttempt = 0
-      this.reconnectNextDelay = 0
+      this._resetReconnectCounters()
     },
 
     /**
