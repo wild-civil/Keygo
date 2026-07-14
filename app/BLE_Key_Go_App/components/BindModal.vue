@@ -29,9 +29,9 @@
       </view>
 
 
-      <!-- 设备无 owner（全新 / 已恢复出厂）：首绑，可直接用自定义码 -->
+      <!-- 设备无 owner（全新 / 已恢复出厂）：首绑，仅允许默认码（安全：堵住未绑定窗口抢绑） -->
       <block v-if="!showBoundMode">
-        <text class="bind-desc">⚠ 设备已恢复出厂或未绑定。请直接输入<text class="hl">您想设置的绑定码</text>（任意非空即可，绑定后该码立即生效）；也可使用默认码 123456。点「绑定设备」即完成首次设置，之后可在下方「修改绑定码」中随时更换。</text>
+        <text class="bind-desc">⚠ 设备处于「未绑定」状态。出于安全，首次绑定必须使用<text class="hl">当前有效绑定码</text>（全新/恢复出厂设备为默认码 123456，贴于机身/说明书）。注意：若设备此前只是「解绑本机」而未「恢复出厂」，绑定码<text class="hl">不会重置</text>，仍需用当时的自定义码；输 123456 会被拒。绑定后到『修改绑定码』即可换码。</text>
         <!-- 绑定码输入框：与 index.vue 自定义名称同源的 <input> 方式 -->
         <input class="bind-input" v-model="fields.bindCode" type="text"
                :maxlength="16" placeholder="请输入绑定码" />
@@ -42,7 +42,7 @@
         <button class="btn-bind-default" :disabled="binding" @tap="handleBindDefault">
           {{ binding ? '绑定中...' : '或：使用默认码 123456 绑定' }}
         </button>
-        <text class="bind-warn">⚠ 若提示「设备已绑定」，说明该设备此前已绑定过：请先用<text class="hl">当前绑定码</text>(默认123456) 绑定以接管，再在下方『修改绑定码』换成你的自定义码；或先解绑/恢复出厂。</text>
+        <text class="bind-warn">⚠ 若提示「设备已绑定」，说明该设备此前已绑定过：请先用<text class="hl">当前绑定码</text>(默认123456，若改过则用改后的码) 绑定以接管，再到『修改绑定码』换成自定义码。注意：『解绑本机』只让本手机忘记设备、<text class="hl">不会重置绑定码</text>；要彻底清空并重新设定绑定码，须用『恢复出厂』（同样需当前码）。</text>
       </block>
 
       <!-- 设备有 owner -->
@@ -87,7 +87,7 @@
 
         <!-- 设备已绑但本机无密钥：先接管，再切换自定义码 -->
         <block v-else>
-          <text class="bind-desc">此设备<text class="hl">已被绑定</text>（当前手机未持有密钥）。若你就是主人：请输入<text class="hl">当前绑定码</text>(默认123456) 绑定以接管，接管后便可在『修改绑定码』换成你的自定义码。若不是主人，需先解绑/恢复出厂（同样需当前码）。</text>
+          <text class="bind-desc">此设备<text class="hl">已被绑定</text>（当前手机未持有密钥）。若你就是主人：请输入<text class="hl">当前绑定码</text>(默认123456，若改过则用改后的码) 绑定以接管，接管后便可在『修改绑定码』换成你的自定义码。若不是主人/忘了当前码：<text class="hl">『解绑本机』救不了你</text>（它不重置绑定码）；须由持有当前码的一方在『恢复出厂』里清空，或用机身 BOOT 键长按恢复出厂，码才会回到 123456。</text>
           <input class="bind-input" v-model="fields.bindCode" type="text"
                  :maxlength="16" placeholder="接管：请输入当前绑定码" />
           <button class="btn-bind" :disabled="!fields.bindCode || binding" @tap="handleBind">

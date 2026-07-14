@@ -92,10 +92,12 @@ import {
   recordScreenEvent,
 } from '@/utils/debug-panel.js'
 
-// ★ v3.33.0 (2026-07-14): App 版本号，与固件 KEYGO_FW_VERSION = "3.33.0" 保持一致（固件/App 同一版本）。
-//   本版本落地：① 手动模式语义修正（打开 App 仍自动连，仅锁屏后台不自动重连，isForeground 闸门）；
-//   ② fwsec 安全协议能力字段解析分流骨架（fwSec 状态 + _handleStatus 读取）；③ 收口文案同步。
-export const APP_VERSION = 'v3.33.0'
+// ★ v3.33.2 (2026-07-14): App 版本号，与固件 KEYGO_FW_VERSION = "3.33.2" 保持一致。
+//   本版本新增：选项 B 首绑安全加固——首绑必须匹配当前有效码 g_curBindCode，堵住未绑定窗口任意抢绑；
+//   自定义码统一走 SETCODE 通道（先 AUTH 证明持有旧码）。
+//   继承 v3.33.0/3.33.1：手动模式前台自动连 + fwsec 能力协商 + T4 回推修复 + AUTH 握手互斥锁 +
+//   长按恢复出厂 + FF01 长写重组 + 配置下发去重 + 重绑信任态保持 + 恢复出厂绑码核验 + 复位后回首绑。
+export const APP_VERSION = 'v3.33.2'
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
@@ -3185,8 +3187,15 @@ export const useBleStore = defineStore('ble', {
         if (text.includes('ALREADY_BOUND')) {
           // ★ 设备已有 owner，提供的码不匹配当前有效码：必须先接管/解绑，再用『修改绑定码』切换
           this.bindHint = '该设备已绑定过。请先用「当前绑定码」(默认123456)绑定以接管，再到『修改绑定码』换成你的自定义码；或先解绑/恢复出厂。'
+        } else if (text.includes('NOT_OWNER')) {
+          this.bindHint = '需先由原主人绑定'
+        } else if (text.includes('SHORT')) {
+          this.bindHint = '绑定码长度不合法（至少 6 位）'
+        } else if (text.includes('CODE')) {
+          // ★ 选项 B：首绑必须匹配当前有效码（全新/恢复出厂=123456；仅解绑本机=旧自定义码）；已绑设备须用当前码接管
+          this.bindHint = '绑定码错误：请使用当前有效绑定码（全新/恢复出厂设备为默认码 123456；若仅解绑本机未恢复出厂，则码未重置，需用旧自定义码）。绑定后到『修改绑定码』换自定义码'
         } else {
-          this.bindHint = text.includes('NOT_OWNER') ? '需先由原主人绑定' : '绑定码错误'
+          this.bindHint = '绑定失败'
         }
         _resolveWaiter('BIND', false)
       } else if (text === 'UNBIND:OK') {

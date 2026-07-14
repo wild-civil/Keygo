@@ -394,9 +394,11 @@ uint8_t Bonding_IsSessionAuthed(uint16_t connHandle)
  *   ★ v3.30-fix：改为「基于共享密钥」的信任模型，不再依赖对端 MAC 做 owner 判定。
  *     原因：Android/iOS 的 BLE 地址是随机化私有地址，每次连接都变，
  *           用 peerAddr 做 owner 会导致「同一台手机二次连接也 NOT_OWNER」的死锁。
- *   默认绑定码（贴于机身）= 物理持有即视为可恢复。已知默认码即可：
- *     - 首绑：校验 == DEFAULT_BIND_CODE → 派生 key 写入信任列表。
- *     - 已绑：用默认码覆盖重绑（takeover/恢复出厂信任），彻底消除 NOT_OWNER 死锁。
+ *   默认绑定码（贴于机身）= 物理持有即视为可恢复。已知当前有效码即可：
+ *     - 首绑（选项 B，2026-07-14）：校验 == 当前有效码（全新/恢复出厂设备即默认 123456）
+ *       → 派生 key 写入信任列表；不再接受任意码，杜绝「未绑定窗口任意抢绑」。
+ *     - 已绑：用当前有效码覆盖重绑（takeover），彻底消除 NOT_OWNER 死锁。
+ *   ★ 自定义码统一经 SETCODE 通道设定（先 AUTH 证明持有旧码），不在此处开放。
  *   回报文：BIND:OK / BIND:FAIL:SHORT / BIND:FAIL:CODE / BIND:FAIL:SAVE
  *********************************************************************/
 uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint8_t peerAddrType,
@@ -404,28 +406,29 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
 {
     (void)connHandle; (void)peerAddr; (void)peerAddrType;  /* ★ 不再使用 MAC 做身份判定 */
 
-    /* ★ 首绑即「自定码」模型（业界常见：出厂/恢复出厂后的首次配对即确立 owner 凭证）：
-     *   - 设备未绑定(Bonding_Count()==0)：用户提供的任意非空码直接成为本机绑定码，
-     *     并持久化到 KEYGO_BINDCODE_ADDR（否则重启后 g_curBindCode 回退默认，重绑会 FAIL:CODE）。
-     *     这样用户无需先输 123456 再改码，开箱即可用自己设定的码绑定。
-     *   - 设备已绑定（覆盖/接管重绑）：必须匹配当前有效码 g_curBindCode，否则 FAIL:CODE。
-     *   tmos_memcmp 返回 TRUE(非零)=相等(见 CH58xBLE_ROM.h)，故「不相等」写成 == 0 → FAIL。 */
+    /* ★ 选项 B（2026-07-14）：堵住「未绑定窗口任意抢绑」。
+     *   绑定始终要求「匹配当前有效码 g_curBindCode」——不再允许首绑时用任意码。
+     *     - 全新/恢复出厂后 g_curBindCode = 默认 123456（贴机身）→ 攻击者不知物理码则无法抢绑；
+     *     - 若此前在 App 上「解绑本机」(UNBIND:0，仅清信任列表、保留码) 使 Count 归零，
+     *       仍须用当时保留的自定义码首绑，不会因解绑而把码重置成 123456。
+     *   之后想用自定义码，一律走『修改绑定码』(SETCODE) 通道（先 AUTH 证明持有旧码）。
+     *   tmos_memcmp 返回 TRUE(非零)=相等，故「不相等」即写成 (== 0)。 */
     const uint8_t *effCode = (const uint8_t *)g_curBindCode;
     uint8_t        effLen  = g_curBindCodeLen;
 
     if (Bonding_Count() == 0) {
-        /* ★ 首次绑定（选项① 先到先绑）：接受任意 BOND_CODE_MINLEN..BOND_CODE_MAXLEN 字节作为新码。
-         *   即用户当场输入的自定义码直接成为绑定码（P1-1 强度下限 ≥6），无「先绑默认码再强制改码」。 */
+        /* 首绑（未绑定窗口）：仅接受当前有效码；长度非法先报 SHORT，再比对码。
+         * g_curBindCode 已是有效码（默认 123456 或保留的自定义码），无需覆盖，直接进入派生/绑定。 */
         if (len < BOND_CODE_MINLEN || len > BOND_CODE_MAXLEN) {
             KeyGo_SendRawNotify("BIND:FAIL:SHORT");
             return 1;
         }
-        tmos_memcpy(g_curBindCode, payload, len);
-        g_curBindCode[len] = 0;
-        g_curBindCodeLen   = (uint8_t)len;
-        Bonding_SaveBindCode();   /* ★ 关键：首绑的自定义码须跨重启保留 */
-        effCode = (const uint8_t *)g_curBindCode;
-        effLen  = g_curBindCodeLen;
+        if (len != g_curBindCodeLen ||
+            tmos_memcmp(payload, (const uint8_t *)g_curBindCode, g_curBindCodeLen) == 0) {
+            PRINT("[BIND] first-bind code mismatch (want len=%d)\n", g_curBindCodeLen);
+            KeyGo_SendRawNotify("BIND:FAIL:CODE");
+            return 1;
+        }
     } else {
         /* 已绑定：必须匹配当前有效码（覆盖/接管重绑） */
         if (len != g_curBindCodeLen ||
