@@ -241,7 +241,7 @@
 
 
 <script setup>
-import { reactive, computed, ref } from 'vue' // import { reactive, computed, watch } from 'vue'
+import { reactive, computed, ref, watch } from 'vue' // import { reactive, computed, watch } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
@@ -321,6 +321,14 @@ function openBindModal() {
   }
   bindModalVisible.value = true
 }
+
+// ★ 2026-07-14: 设备复位/被其他手机解绑后，store 置 needsRebind → 自动弹首绑界面
+watch(() => bleStore.needsRebind, (v) => {
+  if (v && bleStore.connected) {
+    bleStore.needsRebind = false
+    bindModalVisible.value = true
+  }
+})
 
 onShow(async () => {
   // ★ v3.31.0 / 2026-07-13: 方案 B —— 回前台【保留】后台持续平滑出来的旧 RSSI 值，

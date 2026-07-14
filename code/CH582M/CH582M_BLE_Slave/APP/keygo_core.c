@@ -190,6 +190,8 @@ void KeyGo_CancelUnauthTimer(void)
  * GPIO 控制
  * ───────────────────────────────────────────────────────────────── */
 
+void KeyGo_FactoryReset_GPIO_Init(void);   // ★ 长按恢复出厂：隐藏按键轮询任务初始化（定义见 GPIO 段末尾）
+
 void KeyGo_GPIO_Init(void)
 {
     /* ★ 2026-07-11: 开机即打印固件版本号，作为"新固件是否真正烧入"的硬探针。
@@ -218,7 +220,160 @@ void KeyGo_GPIO_Init(void)
      * ──────────────────────────────────────────── */
     GPIOB_ModeCfg(GPIO_Pin_4, GPIO_ModeOut_PP_5mA);  // ★ 必须配置 push-pull 输出模式 (HAL 的 LED1_DDR 只设了方向位)
     GPIOB_ResetBits(GPIO_Pin_4);                      // 初始状态 = 锁车 → LED 灭 (低电平)
-    PRINT("[GPIO] Initialized (PA4=UNLOCK, PA5=LOCK, PA6=TRUNK, PA7=KEY_POWER, PB4=LED)\n");
+    KeyGo_FactoryReset_GPIO_Init();                   // ★ 隐藏按键(PB22/BOOT) 长按恢复出厂轮询任务
+    PRINT("[GPIO] Initialized (PA4=UNLOCK, PA5=LOCK, PA6=TRUNK, PA7=KEY_POWER, PB4=LED, PB22=FR_BTN)\n");
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ 长按恢复出厂 (隐藏按键 PB22/BOOT) — BLE 通知为主 + LED 为辅
+ *
+ *   【触发】PB22(BOOT) 被拉低(按钮接地) 持续 KEYGO_FR_HOLD_MS(默认 5000ms)。
+ *   【前提】RST(PB23) 是硬件复位脚，**刻意不参与检测**——
+ *          若按钮同时短接 RST，长按会误复位芯片导致无法累计 5s；
+ *          仅在"按住按钮+上电/点按RST进入ISP"恢复路径上才有意义。
+ *          故检测脚只用 BOOT(PB22)。
+ *   【反馈】BLE 通知为主（RESET:ARM / RESET:HOLD:NN / RESET:CANCEL / RESET:OK），
+ *          连接时手机 App 实时可见；LED 为辅（低功耗常态灭，按住时本地闪烁），
+ *          即便断连不连手机也能靠 LED 确认。
+ *   【安全】阈值 5s + 需持续按住（松开即取消），避免误触恢复出厂清掉绑定。
+ *   ★ 独立 TMOS 任务：自带 16 位事件空间，避免与 Peripheral 任务事件位冲突
+ *     （Peripheral 任务的 16 个事件位已全部占用）。
+ * ───────────────────────────────────────────────────────────────── */
+#ifndef KEYGO_FACTORY_RESET_PIN
+#define KEYGO_FACTORY_RESET_PIN    GPIO_Pin_22      // PB22 = BOOT (隐藏按键)
+#endif
+#define KEYGO_FR_HOLD_MS           5000             // 长按阈值(ms)
+#define KEYGO_FR_POLL_TICKS        160              // ~100ms 轮询(1 tick≈0.625ms)
+#define KEYGO_FR_TOGGLE_SLOW_MS    500              // 慢闪半周期(进度<50%)
+#define KEYGO_FR_TOGGLE_FAST_MS    100              // 快闪半周期(进度≥50%)
+#define KEYGO_FR_CONFIRM_MS        600              // 到阈值后确认窗口(给 BLE 空口发 RESET:OK)
+
+#define KEYGO_FR_POLL_EVT          0x0001
+static uint8_t  KeyGo_FactoryReset_TaskID = INVALID_TASK_ID;
+
+/* 状态：0=idle 1=arming(按住累计中) 2=confirming(已到阈值, 即将复位) */
+static uint8_t  g_frState     = 0;
+static uint32_t g_frStartMs   = 0;
+static uint32_t g_frLedNextMs = 0;
+static uint8_t  g_frLedOn     = 0;
+static uint8_t  g_frFast      = 0;
+static uint8_t  g_frLastPct   = 0;
+static uint32_t g_frConfirmMs = 0;
+
+/* BLE 通知（无连接时 KeyGo_SendRawNotify 内部直接 return，安全） */
+static void KeyGo_FactoryReset_SendBle(const char *msg)
+{
+    KeyGo_SendRawNotify(msg);
+}
+
+/* 擦除全部持久化（信任列表 / 绑定码 / 配置 / 模式），回到出厂默认 */
+static void KeyGo_FactoryReset_DoErase(void)
+{
+    PRINT("[FR] factory reset: erasing all DataFlash...\n");
+    Bonding_EraseAll();          // 信任列表(owner)清空
+    Bonding_ResetBindCode();     // 绑定码重置回默认 123456
+    EEPROM_ERASE(KEYGO_CFG_ADDR, 256);    // 配置页(阈值/cooldown/autolock...)
+    EEPROM_ERASE(KEYGO_MODE_ADDR, 256);   // 模式页(car/ebike)
+    PRINT("[FR] all erased, will reboot\n");
+}
+
+/* 100ms 轮询：检测隐藏按键长按 → 反馈 + 到阈值复位 */
+static void KeyGo_FactoryReset_Poll(void)
+{
+    uint8_t pressed = (GPIOB_ReadPortPin(KEYGO_FACTORY_RESET_PIN) == 0) ? 1 : 0;
+    uint32_t now = Peripheral_GetSystemMs();
+
+    if (g_frState == 0) {
+        if (pressed) {
+            g_frState     = 1;
+            g_frStartMs   = now;
+            g_frLedNextMs = now;
+            g_frLedOn     = 0;
+            g_frFast      = 0;
+            g_frLastPct   = 0;
+            /* 停掉可能残留的 LED 闪烁任务，独占 PB4 做反馈 */
+            tmos_stop_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT);
+            tmos_stop_task(Peripheral_TaskID, SBP_LED_RIDE_BLINK_EVT);
+            g_ledBlinkLocked = 0;
+            KeyGo_FactoryReset_SendBle("RESET:ARM");
+            PRINT("[FR] button down, arming...\n");
+        }
+        return;
+    }
+
+    if (g_frState == 1) {  // arming：按住累计中
+        if (!pressed) {    // 提前松开 → 取消
+            if (g_keyState == KSTATE_UNLOCKED) GPIOB_SetBits(GPIO_Pin_4);
+            else                               GPIOB_ResetBits(GPIO_Pin_4);
+            KeyGo_FactoryReset_SendBle("RESET:CANCEL");
+            PRINT("[FR] released early, cancelled\n");
+            g_frState = 0;
+            return;
+        }
+        uint32_t held = now - g_frStartMs;
+        uint8_t  pct  = (held >= KEYGO_FR_HOLD_MS) ? 100
+                                                       : (uint8_t)((held * 100) / KEYGO_FR_HOLD_MS);
+        /* BLE 进度通知(25/50/75/100 各发一次) */
+        if      (pct >= 25 && pct < 50 && g_frLastPct < 25) { g_frLastPct = 25; KeyGo_FactoryReset_SendBle("RESET:HOLD:25"); }
+        else if (pct >= 50 && pct < 75 && g_frLastPct < 50) { g_frLastPct = 50; KeyGo_FactoryReset_SendBle("RESET:HOLD:50"); }
+        else if (pct >= 75 && pct < 100 && g_frLastPct < 75) { g_frLastPct = 75; KeyGo_FactoryReset_SendBle("RESET:HOLD:75"); }
+        /* LED 反馈：<50% 慢闪, ≥50% 快闪 */
+        uint8_t fast = (pct >= 50) ? 1 : 0;
+        if (fast != g_frFast) { g_frFast = fast; g_frLedNextMs = now; g_frLedOn = 0; }
+        if (now >= g_frLedNextMs) {
+            g_frLedOn ^= 1;
+            if (g_frLedOn) GPIOB_SetBits(GPIO_Pin_4); else GPIOB_ResetBits(GPIO_Pin_4);
+            g_frLedNextMs = now + (fast ? KEYGO_FR_TOGGLE_FAST_MS : KEYGO_FR_TOGGLE_SLOW_MS);
+        }
+        if (pct >= 100) {   // 阈值到达 → 进入确认窗口
+            g_frState     = 2;
+            g_frConfirmMs = now + KEYGO_FR_CONFIRM_MS;
+            g_frLastPct   = 100;
+            KeyGo_FactoryReset_SendBle("RESET:OK");  // 给 BLE 空口时间送达 + LED 确认快闪
+            PRINT("[FR] threshold reached, confirming...\n");
+        }
+        return;
+    }
+
+    if (g_frState == 2) {  // confirming：持续快闪, 到确认窗口后真正复位
+        if (now >= g_frLedNextMs) {
+            g_frLedOn ^= 1;
+            if (g_frLedOn) GPIOB_SetBits(GPIO_Pin_4); else GPIOB_ResetBits(GPIO_Pin_4);
+            g_frLedNextMs = now + KEYGO_FR_TOGGLE_FAST_MS;
+        }
+        if (now >= g_frConfirmMs) {
+            KeyGo_FactoryReset_DoErase();
+            /* 复位前拉低控制引脚防误动(与看门狗/adv 重启复位一致) */
+            GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+            GPIOB_ResetBits(GPIO_Pin_4);
+            SYS_ResetExecute();   // 完整重启 → 以出厂默认(未绑定/car/默认阈值)重新初始化
+        }
+        return;
+    }
+}
+
+uint16_t KeyGo_FactoryReset_ProcessEvent(uint8_t task_id, uint16_t events)
+{
+    if (events & SYS_EVENT_MSG) {
+        uint8_t *pMsg;
+        if ((pMsg = tmos_msg_receive(task_id)) != NULL) tmos_msg_deallocate(pMsg);
+        return (events ^ SYS_EVENT_MSG);
+    }
+    if (events & KEYGO_FR_POLL_EVT) {
+        KeyGo_FactoryReset_Poll();
+        tmos_start_task(task_id, KEYGO_FR_POLL_EVT, KEYGO_FR_POLL_TICKS);
+        return (events ^ KEYGO_FR_POLL_EVT);
+    }
+    return 0;
+}
+
+void KeyGo_FactoryReset_GPIO_Init(void)
+{
+    /* BOOT(PB22) 配为输入上拉；按钮按下→接地→读 0。常态高电平=正常启动(不进ISP)。 */
+    GPIOB_ModeCfg(KEYGO_FACTORY_RESET_PIN, GPIO_ModeIN_PU);
+    KeyGo_FactoryReset_TaskID = TMOS_ProcessEventRegister(KeyGo_FactoryReset_ProcessEvent);
+    tmos_start_task(KeyGo_FactoryReset_TaskID, KEYGO_FR_POLL_EVT, KEYGO_FR_POLL_TICKS);
+    PRINT("[FR] factory-reset poll task started (pin PB22/BOOT, hold=%dms)\n", KEYGO_FR_HOLD_MS);
 }
 
 void KeyGo_Unlock(void)

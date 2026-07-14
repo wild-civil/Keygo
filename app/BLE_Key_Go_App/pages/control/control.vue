@@ -152,7 +152,6 @@ import { onShow } from '@dcloudio/uni-app'
 import { useBleStore } from '@/stores/ble.js'
 import { useThemeStore } from '@/stores/theme.js'
 import { toast } from '@/utils/toast.js'
-import { sendConfig } from '@/utils/ble.js'
 import { cmdErrorMsg } from '@/utils/readable-errors.js'
 
 const bleStore = useBleStore()
@@ -225,7 +224,7 @@ async function handleStatus() {
 
 async function setRSSI(value) {
   try {
-    await sendConfig(bleStore.deviceId, { rssi: value })
+    await bleStore.updateConfig({ rssi: value })
     toast.info(`RSSI 已设为 ${value}`)
   } catch {
     toast.error('RSSI 设置失败')

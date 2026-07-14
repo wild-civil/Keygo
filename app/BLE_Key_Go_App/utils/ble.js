@@ -767,7 +767,12 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
         resolve()
       },
       fail: (err) => {
-        console.error('[BLE] 写入失败', err)
+        // ★ 2026-07-14 诊断：把特征值 UUID 与值前缀一并打出，定位"property not support"(10007)
+        //   到底打到了哪个特征值（FF01/FF03 都应可写；若打出 FF02/FF04 说明写错通道）。
+        const _uuid = String(characteristicId || '').toUpperCase()
+        const _valPreview = (value && value.length > 24 ? value.slice(0, 24) + '…' : value)
+        console.error('[BLE] 写入失败', err,
+          '| char=', _uuid, '| val=', JSON.stringify(_valPreview), '| len=', value ? value.length : 0)
         reject(err)
       }
     })

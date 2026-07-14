@@ -383,6 +383,7 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle, gattAttribute_t *
 /* ★ 2026-07-11: FF03 长写(prepare-write)累积长度。各分片按 offset 拼回
  *   simpleProfileChar3，execute 时一次性交给应用层。静态持久，跨多次写回调有效。 */
 static uint16_t g_ff03WrTotal = 0;
+static uint16_t g_ff01WrTotal = 0;   // ★ 2026-07-14: FF01(配置) 长写累积长度，与 g_ff03WrTotal 对齐
 static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t *pAttr,
                                            uint8_t *pValue, uint16_t len, uint16_t offset,
                                            uint8_t method)
@@ -401,15 +402,38 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
         uint16_t uuid = BUILD_UINT16(pAttr->type.uuid[0], pAttr->type.uuid[1]);
         switch (uuid)
         {
-            case SIMPLEPROFILE_CHAR1_UUID:   // FF01: RSSI（不支持长写，offset 必为 0）
-                if (offset != 0) {
-                    status = ATT_ERR_ATTR_NOT_LONG;
-                } else if (len > SIMPLEPROFILE_CHAR1_LEN) {
-                    status = ATT_ERR_INVALID_VALUE_SIZE;
-                } else {
-                    tmos_memcpy(simpleProfileChar1, pValue, len);
-                    if (len < SIMPLEPROFILE_CHAR1_LEN) simpleProfileChar1[len] = '\0';
+            case SIMPLEPROFILE_CHAR1_UUID:   // FF01: RSSI + 配置下发（★ 支持长写 prepare-write 重组，与 FF03 对齐）
+                if (method == ATT_PREPARE_WRITE_REQ) {
+                    /* 长写分段：offset==0 表示新一轮开始，清零累积长度；
+                     * 之后按 offset 把各片拼回 simpleProfileChar1，等 EXECUTE 再交给应用。
+                     * ★ 2026-07-14 修复：旧逻辑对 offset!=0 直接返回 ATT_ERR_ATTR_NOT_LONG，
+                     *   导致 ~67 字节配置串（默认 ATT MTU=23 单包仅 20 字节）必须走长写却被拒，
+                     *   App 侧 writeBLECharacteristicValue 报 10007(property not support)、
+                     *   配置下发永远失败、阈值回不去设备。 */
+                    if (offset == 0) g_ff01WrTotal = 0;
+                    if (offset + len > SIMPLEPROFILE_CHAR1_LEN) {
+                        status = ATT_ERR_INVALID_VALUE_SIZE;
+                    } else {
+                        tmos_memcpy(simpleProfileChar1 + offset, pValue, len);
+                        if (offset + len > g_ff01WrTotal) g_ff01WrTotal = offset + len;
+                        /* 不通知应用，等 EXECUTE */
+                    }
+                } else if (method == ATT_EXECUTE_WRITE_REQ) {
+                    /* 长写提交：把累积的完整配置一次性交给应用 */
+                    simpleProfileChar1[g_ff01WrTotal] = '\0';
+                    appVal    = simpleProfileChar1;
+                    appLen    = g_ff01WrTotal;
+                    g_ff01WrTotal = 0;
                     notifyApp = SIMPLEPROFILE_CHAR1;
+                } else {
+                    /* 普通短写 (ATT_WRITE_REQ / ATT_WRITE_CMD)，offset 必为 0 */
+                    if (len > SIMPLEPROFILE_CHAR1_LEN) {
+                        status = ATT_ERR_INVALID_VALUE_SIZE;
+                    } else {
+                        tmos_memcpy(simpleProfileChar1, pValue, len);
+                        if (len < SIMPLEPROFILE_CHAR1_LEN) simpleProfileChar1[len] = '\0';
+                        notifyApp = SIMPLEPROFILE_CHAR1;
+                    }
                 }
                 break;
 

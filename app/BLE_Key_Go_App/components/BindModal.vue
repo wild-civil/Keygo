@@ -31,7 +31,7 @@
 
       <!-- 设备无 owner（全新 / 已恢复出厂）：首绑，可直接用自定义码 -->
       <block v-if="!showBoundMode">
-        <text class="bind-desc">首次绑定可直接输入<text class="hl">你自定义的绑定码</text>（任意非空即可，绑定后该码即生效）；也可使用默认码 123456。绑定成功后本机将持有该设备的密钥，可正常控车。</text>
+        <text class="bind-desc">⚠ 设备已恢复出厂或未绑定。请直接输入<text class="hl">您想设置的绑定码</text>（任意非空即可，绑定后该码立即生效）；也可使用默认码 123456。点「绑定设备」即完成首次设置，之后可在下方「修改绑定码」中随时更换。</text>
         <!-- 绑定码输入框：与 index.vue 自定义名称同源的 <input> 方式 -->
         <input class="bind-input" v-model="fields.bindCode" type="text"
                :maxlength="16" placeholder="请输入绑定码" />
@@ -196,6 +196,12 @@ async function handleChangeBindCode() {
   // ★ 前置校验：所有失败都要给用户准确 toast，不能静默 return
   //   （之前静默 return 会被陈旧 bindHint「BIND:OK」误导成"固件拒答"）
   if (changing.value) return
+  // ★ 2026-07-14 修复：复位/未绑定态（本地密钥已清空）无法走 AUTH→SETCODE 改码，
+  //   固件 SETCODE 要求设备已绑定。此时应引导先「绑定」设码，而非神秘失败。
+  if (!bleStore.isBound && !bleStore.deviceBound) {
+    toast.error('设备未绑定（可能已恢复出厂），请先关闭本弹窗，在上方「绑定」处输入您的绑定码完成首次设置')
+    return
+  }
   if (!fields.oldBindCode) { toast.error('请输入当前绑定码'); return }
   if (!fields.newBindCode) { toast.error('请输入新绑定码'); return }
   if (fields.newBindCode !== fields.confirmBindCode) {

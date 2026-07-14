@@ -45,6 +45,15 @@ export const B = {
 
   /** ★ 绑定/解绑互斥锁 */
   _bindMutex: Promise.resolve(),
+
+  /**
+   * ★ 2026-07-14 修复「刚绑定显示『无法验证』又自愈」：
+   *   自动 AUTH（_maybeAutoAuth）与绑定 AUTH 兜底（_authWithKey）都各自发 NONCE→AUTH，
+   *   而 NONCE/AUTH waiter 是单槽的（后注册覆盖先注册）。两路并发会互相覆盖 waiter →
+   *   一条收不到 NONCE/对已被消费的 nonce 回 AUTH → 固件回 AUTH:FAIL → 假「验证失败」。
+   *   本锁确保同时刻只有一个 NONCE→AUTH 流程在跑，彻底消除串扰（绑定成功后会复位状态自愈）。
+   */
+  _authMutex: Promise.resolve(),
 }
 
 /** 注册等待某类绑定义务回包（NONCE/AUTH/BIND/UNBIND/SETCODE） */
@@ -64,6 +73,14 @@ export function _acquireBindLock() {
   let _rel
   const _prev = B._bindMutex
   B._bindMutex = new Promise(r => { _rel = r })
+  return _prev.then(() => _rel)
+}
+
+/** ★ 2026-07-14: 获取 AUTH 握手互斥锁（与 _acquireBindLock 顺序无关，避免死锁：绑定先拿 bind 锁再拿 auth 锁，自动 AUTH 只拿 auth 锁） */
+export function _acquireAuthLock() {
+  let _rel
+  const _prev = B._authMutex
+  B._authMutex = new Promise(r => { _rel = r })
   return _prev.then(() => _rel)
 }
 

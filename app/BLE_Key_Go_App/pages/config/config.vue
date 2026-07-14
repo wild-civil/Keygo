@@ -284,6 +284,14 @@ function openBindModal() {
   bindModalVisible.value = true
 }
 
+// ★ 2026-07-14: 设备复位/被其他手机解绑后，store 置 needsRebind → 自动弹首绑界面
+watch(() => bleStore.needsRebind, (v) => {
+  if (v && bleStore.connected) {
+    bleStore.needsRebind = false
+    bindModalVisible.value = true
+  }
+})
+
 // ★ localConfig 和 syncFromStore 必须在 onShow 之前声明
 //    const 有暂时死区(TDZ)，在声明行之前访问会抛 ReferenceError
 const localConfig = reactive({
