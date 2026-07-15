@@ -90,6 +90,32 @@ static uint8_t ct_eq(const uint8_t *a, const uint8_t *b, uint16_t n)
     return (diff == 0) ? 1 : 0;
 }
 
+/* ── ★ Phase 1/2 辅助函数 ── */
+
+/* ★ Phase 1：清掉协议栈 SNV 中所有 bond(LTK)，让「解绑/恢复出厂」真正踢掉老手机。
+ *   旧 bond 仍可被 OS 用旧 LTK 自动加密重连(LINK_ENCRYPTED=true) → 绕过 RSSI 解锁门控，
+ *   与「恢复出厂=清掉所有绑定」语义矛盾。GAPBOND_ERASE_ALLBONDS(0x410) 由协议栈自管 SNV。 */
+static void Bonding_ClearSnvBonds(void)
+{
+    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+}
+
+/* ★ Phase 2：把当前绑定码(字符串)转成数值 passkey 供 GAPBondMgr_PasscodeRsp。
+ *   约定绑定码为数字串(默认 123456)；含非数字或超出 6 位 → 安全回退 123456，
+ *   避免传入非法 passcode 导致配对吊死（passkey 必须为数值）。 */
+static uint32_t Bonding_GetPasscodeNumeric(void)
+{
+    uint32_t v = 0;
+    uint8_t len = g_curBindCodeLen;
+    if (len < 1 || len > 6) return 123456u;
+    for (uint8_t i = 0; i < len; i++) {
+        char c = g_curBindCode[i];
+        if (c < '0' || c > '9') return 123456u;
+        v = v * 10u + (uint32_t)(c - '0');
+    }
+    return v;
+}
+
 /* 前向声明（供 Bonding_BondCBs 初始化器引用） */
 static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
                                 uint8_t uiInputs, uint8_t uiOutputs);
@@ -118,24 +144,45 @@ void Bonding_Init(void)
     Bonding_Load();
     Bonding_LoadBindCode();   /* 载入已存自定义码（无则回退默认 123456） */
 
-    /* 配置外围 Bond Manager（方案 B 的链路加密层）。
-     * 无头设备无显示/键盘 → NO_INPUT_NO_OUTPUT（Just Works / LESC）仅做链路加密；
-     * 真正的所有者鉴权在应用层 BIND 指令 + AUTH challenge-response 完成。 */
+    /* 配置外围 Bond Manager（链路加密层）。
+     * ★ Phase 2：由 Just Works(无密码) 升级为 passkey / MITM 配对。
+     *   - ioCap = GAPBOND_IO_CAP_DISPLAY_ONLY：本设备无屏无键，以「展示方」身份把绑定码作为
+     *     passkey 提供给协议栈；手机系统弹窗「输入密码」→ 用户输绑定码 → 完成 MITM 认证 bond。
+     *   - mitm = 1：开启 Passkey 保护(GAPBOND_PERI_MITM_PROTECTION)，只有知道绑定码的手机才能配对，
+     *     陌生人无码 createBond 会被拒 → 加固 RSSI 自动解锁的「主人」判定（不再「任何手机可配即对」）。
+     *   - 日常已配对手机 OS 自动重连用旧 LTK 加密，无需再输码（耳机体验：仅首次配对弹一次窗）。
+     *   - pairingMode 仍 WAIT_FOR_REQ：由手机/App 侧发起配对（peripheral.c 未主动请求加密，
+     *     现有 Just Works 配对即由对端发起；启用 passkey 后同一流程变为需输码，无需改 peripheral.c）。 */
     uint8_t pairingMode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
-    uint8_t ioCap       = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
-    uint8_t mitm        = 0;
+    uint8_t ioCap       = GAPBOND_IO_CAP_DISPLAY_ONLY;
+    uint8_t mitm        = 1;
 
     GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pairingMode);
     GAPBondMgr_SetParameter(GAPBOND_PERI_IO_CAPABILITIES, sizeof(uint8_t), &ioCap);
     GAPBondMgr_SetParameter(GAPBOND_PERI_MITM_PROTECTION, sizeof(uint8_t), &mitm);
 
     /* ★ 方案A：启用 peri bonding 持久化。
-     *   配对完成后 LTK 写入 SNV（协议栈自动管理），断连重连后 OS 可自动恢复加密链路。
-     *   此前只配了配对参数但没 ENABLE，pairing 虽完成但 LTK 不持久→每次重连需重新配对。 */
+     *   配对完成后 LTK 写入 SNV（协议栈自动管理），断连重连后 OS 可自动恢复加密链路。 */
     uint8_t bondingEnabled = 1;
     GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8_t), &bondingEnabled);
 
-    PRINT("[BOND] init done, owners=%d, bonding=%d\n", s_bondCount, bondingEnabled);
+    /* ★ Phase 2 迁移：首次升级到 passkey 固件时，清掉旧的 Just Works bond。
+     *   旧 bond 持旧 LTK，OS 仍可用其自动加密重连 → LINK_ENCRYPTED=true → 绕过新密码门 RSSI 解锁。
+     *   用 DataFlash 标记 KEYGO_SECEP_ADDR 确保只迁移一次（避免每次启动都清）；标记已置则跳过。
+     *   迁移后旧手机需重新输绑定码配对（一次性），之后才符合 passkey 时代的「主人」判定。 */
+    {
+        uint8_t epoch[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+        EEPROM_READ(KEYGO_SECEP_ADDR, epoch, 4);
+        if (epoch[0] != KEYGO_SECEP_VALUE) {
+            PRINT("[BOND] passkey migration: erasing legacy Just-Works bonds in SNV\n");
+            Bonding_ClearSnvBonds();
+            epoch[0] = KEYGO_SECEP_VALUE;
+            EEPROM_ERASE(KEYGO_SECEP_ADDR, BOND_PAGE_SIZE);
+            EEPROM_WRITE(KEYGO_SECEP_ADDR, epoch, 4);
+        }
+    }
+
+    PRINT("[BOND] init done, owners=%d, bonding=%d, mitm=%d\n", s_bondCount, bondingEnabled, mitm);
 }
 
 /*********************************************************************
@@ -296,6 +343,11 @@ uint8_t Bonding_RemoveOwner(const uint8_t *peerAddr)
         tmos_memcpy(&s_bondTbl[i], &s_bondTbl[i + 1], BOND_ENTRY_SIZE);
     }
     s_bondCount--;
+    /* ★ Phase 1 补充：当前为单 owner 模型(BIND 永远写 slot0)，移除 owner 即移除唯一主人。
+     *   必须同时清 SNV bond，否则该手机仍持 LTK → OS 重连 LINK_ENCRYPTED → 仍可 RSSI 解锁。
+     *   随机私有地址旋转导致无法可靠按身份地址单删(GAPBOND_ERASE_SINGLEBOND)，而单 owner 下
+     *   清全部 == 清该手机，故此处直接全清 SNV（等价且可靠）。 */
+    Bonding_ClearSnvBonds();
     return Bonding_Save();
 }
 
@@ -305,6 +357,10 @@ void Bonding_EraseAll(void)
     for (uint8_t p = 0; p < BOND_PAGES; p++) {
         EEPROM_ERASE(KEYGO_BOND_ADDR + p * BOND_PAGE_SIZE, BOND_PAGE_SIZE);
     }
+    /* ★ Phase 1：同时清协议栈 SNV 中的全部 bond(LTK)。覆盖「恢复出厂」与「UNBIND:ALL」
+     *   两条路径（二者都调本函数）。否则旧配对手机仍可被 OS 加密重连 → RSSI 解锁。 */
+    Bonding_ClearSnvBonds();
+    PRINT("[BOND] EraseAll: trust list + SNV bonds cleared\n");
 }
 
 /*********************************************************************
@@ -634,7 +690,10 @@ uint8_t Bonding_HandleUnbindCmd(uint16_t connHandle, const uint8_t *peerAddr, ui
     } else {
         s_bondCount = 0;
         Bonding_Save();
-        PRINT("[UNBIND] owner removed\n");
+        /* ★ Phase 1：UNBIND:0(解绑自己) 同样要清 SNV bond，否则被解绑手机仍持 LTK
+         *   → OS 重连 LINK_ENCRYPTED → 仍能 RSSI 解锁，解绑形同虚设。 */
+        Bonding_ClearSnvBonds();
+        PRINT("[UNBIND] owner removed (SNV bonds cleared)\n");
     }
     s_sessionAuthed = 0;
     s_nonceValid    = 0;
@@ -743,10 +802,14 @@ static void Bonding_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_
 static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
                                 uint8_t uiInputs, uint8_t uiOutputs)
 {
-    PRINT("[BOND] passcode needed (headless, ignored) addr=%x:%x:%x:%x:%x:%x\n",
-          deviceAddr[0], deviceAddr[1], deviceAddr[2],
-          deviceAddr[3], deviceAddr[4], deviceAddr[5]);
-    (void)connectionHandle; (void)uiInputs; (void)uiOutputs;
+    (void)deviceAddr; (void)uiInputs; (void)uiOutputs;
+    /* ★ Phase 2：本设备无屏无键，以 DISPLAY_ONLY 身份把「绑定码」作为 passkey 提供给协议栈。
+     *   手机系统弹窗「输入密码」→ 用户输绑定码 → 完成 MITM 认证 bond。
+     *   只有知道绑定码的手机才能配对，陌生人无码配不上 → 加固 RSSI 自动解锁的「主人」判定。
+     *   此回调在配对需 passkey 时由协议栈触发；必须回 SUCCESS + 数值 passcode，否则配对会吊死/失败。 */
+    uint32_t passcode = Bonding_GetPasscodeNumeric();
+    PRINT("[BOND] passcode requested -> respond with bind-code passkey\n");
+    GAPBondMgr_PasscodeRsp(connectionHandle, SUCCESS, passcode);
 }
 
 /******************************** endfile @ bonding ******************************/

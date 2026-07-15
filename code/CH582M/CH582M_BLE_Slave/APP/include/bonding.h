@@ -47,6 +47,10 @@
 #ifndef KEYGO_BINDCODE_ADDR
 #define KEYGO_BINDCODE_ADDR  0x7200   /* 物理 0x77200, ★ 自定义绑定码持久化页 */
 #endif
+#ifndef KEYGO_SECEP_ADDR
+#define KEYGO_SECEP_ADDR   0x7400   /* 物理 0x77400, ★ Phase 2 安全迁移标记页(升级到 passkey 时代清旧 Just-Works bond); < SNV(0x07E00) 独占 1 页 */
+#endif
+#define KEYGO_SECEP_VALUE 0x01      /* 已迁移到 passkey 时代的标记值 */
 #define BOND_PAGE_SIZE    256
 
 /* 单条信任记录（与方案文档 §5.1a trustedPeer 对应） */
@@ -79,6 +83,9 @@ typedef struct {
 #endif
 #if (KEYGO_BINDCODE_ADDR + BOND_PAGE_SIZE) > 0x07E00
 #error "BINDCODE region overlaps BLE SNV (0x07E00)! Move KEYGO_BINDCODE_ADDR lower."
+#endif
+#if (KEYGO_SECEP_ADDR + BOND_PAGE_SIZE) > 0x07E00
+#error "SECEP region overlaps BLE SNV (0x07E00)! Move KEYGO_SECEP_ADDR lower."
 #endif
 
 /* ── 生命周期 ── */
