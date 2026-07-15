@@ -3,7 +3,7 @@
     "appid" : "__UNI__35B0789",
     "description" : "BLE车钥匙舒适进入系统",
     "versionName" : "1.0.20",
-    "versionCode" : 120,
+    "versionCode" : 121,
     "transformPx" : false,
     "app-plus" : {
         "usingComponents" : true,

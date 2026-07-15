@@ -3295,11 +3295,13 @@ export const useBleStore = defineStore('ble', {
      * 仍可通过 App 手动操控。配对成功后会记 log 方便排查）。
      */
     /**
-     * ★ 方案A + ①(2026-07-13)：BIND 之前先发起 BLE 配对(bond)，返回 Promise<{ok,message}>。
-     * 配对完成后链路加密，之后发送的 BIND:code 即为密文（堵明文嗅探，见 docs/...F3）。
-     * 内部带超时（默认 8s），超时或失败均 resolve 而非 reject，由调用方决定是否降级。
+     * ★ 方案A + ①(2026-07-13) + Phase2 passkey(2026-07-15)：BIND 之前先发起 BLE 配对(bond)。
+     * 固件已启用 passkey/MITM，配对时系统弹「输入配对码」窗，用户输绑定码完成 MITM 认证；
+     * 配对完成后 LINK_ENCRYPTED=true，OS 重连自动加密，走近即解锁（耳机体验）。
+     * forceRebond=true 时原生会先 removeBond（设备恢复出厂但手机仍配对的情形），强制重弹 passkey。
+     * 内部带超时（默认 30s，给用户输入配对码留时间），超时/失败均 resolve 而非 reject，由调用方决定降级。
      */
-    _triggerBond(timeoutMs = 8000) {
+    _triggerBond(forceRebond = false, timeoutMs = 30000) {
       return new Promise((resolve) => {
         if (!this.deviceId) return resolve({ ok: false, message: '无 deviceId' })
         let settled = false
@@ -3310,9 +3312,9 @@ export const useBleStore = defineStore('ble', {
         try {
           const fg = uni.requireNativePlugin('Keygo-Foreground')
           if (!fg) return finish({ ok: false, message: '原生插件不可用' })
-          // 超时兜底：防止部分 ROM 静默丢弃配对导致 Promise 永久挂起
+          // 超时兜底：防止部分 ROM 静默丢弃配对导致 Promise 永久挂起（默认 30s 给用户输入 passkey 留时间）
           timer = setTimeout(() => finish({ ok: false, message: '配对超时' }), timeoutMs)
-          fg.createBond({ mac: this.deviceId }, (res) => {
+          fg.createBond({ mac: this.deviceId, forceRebond }, (res) => {
             if (timer) clearTimeout(timer)
             finish(res)
           })
@@ -3414,9 +3416,10 @@ export const useBleStore = defineStore('ble', {
       console.log('[BIND] === 开始绑定 === fwVersion=', JSON.stringify(this.fwVersion),
                   ' sn=', sn, ' 已持有本地key=', !!B._bindKey, ' isBound=', this.isBound)
 
-      // ★ ①(2026-07-13) 先配对(bond)再发 BIND：配对完成后链路加密，
-      //   随后 BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞（见 docs/已验证事实_安全模型实测与纠偏.md F3）。
-      const bondRes = await this._triggerBond()
+      // ★ ①(2026-07-13) + Phase2 passkey(2026-07-15) 先配对(bond)再发 BIND：
+      //   配对完成后链路加密，BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞。
+      //   forceRebond：设备无 owner（首绑/恢复出厂后）时强制重绑，确保手机侧旧 bond 被清除并重新弹 passkey。
+      const bondRes = await this._triggerBond(!(this.deviceBound || this.isBound))
       if (bondRes && bondRes.ok) {
         console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
       } else {

@@ -146,19 +146,27 @@ public class KeygoForegroundModule extends UniModule {
     }
 
     /**
-     * ★ 方案A（2026-07-12）：发起 BLE 配对（bond），使 OS 自动重连加密。
+     * ★ 方案A（2026-07-12）+ Phase2 passkey（2026-07-15）：发起 BLE 配对（bond）。
      *
-     * JS 在 BIND:OK 成功后调用：
-     *   createBond({ mac: deviceId }, (res) => { console.log('bond result:', res) })
+     * JS 在 BIND 之前调用（先配对再 BIND，使绑定码在加密链路上传输）：
+     *   createBond({ mac: deviceId, forceRebond: true/false }, (res) => {...})
      *
      * 回调返回 { ok: true/false, message: "..." }。
-     * 配对为 Just Works（NO_INPUT_NO_OUTPUT, MITM=0），通常静默完成无用户提示。
-     * bond 成功后 LTK 存入 Android KeyStore，后续断连重连 OS 自动加密链路。
+     * 固件已启用 passkey/MITM（mitm=1, DISPLAY_ONLY），配对时系统弹「输入配对码」窗，
+     * 用户输绑定码（默认 123456）完成 MITM 认证；bond 成功后 LTK 存手机 KeyStore 与
+     * 固件 SNV，后续 OS 重连自动加密（LINK_ENCRYPTED）→ 走近自动解锁，无需 App 进程。
+     *
+     * ★ 关键修复（2026-07-15）：若手机侧已配对（如设备恢复出厂清了 SNV 但手机 bond 还在），
+     *   直接 device.createBond() 返回 false 且不弹窗 → passkey 永不出现。故：
+     *   - forceRebond=true 且已配对 → 先 removeBond（反射）等 BOND_NONE 再重新配对，强制弹窗；
+     *   - 已配对且 forceRebond=false → 直接成功返回（耳机体验已具备，无需重绑）；
+     *   - 未配对 → 直接发起配对。
      */
     @UniJSMethod(uiThread = false)
     public void createBond(JSONObject options, UniJSCallback callback) {
         String mac = (options != null) ? options.optString("mac", "") : "";
-        Log.i(TAG, "createBond mac=" + mac);
+        boolean forceRebond = (options != null) && options.optBoolean("forceRebond", false);
+        Log.i(TAG, "createBond mac=" + mac + " forceRebond=" + forceRebond);
 
         if (mac.isEmpty()) {
             invokeCallback(callback, false, "MAC 为空");
@@ -180,25 +188,71 @@ public class KeygoForegroundModule extends UniModule {
             return;
         }
 
-        // 注册 bond 状态广播（一次性，收到结果即注销）
         Context ctx = getAppContext();
         if (ctx == null) {
             invokeCallback(callback, false, "获取 Context 失败");
             return;
         }
 
+        // ★ 已配对处理：见方法注释。未配对或强制重绑失败兜底均走 startCreateBond。
+        int bs = device.getBondState();
+        if (bs == BluetoothDevice.BOND_BONDED) {
+            if (!forceRebond) {
+                invokeCallback(callback, true, "已配对");
+                return;
+            }
+            Log.i(TAG, "createBond: 已配对且 forceRebond -> 先 removeBond 再配对");
+            removeBondThenCreate(device, mac, ctx, callback);
+            return;
+        }
+
+        // 未配对：直接发起配对（passkey/MITM 下系统弹输入码窗）
+        startCreateBond(device, mac, ctx, callback);
+    }
+
+    /** 发起配对并监听 BOND 结果（一次性广播接收器）。 */
+    private void startCreateBond(BluetoothDevice device, String mac, Context ctx, UniJSCallback callback) {
         BondStateReceiver receiver = new BondStateReceiver(mac, device, callback);
         IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
         ctx.registerReceiver(receiver, filter);
 
-        // 发起配对
         boolean started = device.createBond();
         Log.i(TAG, "createBond started=" + started + " mac=" + mac);
         if (!started) {
-            ctx.unregisterReceiver(receiver);
+            try { ctx.unregisterReceiver(receiver); } catch (Exception ignore) {}
             invokeCallback(callback, false, "createBond 调用失败");
         }
         // 成功：等待 BondStateReceiver 回传最终结果（BOND_BONDED 或 BOND_NONE）
+    }
+
+    /** 先 removeBond（反射，隐藏 API），等 BOND_NONE 后再 startCreateBond 触发新配对弹窗。 */
+    private void removeBondThenCreate(BluetoothDevice device, String mac, Context ctx, UniJSCallback callback) {
+        BroadcastReceiver remReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) return;
+                BluetoothDevice dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (dev == null || !mac.equals(dev.getAddress())) return;
+                int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+                if (state == BluetoothDevice.BOND_NONE) {
+                    try { context.unregisterReceiver(this); } catch (Exception ignore) {}
+                    Log.i(TAG, "removeBond 完成，发起新配对 mac=" + mac);
+                    startCreateBond(device, mac, ctx, callback);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        ctx.registerReceiver(remReceiver, filter);
+        try {
+            java.lang.reflect.Method m = device.getClass().getMethod("removeBond");
+            m.invoke(device);
+            Log.i(TAG, "removeBond 调用成功 mac=" + mac);
+        } catch (Exception e) {
+            try { ctx.unregisterReceiver(remReceiver); } catch (Exception ignore) {}
+            Log.e(TAG, "removeBond 失败，退而直接配对 mac=" + mac, e);
+            startCreateBond(device, mac, ctx, callback);
+        }
     }
 
     /** 统一回调封装 */
