@@ -1,5 +1,23 @@
 <template>
   <view class="page-config" :class="themeClass">
+
+    <!-- ★ 2026-07-15: 原生插件/基座状态实时横幅（红=标准基座,弹窗不可用;绿=自定义基座,弹窗可用） -->
+    <view
+      v-if="!pluginReady"
+      style="margin:12rpx 24rpx 4rpx;padding:18rpx 20rpx;border-radius:12rpx;background:#fdecea;border:1rpx solid #f5c2c0;color:#b91c1c;font-size:24rpx;line-height:1.5;"
+    >
+      🔴 <text style="font-weight:bold;">当前运行在标准基座 — 系统配对弹窗不可用</text>
+      <view style="margin-top:6rpx;color:#9b2c2c;">原因：标准基座不打包 Keygo-Foreground 原生插件，弹窗所需的 createBond 未被编译进 App（日志会显示「不包含原生插件」）。</view>
+      <view style="margin-top:6rpx;color:#9b2c2c;">解决：HBuilderX → 运行 → 运行到手机或模拟器 → <text style="font-weight:bold;">制作自定义调试基座</text>（消耗 1 次云打包）→ 等编译完自动安装 → 运行 → 运行设置 → 运行基座选「自定义基座」→ 重新运行到手机。本横幅变绿即成功。</view>
+    </view>
+    <view
+      v-else
+      style="margin:12rpx 24rpx 4rpx;padding:18rpx 20rpx;border-radius:12rpx;background:#ecfdf3;border:1rpx solid #a7f3d0;color:#047857;font-size:24rpx;line-height:1.5;"
+    >
+      🟢 <text style="font-weight:bold;">原生插件已加载（自定义基座）— 系统配对弹窗可用</text>
+      <view style="margin-top:6rpx;color:#047857;">开启下方「passkey 系统配对」后绑定设备，系统会弹「输入配对码」窗，输 123456 即可配对。</view>
+    </view>
+
     <!-- ★ v3.23: 智能重连模式选择（全局设置，无需连接） -->
     <view class="reconnect-mode-section">
       <view class="section-title">🔁 智能重连模式</view>
@@ -220,6 +238,17 @@
         </view>
       </view>
 
+      <!-- ★ 2026-07-15: passkey 配对偏好（全局，手机端保存，不入下发配置） -->
+      <view class="section-title">🔑 passkey 配对（舒适进入）</view>
+      <view class="config-item">
+        <view class="config-header">
+          <text class="config-label">启用 passkey 系统配对</text>
+          <switch :checked="usePasskey" @change="onTogglePasskey" color="#3b82f6" style="transform: scale(0.7);" />
+        </view>
+        <view class="config-desc">开启后，绑定设备时系统弹「输入配对码」窗（需自定义基座 + 原生插件），配对成功即 OS 级加密重连 → 手机揣兜里、App 没开也能自动解锁（耳机体验）。</view>
+        <view class="config-desc config-disabled-hint" v-if="usePasskey && !pluginReady">⚠️ 当前未检测到原生插件（可能运行在标准基座）。开启后绑定将无法弹窗，请改用自定义基座，或关闭此项走明文。</view>
+      </view>
+
       <!-- ★ 设备绑定：抽出为独立 BindModal 弹窗（fixed 覆盖层，脱离 swiper/scroll-view
            文档流，input 可靠）。配置页此处仅显示状态与入口，实际操作在弹窗内完成。 -->
       <view class="divider"></view>
@@ -273,6 +302,11 @@ import { isFirmwareAtLeast } from '@/utils/firmware.js'
 const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
+
+// ★ 2026-07-15: passkey 配对偏好开关（绑定行为门控）
+const usePasskey = computed(() => bleStore.usePasskey)
+const pluginReady = ref(false)
+function onTogglePasskey(e) { bleStore.setUsePasskey(e.detail.value) }
 
 // ★ 设备绑定弹窗（fixed 覆盖层，脱离 swiper/scroll-view 文档流，input 可靠）
 const bindModalVisible = ref(false)
@@ -371,6 +405,8 @@ watch(() => props.active, (now, was) => {
 
 onShow(() => {
   themeStore.applyNavBar()
+  // ★ 2026-07-15: 探测原生插件是否可用（决定 passkey 开关的警告提示）
+  try { pluginReady.value = !!uni.requireNativePlugin('Keygo-Foreground') } catch (e) { pluginReady.value = false }
   // ★ BugFix: 传入 SN 才能读设备专属配置 ble_config_v1_{SN}
   //   不传 SN 只会读旧版全局 ble_config_v1，切后台再切回时找不到设备专属配置导致重置为默认值
   bleStore._restoreConfig(bleStore.serialNumber || undefined)

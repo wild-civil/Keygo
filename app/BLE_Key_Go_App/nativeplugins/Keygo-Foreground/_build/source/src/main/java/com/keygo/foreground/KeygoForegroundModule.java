@@ -141,7 +141,7 @@ public class KeygoForegroundModule extends UniModule {
         if (callback != null) {
             JSONObject o = new JSONObject();
             try { o.put("running", scanCallback != null); } catch (Exception e) { /* ignore */ }
-            callback.invoke(o);
+            callback.invokeAndKeepAlive(o);
         }
     }
 
@@ -168,15 +168,11 @@ public class KeygoForegroundModule extends UniModule {
         boolean forceRebond = (options != null) && options.optBoolean("forceRebond", false);
         Log.i(TAG, "createBond mac=" + mac + " forceRebond=" + forceRebond);
 
-        if (mac.isEmpty()) {
-            invokeCallback(callback, false, "MAC 为空");
-            return;
-        }
+        if (mac.isEmpty()) { invokeOnce(callback, false, "MAC 为空"); return; }
 
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
         if (adapter == null || !adapter.isEnabled()) {
-            invokeCallback(callback, false, "蓝牙未开启");
-            return;
+            invokeOnce(callback, false, "蓝牙未开启"); return;
         }
 
         BluetoothDevice device;
@@ -184,139 +180,123 @@ public class KeygoForegroundModule extends UniModule {
             device = adapter.getRemoteDevice(mac);
         } catch (IllegalArgumentException e) {
             Log.e(TAG, "getRemoteDevice 失败, mac=" + mac, e);
-            invokeCallback(callback, false, "MAC 格式无效");
-            return;
+            invokeOnce(callback, false, "MAC 格式无效"); return;
         }
 
         Context ctx = getAppContext();
         if (ctx == null) {
-            invokeCallback(callback, false, "获取 Context 失败");
-            return;
+            invokeOnce(callback, false, "获取 Context 失败"); return;
         }
 
-        // ★ 已配对处理：见方法注释。未配对或强制重绑失败兜底均走 startCreateBond。
         int bs = device.getBondState();
-        if (bs == BluetoothDevice.BOND_BONDED) {
-            if (!forceRebond) {
-                invokeCallback(callback, true, "已配对");
-                return;
-            }
-            Log.i(TAG, "createBond: 已配对且 forceRebond -> 先 removeBond 再配对");
-            removeBondThenCreate(device, mac, ctx, callback);
-            return;
+        Log.i(TAG, "createBond bondState=" + bs);
+        if (bs == BluetoothDevice.BOND_BONDED && !forceRebond) {
+            invokeOnce(callback, true, "已配对"); return;
         }
 
-        // 未配对：直接发起配对（passkey/MITM 下系统弹输入码窗）
-        startCreateBond(device, mac, ctx, callback);
-    }
-
-    /** 发起配对并监听 BOND 结果（一次性广播接收器）。 */
-    private void startCreateBond(BluetoothDevice device, String mac, Context ctx, UniJSCallback callback) {
-        BondStateReceiver receiver = new BondStateReceiver(mac, device, callback);
-        IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
-        ctx.registerReceiver(receiver, filter);
-
-        boolean started = device.createBond();
-        Log.i(TAG, "createBond started=" + started + " mac=" + mac);
-        if (!started) {
-            try { ctx.unregisterReceiver(receiver); } catch (Exception ignore) {}
-            invokeCallback(callback, false, "createBond 调用失败");
+        // ★ 关键修复(2026-07-15 晚): 弃用异步 invokeAndKeepAlive —— Weex 在方法 return 时
+        //   会用 null 自动收尾回调，异步广播里的 invokeAndKeepAlive 全部被丢弃 -> JS 只收到 null。
+        //   改用【同步阻塞】模式：后台线程用 CountDownLatch 等 OS 配对广播（最多 30s 给用户输配对码），
+        //   方法 return 前用【单次】 callback.invoke() 返回真实结果（uiThread=false 阻塞工作线程，不 ANR）。
+        android.util.Pair<Boolean, String> result;
+        if (bs == BluetoothDevice.BOND_BONDED && forceRebond) {
+            result = removeBondAndWait(device, mac, ctx, 30);
+        } else {
+            result = createBondAndWait(device, mac, ctx, 30);
         }
-        // 成功：等待 BondStateReceiver 回传最终结果（BOND_BONDED 或 BOND_NONE）
+        invokeOnce(callback, result.first, result.second);
     }
 
-    /** 先 removeBond（反射，隐藏 API），等 BOND_NONE 后再 startCreateBond 触发新配对弹窗。 */
-    private void removeBondThenCreate(BluetoothDevice device, String mac, Context ctx, UniJSCallback callback) {
-        BroadcastReceiver remReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                String action = intent.getAction();
-                if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) return;
-                BluetoothDevice dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+    /** 同步等待配对结果（最多 timeoutSec 秒）。必须在后台线程调用（uiThread=false）。 */
+    private android.util.Pair<Boolean, String> createBondAndWait(BluetoothDevice device, String mac, Context ctx, int timeoutSec) {
+        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        final boolean[] ok = { false };
+        final String[] reason = { "超时未完成配对" };
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(i.getAction())) return;
+                BluetoothDevice dev = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                 if (dev == null || !mac.equals(dev.getAddress())) return;
-                int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
-                if (state == BluetoothDevice.BOND_NONE) {
-                    try { context.unregisterReceiver(this); } catch (Exception ignore) {}
-                    Log.i(TAG, "removeBond 完成，发起新配对 mac=" + mac);
-                    startCreateBond(device, mac, ctx, callback);
+                int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+                if (st == BluetoothDevice.BOND_BONDED) {
+                    ok[0] = true; reason[0] = "配对成功"; latch.countDown();
+                } else if (st == BluetoothDevice.BOND_NONE) {
+                    ok[0] = false; reason[0] = "配对失败(用户取消或超时)"; latch.countDown();
                 }
             }
         };
         IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
-        ctx.registerReceiver(remReceiver, filter);
+        ctx.registerReceiver(receiver, filter);
+
+        boolean started = doCreateBond(device);
+        if (!started) {
+            Log.w(TAG, "createBond 首次返回 false，800ms 后重试 mac=" + mac);
+            try { Thread.sleep(800); } catch (InterruptedException ignore) {}
+            started = doCreateBond(device);
+        }
+        if (!started) {
+            try { ctx.unregisterReceiver(receiver); } catch (Exception ignore) {}
+            return new android.util.Pair<>(false, "系统拒绝发起配对(createBond 返回 false)");
+        }
+        try { latch.await(timeoutSec, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignore) {}
+        try { ctx.unregisterReceiver(receiver); } catch (Exception ignore) {}
+        return new android.util.Pair<>(ok[0], reason[0]);
+    }
+
+    /** 已配对且强制重绑：先 removeBond 等 NONE，再重新配对弹 passkey。 */
+    private android.util.Pair<Boolean, String> removeBondAndWait(BluetoothDevice device, String mac, Context ctx, int timeoutSec) {
+        final java.util.concurrent.CountDownLatch removed = new java.util.concurrent.CountDownLatch(1);
+        BroadcastReceiver rem = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(i.getAction())) return;
+                BluetoothDevice dev = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (dev == null || !mac.equals(dev.getAddress())) return;
+                int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+                if (st == BluetoothDevice.BOND_NONE) {
+                    try { c.unregisterReceiver(this); } catch (Exception ignore) {}
+                    removed.countDown();
+                }
+            }
+        };
+        ctx.registerReceiver(rem, new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED));
         try {
             java.lang.reflect.Method m = device.getClass().getMethod("removeBond");
             m.invoke(device);
             Log.i(TAG, "removeBond 调用成功 mac=" + mac);
         } catch (Exception e) {
-            try { ctx.unregisterReceiver(remReceiver); } catch (Exception ignore) {}
+            try { ctx.unregisterReceiver(rem); } catch (Exception ignore) {}
             Log.e(TAG, "removeBond 失败，退而直接配对 mac=" + mac, e);
-            startCreateBond(device, mac, ctx, callback);
+            return createBondAndWait(device, mac, ctx, timeoutSec);
         }
+        try { removed.await(10, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignore) {}
+        return createBondAndWait(device, mac, ctx, timeoutSec);
     }
 
-    /** 统一回调封装 */
-    private void invokeCallback(UniJSCallback callback, boolean ok, String message) {
+    /** 单次最终回调（不再依赖 keepAlive）。 */
+    private void invokeOnce(UniJSCallback callback, boolean ok, String message) {
         if (callback == null) return;
         JSONObject o = new JSONObject();
-        try {
-            o.put("ok", ok);
-            o.put("message", message);
-        } catch (Exception e) { /* ignore */ }
+        try { o.put("ok", ok); o.put("message", message); } catch (Exception e) { /* ignore */ }
+        Log.i(TAG, "createBond 最终 -> ok=" + ok + " msg=" + message);
         callback.invoke(o);
     }
 
-    /**
-     * ★ 方案A：Bond 状态广播接收器（一次性）。
-     *
-     * 监听 BluetoothDevice.ACTION_BOND_STATE_CHANGED，
-     * 等待目标设备的最终 bond 状态（BOND_BONDED=12 或 BOND_NONE=10），
-     * 收到后回传 callback 并自动注销。
-     */
-    private static class BondStateReceiver extends BroadcastReceiver {
-        private final String mac;
-        private final BluetoothDevice device;
-        private final UniJSCallback callback;
-
-        BondStateReceiver(String mac, BluetoothDevice device, UniJSCallback callback) {
-            this.mac = mac;
-            this.device = device;
-            this.callback = callback;
-        }
-
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-            if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) return;
-
-            BluetoothDevice dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-            if (dev == null || !mac.equals(dev.getAddress())) return;
-
-            int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
-            Log.i(TAG, "BondStateReceiver mac=" + mac + " state=" + state
-                + " (" + (state == BluetoothDevice.BOND_BONDED ? "BONDED" :
-                          state == BluetoothDevice.BOND_BONDING ? "BONDING" :
-                          state == BluetoothDevice.BOND_NONE ? "NONE" : "?") + ")");
-
-            if (state == BluetoothDevice.BOND_BONDED) {
-                context.unregisterReceiver(this);
-                invokeCallbackStatic(callback, true, "配对成功");
-            } else if (state == BluetoothDevice.BOND_NONE) {
-                context.unregisterReceiver(this);
-                invokeCallbackStatic(callback, false, "配对失败");
+    /** 发起配对：先无参 createBond()（JS 已断开 GATT 时最稳），失败再反射 TRANSPORT_LE（API31+，针对双模传输歧义）。 */
+    private boolean doCreateBond(BluetoothDevice device) {
+        boolean r = device.createBond();
+        Log.i(TAG, "doCreateBond: createBond() -> " + r);
+        if (r) return true;
+        try {
+            java.lang.reflect.Method m = device.getClass().getMethod("createBond", int.class);
+            Object ret = m.invoke(device, 2 /* BluetoothDevice.TRANSPORT_LE */);
+            if (ret instanceof Boolean) {
+                Log.i(TAG, "doCreateBond: createBond(TRANSPORT_LE) -> " + ret);
+                return (Boolean) ret;
             }
-            // BOND_BONDING(11): 中间状态，忽略，等最终 BOND_BONDED 或 BOND_NONE
+        } catch (Exception e) {
+            Log.w(TAG, "doCreateBond: TRANSPORT_LE 不可用，保持失败", e);
         }
-
-        private static void invokeCallbackStatic(UniJSCallback callback, boolean ok, String message) {
-            if (callback == null) return;
-            JSONObject o = new JSONObject();
-            try {
-                o.put("ok", ok);
-                o.put("message", message);
-            } catch (Exception e) { /* ignore */ }
-            callback.invoke(o);
-        }
+        return false;
     }
 
     /**

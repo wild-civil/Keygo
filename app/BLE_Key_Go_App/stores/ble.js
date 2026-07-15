@@ -182,6 +182,10 @@ export const useBleStore = defineStore('ble', {
     thresholdZone: 0,             // 当前区间：0 中性 / 1 解锁区 / 2 锁车区
     showProgressCard: true,       // ★ v3.31 方案B-修正: 连接页是否显示「确认进度」卡片（手机端偏好，不下发设备）
 
+    // ★ 2026-07-15: passkey 系统配对偏好（全局，手机端保存，不入下发配置）
+    //   开启=舒适进入/无 App 也能解锁（需自定义基座+原生插件）；关闭(默认)=明文最大兼容
+    usePasskey: false,
+
     // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
     _lastCmdAt: 0,               // 上次命令发起时间戳(ms)，用于最小间隔节流
@@ -198,6 +202,8 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.5 / v3.12: 持久化恢复标记
     _restored: false,              // 旧版全局恢复标记（兼容）
     _restoredForSn: '',            // ★ v3.12: 已为哪个 SN 恢复了专属配置（空串=未恢复）
+
+    _usePasskeyRestored: false,   // ★ 2026-07-15: usePasskey 偏好是否已从本地恢复（只恢复一次）
 
     // ★ v3.11: 蓝牙适配器 & 重连状态（原生广播驱动）
     btState: 'unknown',           // 'on' | 'off' | 'just_enabled' | 'unknown'
@@ -372,6 +378,14 @@ export const useBleStore = defineStore('ble', {
             console.log('[Store] 智能重连模式已恢复:', mode)
           }
         } catch {}
+      }
+
+      // ★ 2026-07-15: 恢复「passkey 配对」偏好（全局设置，只恢复一次）
+      if (!this._usePasskeyRestored) {
+        this._usePasskeyRestored = true
+        try {
+          this.usePasskey = !!uni.getStorageSync('keygo_use_passkey')
+        } catch (e) { /* 忽略 */ }
       }
 
       // ★ 如果传了 SN 且已针对该 SN 恢复过，跳过
@@ -3301,28 +3315,45 @@ export const useBleStore = defineStore('ble', {
      * forceRebond=true 时原生会先 removeBond（设备恢复出厂但手机仍配对的情形），强制重弹 passkey。
      * 内部带超时（默认 30s，给用户输入配对码留时间），超时/失败均 resolve 而非 reject，由调用方决定降级。
      */
-    _triggerBond(forceRebond = false, timeoutMs = 30000) {
-      return new Promise((resolve) => {
-        if (!this.deviceId) return resolve({ ok: false, message: '无 deviceId' })
-        let settled = false
-        const finish = (res) => {
-          if (!settled) { settled = true; resolve(res || { ok: false, message: '无回传' }) }
-        }
-        let timer = null
-        try {
-          const fg = uni.requireNativePlugin('Keygo-Foreground')
-          if (!fg) return finish({ ok: false, message: '原生插件不可用' })
-          // 超时兜底：防止部分 ROM 静默丢弃配对导致 Promise 永久挂起（默认 30s 给用户输入 passkey 留时间）
-          timer = setTimeout(() => finish({ ok: false, message: '配对超时' }), timeoutMs)
-          fg.createBond({ mac: this.deviceId, forceRebond }, (res) => {
-            if (timer) clearTimeout(timer)
-            finish(res)
-          })
-        } catch (e) {
-          if (timer) clearTimeout(timer)
-          finish({ ok: false, message: String((e && e.message) || e) })
-        }
+    /**
+     * ★ 2026-07-15 晚 重写：原生 createBond 已改为【同步阻塞 + 单次 callback.invoke】模式
+     *   （旧版异步 invokeAndKeepAlive 被 Weex 在方法 return 时自动 null 收尾，JS 永远只收到 null）。
+     *   流程：① 配对前先断开 uni 的 GATT（已 GATT 连接时 OS 的 createBond() 常返回 false 不弹窗）；
+     *        ② 调原生 createBond（后台阻塞等 OS 配对广播，最多 30s 给用户输入 passkey），返回单次最终结果；
+     *        ③ 配对后重建 GATT 连接，使后续 BIND 写命令有链路（失败也不阻塞，store 自动重连兜底）。
+     */
+    async _triggerBond(forceRebond = false, timeoutMs = 35000) {
+      if (!this.deviceId) return { ok: false, message: '无 deviceId' }
+      const fg = uni.requireNativePlugin('Keygo-Foreground')
+      if (!fg) return { ok: false, message: '原生插件不可用（标准基座不支持，请用自定义调试基座）' }
+
+      // ① 断开 GATT，让 OS 能发起系统配对
+      try {
+        await new Promise((r) => { try { uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => r() }) } catch (e) { r() } })
+        await new Promise((r) => setTimeout(r, 600)) // 等 OS 真正拆链，避免与 createBond 竞争
+        console.log('[BOND] 已断开 GATT，准备发起系统配对')
+      } catch (e) { console.warn('[BOND] 断开 GATT 异常', e) }
+
+      // ② 调原生 createBond，等待单次最终结果
+      const res = await new Promise((resolve) => {
+        let done = false
+        const finish = (rr) => { if (!done) { done = true; resolve(rr || { ok: false, message: '无回传' }) } }
+        const timer = setTimeout(() => finish({ ok: false, message: '配对超时(>' + timeoutMs + 'ms)' }), timeoutMs)
+        fg.createBond({ mac: this.deviceId, forceRebond }, (rr) => {
+          console.log('[BOND] 原生返回:', JSON.stringify(rr))
+          clearTimeout(timer)
+          finish(rr)
+        })
       })
+
+      // ③ 配对后重建 GATT 连接（后续 BIND 写命令依赖），失败不阻塞（store 自动重连兜底）
+      try {
+        console.log('[BOND] 配对结束，尝试重建 GATT 连接...')
+        await this.connect(this.deviceId)
+        console.log('[BOND] GATT 连接已重建')
+      } catch (e) { console.warn('[BOND] 重建连接失败（store 会自动重连）', e) }
+
+      return res
     },
 
     /** 从本地存储恢复 bindKey；存在则置 isBound=true */
@@ -3416,15 +3447,21 @@ export const useBleStore = defineStore('ble', {
       console.log('[BIND] === 开始绑定 === fwVersion=', JSON.stringify(this.fwVersion),
                   ' sn=', sn, ' 已持有本地key=', !!B._bindKey, ' isBound=', this.isBound)
 
-      // ★ ①(2026-07-13) + Phase2 passkey(2026-07-15) 先配对(bond)再发 BIND：
-      //   配对完成后链路加密，BIND:code 在空中即为密文，堵住"明文嗅探绑定码"漏洞。
-      //   forceRebond：设备无 owner（首绑/恢复出厂后）时强制重绑，确保手机侧旧 bond 被清除并重新弹 passkey。
-      const bondRes = await this._triggerBond(!(this.deviceBound || this.isBound))
-      if (bondRes && bondRes.ok) {
-        console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
+      // ★ 2026-07-15: usePasskey 偏好门控——仅当用户开启「passkey 配对(舒适进入)」才发起系统配对。
+      //   关闭(默认,最大兼容)：跳过配对，绑定码以明文 BIND+AUTH 传输，全平台/标准基座可用，
+      //     但无 OS 级加密重连、需 App 在前台/后台维持连接才解锁。
+      //   开启：调原生 createBond 弹系统配对窗(需自定义基座+原生插件)，配对成功→OS 加密重连→无 App 也能解锁。
+      if (this.usePasskey) {
+        // forceRebond：设备无 owner（首绑/恢复出厂后）时强制重绑，确保手机侧旧 bond 被清除并重新弹 passkey。
+        const bondRes = await this._triggerBond(!(this.deviceBound || this.isBound))
+        if (bondRes && bondRes.ok) {
+          console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
+        } else {
+          console.warn('[BIND] ⚠ 配对未完成（', (bondRes && bondRes.message) || '未知', '），绑定码将以明文传输',
+            '（若设备此前已配对过则链路本身已加密，仍安全）')
+        }
       } else {
-        console.warn('[BIND] ⚠ 配对未完成（', (bondRes && bondRes.message) || '未知', '），绑定码将以明文传输',
-          '（若设备此前已配对过则链路本身已加密，仍安全）')
+        console.log('[BIND] 已关闭 passkey 配对（usePasskey=false）：跳过系统配对，绑定码以明文 + AUTH 传输（全平台可用，但需 App 在场解锁）')
       }
 
       // 0) ★ 先注册 BIND waiter（关键修复：消除"固件回包早于 waiter 注册"的竞态）。
@@ -3856,6 +3893,15 @@ export const useBleStore = defineStore('ble', {
         this._modeDebounceTimer = null
         this._applyModeSideEffects(mode, prev)
       }, 350)
+    },
+
+    // ★ 2026-07-15: 设置是否启用 passkey 系统配对（舒适进入 / 无 App 也能解锁）
+    //   开启：绑定设备时调起系统配对窗（需自定义基座 + 原生插件 Keygo-Foreground），配对成功即 OS 级加密重连。
+    //   关闭（默认，最大兼容）：绑定走明文 BIND+AUTH，任何手机/标准基座可用，但需 App 在前台/后台维持连接才解锁。
+    //   仅改 App 行为，固件零改动；持久化到 keygo_use_passkey。
+    setUsePasskey(v) {
+      this.usePasskey = !!v
+      try { uni.setStorageSync('keygo_use_passkey', this.usePasskey) } catch (e) { /* 忽略 */ }
     },
 
     /**
