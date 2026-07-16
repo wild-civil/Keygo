@@ -16,6 +16,7 @@
 #include "battery_service.h"
 #include "peripheral.h"
 #include "keygo_core.h"
+#include "keygo_hid.h"      /* ★ v3.34.0: 无App模式 HID 锚点(策略A 被动锚点) */
 #include "bonding.h"       /* ★ KeyGo 绑定/授权模块（信任列表 + Bond Manager 回调） */
 #include "CH58x_common.h"  /* ★ v3.15-#18: SYS_ResetExecute() 用于 advertising 耗尽时复位 */
 #include <stdlib.h>
@@ -67,12 +68,15 @@ static void Peripheral_BuildAdvertData(void)
     advertData[idx++] = LO_UINT16(GAP_APPEARE_GENERIC_WATCH); //想定义啥自己去appearance.h找，记得包含头文件
     advertData[idx++] = HI_UINT16(GAP_APPEARE_GENERIC_WATCH);
 
-    // [2] 16-bit UUID list (incomplete)：KeyGo 0xFF00 + Battery 0x180F
-    //     声明设备支持的 Service，手机扫描时可据此显示对应图标
-    advertData[idx++] = 0x05;
+    // [2] 16-bit UUID list (incomplete)：KeyGo 0xFF00 + Battery 0x180F + HID 0x1812
+    //     声明设备支持的 Service，手机扫描时可据此显示对应图标；
+    //     ★ v3.34.0 加入 HID_SERV_UUID(0x1812) —— 让 OS 在扫描阶段即识别为 HID 外设，
+    //       配合 keygo_hid.c 注册的 HID GATT 库，已配对时像键鼠一样自动重连(无App模式)。
+    advertData[idx++] = 0x07;
     advertData[idx++] = GAP_ADTYPE_16BIT_MORE;
-    advertData[idx++] = 0x00; advertData[idx++] = 0xFF;                     // KeyGo Service
+    advertData[idx++] = 0x00; advertData[idx++] = 0xFF;                                                 // KeyGo Service
     advertData[idx++] = LO_UINT16(BATT_SERV_UUID); advertData[idx++] = HI_UINT16(BATT_SERV_UUID);  // Battery Service
+    advertData[idx++] = LO_UINT16(KG_HID_SERV_UUID); advertData[idx++] = HI_UINT16(KG_HID_SERV_UUID);  // HID Service (0x1812)
 
     // ─── 以下两段二选一，把电量塞进广播包 ───
     //      需要哪种，取消注释对应段即可。
@@ -225,9 +229,14 @@ void Peripheral_Init(void)
     }
 
     {
-        uint16_t advInt = DEFAULT_ADVERTISING_INTERVAL;
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advInt);
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advInt);
+        // ★ v3.34.0 无App模式(HID锚点)：高占空比广播(20ms)加快 OS 后台自动重连发现；
+        //   仅无App模式(g_encRequired=1)启用，普通 App 模式维持默认 50ms 省电。
+        //   ? 量产应加「高占空比 N 秒后转低占空比」降速定时器（见计划文档）。
+        uint8_t  hidMode  = g_encRequired;
+        uint16_t advIntMin = hidMode ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:20ms / 默认:50ms
+        uint16_t advIntMax = hidMode ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:30ms / 默认:50ms
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
         GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, ENABLE);
     }
 
@@ -237,6 +246,7 @@ void Peripheral_Init(void)
     DevInfo_AddService();
     SimpleProfile_AddService(GATT_ALL_SERVICES);
     Battery_AddService();   // ★ v3.13: Battery Service (0x180F)
+    KeyGo_Hid_AddService(); // ★ v3.34.0: HID 锚点服务(0x1812) —— 策略A 被动锚点，仅建库不接管 GAP
 
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, strlen((char*)attDeviceName), attDeviceName);
 

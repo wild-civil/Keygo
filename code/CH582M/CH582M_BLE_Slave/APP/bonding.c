@@ -151,6 +151,17 @@ void Bonding_Init(void)
     uint8_t bondingEnabled = 1;
     GAPBondMgr_SetParameter(GAPBOND_PERI_BONDING_ENABLED, sizeof(uint8_t), &bondingEnabled);
 
+    /* ★ v3.34.0 无App模式(策略A HID锚点)：关闭白名单(AUTO_SYNC_WL=FALSE)。
+     *   原 WCH 默认 TRUE —— 配对后把 Host 地址写入 controller 白名单、广播过滤策略
+     *   改为"只接受白名单设备"。但手机用随机私有地址(RPA)且定期轮换，白名单里的
+     *   旧 RPA 与轮换后的新 RPA 不匹配 → 断连后 OS 自动重连/手动重连均被 controller
+     *   过滤策略拒绝(必须重启设备或忘记重配对才能连)。关掉白名单后广播接受所有设备，
+     *   断连重连恢复正常；业务层 AUTH/BIND 仍提供安全保护。对齐 Spike 修复 bug1。 */
+    {
+        uint8_t syncWL = FALSE;
+        GAPBondMgr_SetParameter(GAPBOND_AUTO_SYNC_WL, sizeof(uint8_t), &syncWL);
+    }
+
     /* ★ Phase 2 迁移：首次升级到 passkey 固件时，清掉旧的 Just Works bond。
      *   旧 bond 持旧 LTK，OS 仍可用其自动加密重连 → LINK_ENCRYPTED=true → 绕过新密码门 RSSI 解锁。
      *   用 DataFlash 标记 KEYGO_SECEP_ADDR 确保只迁移一次（避免每次启动都清）；标记已置则跳过。
@@ -184,6 +195,19 @@ void Bonding_ApplyPairingMode(void)
     GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pm);
     PRINT("[BOND] pairing mode = %s (encRequired=%d)\n",
           g_encRequired ? "INITIATE" : "WAIT_FOR_REQ", g_encRequired);
+
+    /* ★ v3.34.0 无App模式(HID锚点)同步广播占空比：
+     *   encRequired=1 → 高占空比(20/30ms)加快 OS 后台自动重连；
+     *   encRequired=0 → 恢复默认 50ms 省电。
+     *   注：持续 20ms 较耗电；量产应加「高占空比 N 秒后转低占空比」降速定时器。 */
+    {
+        uint16_t advIntMin = g_encRequired ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 20ms / 50ms
+        uint16_t advIntMax = g_encRequired ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 30ms / 50ms
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
+        PRINT("[BOND] adv interval = %s duty (encRequired=%d)\n",
+              g_encRequired ? "HIGH(20/30ms)" : "NORMAL(50ms)", g_encRequired);
+    }
 }
 
 /*********************************************************************
