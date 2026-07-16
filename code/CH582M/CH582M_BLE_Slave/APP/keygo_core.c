@@ -139,6 +139,17 @@ static uint8_t  g_spikeConsecutive  = 0;
 static float    g_lastRawRSSI       = RSSI_UNINITIALIZED_F;
 static uint8_t  g_rssiUpdated       = 0;    // ★ 新 Kalman 样本标记
 
+/* ── [OBS_BEGIN] 无App模式观测性（①）：加密链路上升沿检测 + LED 提示 + RSSI 节流打印 ──
+ *   - g_obsLinkEncrypted：上一拍 LINK_ENCRYPTED 状态，用于检测上升沿（OS bonded 自动重连的标志）
+ *   - g_obsRssiTick：RSSI 节流计数器（每 8 拍≈1s 打印一次，仅无App模式）
+ *   - g_obsBlink*：OS 加密重连时 PB4 指示灯 3 短闪（结束恢复锁态稳态），便于无 App 时肉眼判断重连
+ *   低功耗/量产移除：搜索 [OBS_BEGIN]/[OBS_END] 删除相关代码块即可 — [OBS_END] */
+static uint8_t  g_obsLinkEncrypted  = 0;
+static uint8_t  g_obsRssiTick       = 0;
+static uint8_t  g_obsBlinkLeft      = 0;    // 剩余半周期数（6 = 3 亮灭）
+static uint8_t  g_obsBlinkOn        = 0;    // 当前半周期应为亮=1
+static uint32_t g_obsBlinkNextMs    = 0;
+
 // 状态机
 static uint8_t  g_unlockCounter     = 0;
 static uint8_t  g_lockCounter       = 0;
@@ -654,8 +665,60 @@ void KeyGo_RssiProcess(int8_t rssi)
  * 状态机
  * ───────────────────────────────────────────────────────────────── */
 
+/* ── [OBS_BEGIN] 无App模式 OS 加密重连 LED 提示触发（仅无App模式，3 短闪）── [OBS_END] */
+static void KeyGo_ObsBlinkTrigger(void)
+{
+    if (!g_encRequired) return;   // 仅无App模式给 LED 提示，避免干扰普通模式锁态指示
+    g_obsBlinkLeft   = 6;         // 3×(ON+OFF)
+    g_obsBlinkOn     = 1;
+    g_obsBlinkNextMs = Peripheral_GetSystemMs();
+}
+
 void KeyGo_ProcessStateMachine(void)
 {
+    /* ── [OBS_BEGIN] 观测性（①）：加密链路上升沿 + LED 提示驱动 + RSSI 节流打印 ──
+     *   放在函数最前，确保每拍(≈125ms)都执行，不受下方看门狗/冷却提前 return 影响。
+     *   串行 PRINT 由 HAL 条件编译（release 自动剔除）；LED 提示与状态检测始终运行。 ── [OBS_END] */
+    if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
+        uint8_t encNow = linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0;
+        if (encNow && !g_obsLinkEncrypted) {
+            PRINT("[OBS] LINK_ENCRYPTED (OS bonded reconnect — phone near & paired)\n");
+            KeyGo_ObsBlinkTrigger();
+        } else if (!encNow && g_obsLinkEncrypted) {
+            PRINT("[OBS] LINK_PLAIN (encryption dropped)\n");
+        }
+        g_obsLinkEncrypted = encNow;
+
+        /* LED 提示驱动：到点翻 PB4，结束恢复锁态稳态指示 */
+        if (g_obsBlinkLeft > 0 && Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
+            if (g_obsBlinkOn) GPIOB_SetBits(GPIO_Pin_4);
+            else              GPIOB_ResetBits(GPIO_Pin_4);
+            g_obsBlinkOn   = g_obsBlinkOn ? 0 : 1;
+            g_obsBlinkLeft--;
+            g_obsBlinkNextMs = Peripheral_GetSystemMs() + 160;  // ~100ms 半周期
+            if (g_obsBlinkLeft == 0) {
+                if (g_keyState == KSTATE_UNLOCKED) GPIOB_SetBits(GPIO_Pin_4);
+                else                                GPIOB_ResetBits(GPIO_Pin_4);
+            }
+        }
+
+        /* RSSI 节流打印（仅无App模式，≈1s 一次，便于调阈值/看重连后 RSSI） */
+        if (g_encRequired) {
+            if (++g_obsRssiTick >= 8) {
+                g_obsRssiTick = 0;
+                if (g_filteredRSSI != RSSI_UNINITIALIZED_F) {
+                    uint8_t th = (g_filteredRSSI > g_cfgUnlockThreshold) ? 1
+                               : (g_filteredRSSI < g_cfgLockThreshold)  ? 2 : 0;
+                    PRINT("[OBS] rssi r=%d f=%d th=%d enc=%d\n",
+                          (int)g_latestRSSI, (int)g_filteredRSSI, th, encNow);
+                }
+            }
+        }
+    } else {
+        g_obsLinkEncrypted = 0;
+        g_obsRssiTick      = 0;
+    }
+
     /* ★ v3.15-#16: GPIO 脉冲看门狗 — TMOS SBP_GPIO_PULSE_END_EVT 漏触发兜底
      *   正常路径：脉冲到期 → TMOS 调 KeyGo_GPIO_PulseEnd() → g_actionActive=0
      *   异常路径：事件丢失 → g_actionActive 永远=1 → 后续所有操作阻塞
@@ -785,12 +848,15 @@ void KeyGo_NotifyStatus(void)
         if (g_filteredRSSI > g_cfgUnlockThreshold)      th = 1;
         else if (g_filteredRSSI < g_cfgLockThreshold)   th = 2;
     }
+    // ★ 观测性(①)：加密链路状态（OS bonded 重连标志），上报给 App 读回
+    uint8_t encNow = (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT)
+                     ? (linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0) : 0;
     // ★ 记录本次将上报的计数，供事件驱动去重（避免每样本重复发）
     s_lastReportedUcnt = g_unlockCounter;
     s_lastReportedLcnt = g_lockCounter;
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d,\"conn\":%d,\"enc\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
@@ -808,7 +874,10 @@ void KeyGo_NotifyStatus(void)
         (int)th,                    // ★ v3.31 方案B: 当前区间
         (int)g_deviceMode,           // ★ Phase 2: 设备模式 0=car / 1=ebike
         (int)g_encRequired,          // ★ 方案1: 无 App 模式(OS 系统配对)使能标志，App 据此反映开关/判断弹窗
-        (int)KEYGO_FWSEC);           // ★ v3.33: 安全协议能力版本（授权体系升级总闸门）
+        (int)KEYGO_FWSEC,            // ★ v3.33: 安全协议能力版本（授权体系升级总闸门）
+        (int)g_deviceConnected,      // ★ 观测性(①): 连接状态
+        (int)encNow);                // ★ 观测性(①): 加密链路(OS bonded 重连)状态
+
 
     if (n > 0 && n < (int)sizeof(json)) {
         attHandleValueNoti_t noti;

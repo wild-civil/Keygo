@@ -592,6 +592,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
+        PRINT("[OBS] CONNECTED (noAppMode=%d)\n", g_encRequired);
     }
 }
 
@@ -670,6 +671,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
 
         PRINT("Disconnected.. Reason:%x\n", pEvent->linkTerminate.reason);
+        PRINT("[OBS] DISCONNECTED reason=%x\n", pEvent->linkTerminate.reason);
     }
 }
 
