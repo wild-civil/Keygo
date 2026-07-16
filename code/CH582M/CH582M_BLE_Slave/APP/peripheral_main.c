@@ -1,8 +1,8 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : main.c
- * Author             : KeyGo v3.16 (CH582M) — 基于 WCH V1.1 修改
- * Version            : V3.16
- * Date               : 2026/07/05
+ * Author             : KeyGo v3.35.0 (CH582M) — 基于 WCH V1.1 修改
+ * Version            : V3.35.0
+ * Date               : 2026/07/16
  * Description        : 外设从机应用主函数 — 含 WWDG 中断模式软看门狗 (2.5s)
  *********************************************************************************
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
@@ -16,6 +16,7 @@
 #include "HAL.h"
 #include "gattprofile.h"
 #include "peripheral.h"
+#include "keygo_core.h"  /* ★ 2026-07-16: KeyGo_UartCmdPoll 声明（串口 DEBUG 命令） */
 #include "CH58x_sys.h"  /* WWDG API + SYS_ResetExecute — 软看门狗 2.5s */
 
 /*********************************************************************
@@ -154,6 +155,7 @@ void Main_Circulation()
     while(1)
     {
         TMOS_SystemProcess();      /* BLE 协议栈事件处理 + TMOS 任务调度 */
+        KeyGo_UartCmdPoll();       /* ★ 2026-07-16: 轮询 UART1 调试命令（非 DEBUG 为空实现） */
         g_mainLoopAlive = 1;       /* ← 举手报到！告诉 ISR"我还活着"    */
     }
 }

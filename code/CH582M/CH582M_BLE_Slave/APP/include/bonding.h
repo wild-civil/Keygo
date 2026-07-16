@@ -107,6 +107,10 @@ uint8_t Bonding_RemoveOwner(const uint8_t *peerAddr);
 void    Bonding_EraseAll(void);                    /* 清整个信任列表（丢机/恢复出厂） */
 uint8_t Bonding_Count(void);
 
+/* ★ 2026-07-17 诊断埋点：打印应用层 owner 数 + 协议栈 SNV bond 数（GAPBOND_BOND_COUNT）。
+ *   排查「B 配对后 A 被迫重配」——观察 SNV bond 是否在多手机配对时被淘汰。tag 标注调用点。 */
+void    Bonding_DumpStatus(const char *tag);
+
 /* ── 密码学原语 ── */
 /* 由 绑定码(code) + 序列号(serial) 派生 bindKey：SHA256(code||serial)[0:16]。
  * 固件端与 App 端输入一致即得到相同密钥。serial = FF04 的 MAC 十六进制串（12 字符，大写）。 */

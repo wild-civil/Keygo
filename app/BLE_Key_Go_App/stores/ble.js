@@ -267,6 +267,7 @@ export const useBleStore = defineStore('ble', {
     //   WRITE 仍成功）。为免页面误显 "--"，断连时先不立即清零 RSSI，而是延迟 3s 确认真断连：
     //   期间若收到 FF02(c:1) 自愈则取消清零（见 _parseSingleStatus）。
     _disconnectRssiClearTimer: null,
+    _connectedAtMs: 0,            // ★ 2026-07-17 诊断埋点：本次连接建立时刻（断连时算会话存活时长，区分「秒断」与「久连后掉」）
     _lastFf02Ms: 0,               // ★ v3.31.0 / 2026-07-13: 最近一次收到含 RSSI 的 FF02 时间戳（连续无包判 stale 用）
     _lastRssiDisplayMs: 0,        // ★ v3.31.0 / 2026-07-13: 最近一次写入 displayRssi 的时间（节流用）
     _rssiStaleWatchdog: null,     // ★ v3.31.0 / 2026-07-13: 连续无 FF02 看门狗定时器
@@ -1059,6 +1060,17 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
+      // ★ 2026-07-17 诊断埋点：断连即刻记录「会话画像」，配合固件串口 [DIAG]/reason 定位断连性质：
+      //   - 存活极短(<数秒) + authed=false → 大概率「未鉴权 30s 强断」或 AUTH 未完成即被踢；
+      //   - 存活较久后掉线 + authed=true  → 大概率监督超时(1s)/信道问题(锁屏/Doze)；
+      //   - devBound=true 但 bound=false  → 本机密钥失效（被 B 覆盖/复位）→ 需重绑，佐证互踢。
+      {
+        const _durS = this._connectedAtMs ? ((Date.now() - this._connectedAtMs) / 1000).toFixed(1) : '?'
+        const _msg = `断连: 存活${_durS}s authed=${this.sessionAuthed} bound=${this.isBound} devBound=${this.deviceBound} mode=${this.autoReconnectMode}/${this.reconnectMode}`
+        console.log(`[Store][DIAG] ${_msg}`)
+        try { addDebugLog(_msg, 'warning') } catch (e) {}
+      }
+
       // ★ v3.11: 清除所有定时器防止竞态
       if (this._reconnectTimer) {
         clearTimeout(this._reconnectTimer)
@@ -1748,6 +1760,7 @@ export const useBleStore = defineStore('ble', {
      */
     _finalizeConnection(deviceId) {
       this.connected = true
+      this._connectedAtMs = Date.now()   // ★ 2026-07-17 诊断埋点：记录会话起点，供 _handleDisconnect 算存活时长
       this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
       this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH

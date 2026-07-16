@@ -100,6 +100,27 @@ static void Bonding_ClearSnvBonds(void)
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
 }
 
+/* ★ 2026-07-17 诊断埋点：一处打印「应用层信任列表 + 协议栈 SNV bond」双视图。
+ *   排查「B 配对后 A 被迫重配」根因——多手机场景 SNV(LTK) 容量不足会淘汰最老 bond：
+ *     - appOwners = 应用层信任列表条数 s_bondCount（bindKey 身份，DataFlash 持久化）；
+ *     - snvBonds  = 协议栈实际持有的 LTK 记录数（GAPBOND_BOND_COUNT，只读）。
+ *   ★ 关键观察：在 A 已配对(snvBonds≥1)后让 B 配对，若某次 [DIAG] 打印 snvBonds 掉回 1，
+ *     即实证 A 的 LTK 被挤掉 → A 的手机 OS 重连加密失败 → 弹「需重新配对」。
+ *   tag 标注调用点（INIT/BIND/AUTH/BOND_SAVED/TERM），便于串口日志溯源。 */
+void Bonding_DumpStatus(const char *tag)
+{
+    uint8_t snvBonds = 0;
+    GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &snvBonds);
+    PRINT("[DIAG][%s] appOwners=%d snvBonds=%d authed=%d\n",
+          tag ? tag : "?", s_bondCount, snvBonds, s_sessionAuthed);
+    for (uint8_t i = 0; i < s_bondCount && i < BOND_ENTRY_MAX; i++) {
+        PRINT("[DIAG]   owner[%d] key=%02X%02X%02X%02X.. addrType=%d\n",
+              i, s_bondTbl[i].bindKey[0], s_bondTbl[i].bindKey[1],
+              s_bondTbl[i].bindKey[2], s_bondTbl[i].bindKey[3],
+              s_bondTbl[i].peerAddrType);
+    }
+}
+
 
 /* ★ 前向声明（供 Bonding_BondCBs 初始化器引用） */
 static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
@@ -182,6 +203,7 @@ void Bonding_Init(void)
     Bonding_ApplyPairingMode();
 
     PRINT("[BOND] init done, owners=%d, bonding=%d, mitm=%d\n", s_bondCount, bondingEnabled, mitm);
+    Bonding_DumpStatus("INIT");   /* ★ 2026-07-17 埋点：上电基线（应用层 owner + SNV bond） */
 }
 
 /* ★ 方案1: 根据 g_encRequired 切换配对模式。
@@ -461,6 +483,7 @@ void Bonding_ConnTerminated(void)
     s_sessionSaltValid = 0;
     tmos_memset(s_sessionSalt, 0, BOND_NONCE_LEN);
     s_lastCmdSeq = 0;
+    Bonding_DumpStatus("TERM");   /* ★ 2026-07-17 埋点：断连后确认 SNV bond 是否被淘汰 */
 }
 
 uint8_t Bonding_IsSessionAuthed(uint16_t connHandle)
@@ -553,6 +576,7 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
         PRINT("[BIND] WARNING: Bonding_Save failed; key kept in RAM only (not persisted)\n");
     }
     PRINT("[BIND] owner set (key-based, MAC-independent), count=%d\n", s_bondCount);
+    Bonding_DumpStatus("BIND");   /* ★ 2026-07-17 埋点：BIND 后看 SNV bond 是否变化（多手机挤占） */
     /* ★ P0-2：BIND:OK 内联 C1 会话盐，App 据此对后续控制命令签名 */
     char _bok[48];
     tmos_memcpy(_bok, "BIND:OK:", 8);
@@ -685,6 +709,7 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     s_lastCmdSeq = 0;
     tmos_memset(s_nonce, 0, BOND_NONCE_LEN);
     PRINT("[AUTH] session authed (key-based, MAC-independent)\n");
+    Bonding_DumpStatus("AUTH");   /* ★ 2026-07-17 埋点：AUTH 成功后确认 owner/SNV 现状 */
     KeyGo_SendRawNotify("AUTH:OK");
     return 0;
 }
@@ -813,6 +838,7 @@ static void Bonding_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_
             break;
         case GAPBOND_PAIRING_STATE_BOND_SAVED:
             PRINT("[BOND] bond saved (LTK in SNV), status=%x\n", status);
+            Bonding_DumpStatus("BOND_SAVED");   /* ★ 2026-07-17 埋点：LTK 落 SNV 后统计 bond 数（多手机挤占关键点） */
             break;
         default:
             PRINT("[BOND] state=%x status=%x\n", state, status);

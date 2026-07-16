@@ -1,7 +1,7 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : peripheral.c
- * Author             : KeyGo v3.33.0 (CH582M)
- * Date               : 2026/07/02
+ * Author             : KeyGo v3.35.0 (CH582M)
+ * Date               : 2026/07/16
  * Description        : BLE Key-Go 主程序 — 全局状态 + 初始化 + 事件循环 + 连接回调
  *
  * v3.13: advertising 重启兜底机制（BLE Controller 偶发卡死时延迟重试）
@@ -21,10 +21,14 @@
 #include "CH58x_common.h"  /* ★ v3.15-#18: SYS_ResetExecute() 用于 advertising 耗尽时复位 */
 #include <stdlib.h>
 #include <string.h>
+#include "CH58x_uart.h"   /* ★ 2026-07-16: UART1_RecvString 用于主循环串口命令轮询 (DEBUG) */
 
 /* ─────────────────────────────────────────────────────────────────
  * 广播数据
  * ───────────────────────────────────────────────────────────────── */
+
+// ★ 2026-07-16 调试增强: "Scan req from" 日志开关（串口命令可切换，默认开）
+uint8_t g_scanLogEnabled = 1;
 
 // 扫描响应（v3.13: 运行时动态构建，名称含 MAC 后 3 字节）
 #define SCAN_RSP_MAX_LEN  31
@@ -302,7 +306,93 @@ void Peripheral_Init(void)
     tmos_set_event(Peripheral_TaskID, SBP_START_DEVICE_EVT);
 
     PRINT("==== KEYGO %s (CH582M) ====\n", KEYGO_FW_VERSION);
+#ifdef DEBUG
+    PRINT("[UART] debug cmds: 'scan' toggle / 'scan on' / 'scan off' / 'help'\n");
+#endif
 }
+
+/*********************************************************************
+ * ★ 2026-07-16 串口 DEBUG 命令轮询（v3.35.0 调试增强，非协议变更）
+ *
+ * [为什么用轮询而非中断？]
+ *   UART1_DefInit() 仅使能 RB_IER_TXD_EN（发送），未开接收中断；但 UART 接收是
+ *   硬件自动写入 FIFO 的，只要主循环每圈调用 UART1_RecvString()（非阻塞读 R8_UART1_RFC）
+ *   及时取走即可。人工输入远慢于主循环，FIFO 深度 8 不会溢出。中断方式需改 IER +
+ *   实现 UART1_IRQHandler，侵入更大，故选轮询。
+ *
+ * [调用时机] Main_Circulation() 的 while(1) 每圈调用（见 peripheral_main.c）。
+ *
+ * [命令表]（不区分大小写、忽略前后空格、首个 token 决定命令）：
+ *   scan          切换 "Scan req from" 日志开关
+ *   scan on       打开该日志
+ *   scan off      关闭该日志
+ *   help          打印帮助
+ *
+ * [非 DEBUG 构建] 函数体为空，避免在无 UART1 的工程里链接 UART1_RecvString。
+ *********************************************************************/
+#ifdef DEBUG
+#define UART_CMD_LINE_MAX   32
+static char   s_uartCmdLine[UART_CMD_LINE_MAX];
+static uint8_t s_uartCmdIdx = 0;
+
+// 小写化后比较 token（标准 strcmp，大小写不敏感由调用前转换保证）
+static void KeyGo_UartCmdExec(char *line)
+{
+    char *p = line;
+    while (*p == ' ' || *p == '\t') p++;          // 跳过前导空白
+    if (*p == '\0') return;
+    char *tok = p;
+    while (*p && *p != ' ' && *p != '\t') p++;     // 取首个 token
+    char saved = *p;
+    *p = '\0';
+    for (char *q = tok; *q; q++) {                 // token 转小写
+        if (*q >= 'A' && *q <= 'Z') *q += 0x20;
+    }
+    char *arg = p;                                 // 提取参数（若有）
+    if (saved) {
+        arg++;
+        while (*arg == ' ' || *arg == '\t') arg++;
+    }
+
+    if (strcmp(tok, "scan") == 0) {
+        if (*arg == '\0') {
+            g_scanLogEnabled = g_scanLogEnabled ? 0 : 1;   // 无参数 → 切换
+        } else if (strcmp(arg, "off") == 0) {
+            g_scanLogEnabled = 0;
+        } else if (strcmp(arg, "on") == 0) {
+            g_scanLogEnabled = 1;
+        } else {
+            PRINT("[UART] bad arg '%s' (use: scan | scan on | scan off)\n", arg);
+            return;
+        }
+        PRINT("[UART] scan log %s\n", g_scanLogEnabled ? "ON" : "OFF");
+    } else if (strcmp(tok, "help") == 0) {
+        PRINT("[UART] cmds: scan | scan on | scan off | help\n");
+    } else {
+        PRINT("[UART] unknown: %s (type 'help')\n", tok);
+    }
+}
+
+void KeyGo_UartCmdPoll(void)
+{
+    uint8_t buf[16];
+    uint16_t n = UART1_RecvString(buf);            // 非阻塞读 FIFO 当前所有字节
+    for (uint16_t i = 0; i < n; i++) {
+        char c = (char)buf[i];
+        if (c == '\r' || c == '\n') {              // 行结束符
+            if (s_uartCmdIdx > 0) {
+                s_uartCmdLine[s_uartCmdIdx] = '\0';
+                KeyGo_UartCmdExec(s_uartCmdLine);
+                s_uartCmdIdx = 0;
+            }
+        } else if (s_uartCmdIdx < UART_CMD_LINE_MAX - 1) {
+            s_uartCmdLine[s_uartCmdIdx++] = c;     // 累积到行缓冲
+        }
+    }
+}
+#else
+void KeyGo_UartCmdPoll(void) {}                    // 非 DEBUG：空实现，保证链接
+#endif
 
 /*********************************************************************
  * ────────────────────── 事件处理 ─────────────────────────────────
@@ -525,10 +615,13 @@ static void Peripheral_ProcessGAPMsg(gapRoleEvent_t *pEvent)
 {
     switch (pEvent->gap.opcode) {
         case GAP_SCAN_REQUEST_EVENT:
-            PRINT("Scan req from %x:%x:%x:%x:%x:%x\n",
-                  pEvent->scanReqEvt.scannerAddr[0], pEvent->scanReqEvt.scannerAddr[1],
-                  pEvent->scanReqEvt.scannerAddr[2], pEvent->scanReqEvt.scannerAddr[3],
-                  pEvent->scanReqEvt.scannerAddr[4], pEvent->scanReqEvt.scannerAddr[5]);
+            // ★ 2026-07-16: 受 g_scanLogEnabled 门控（串口命令可切换），默认开。
+            if (g_scanLogEnabled) {
+                PRINT("Scan req from %x:%x:%x:%x:%x:%x\n",
+                      pEvent->scanReqEvt.scannerAddr[0], pEvent->scanReqEvt.scannerAddr[1],
+                      pEvent->scanReqEvt.scannerAddr[2], pEvent->scanReqEvt.scannerAddr[3],
+                      pEvent->scanReqEvt.scannerAddr[4], pEvent->scanReqEvt.scannerAddr[5]);
+            }
             break;
 
         case GAP_PHY_UPDATE_EVENT:
@@ -603,6 +696,12 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
         PRINT("[OBS] CONNECTED (noAppMode=%d)\n", g_encRequired);
+        /* ★ 2026-07-17 埋点：打印本次连接的初始协商参数（手机发起连接时给的值）。
+         *   interval 单位 1.25ms，timeout 单位 10ms。若 timeout 很小(如 100=1s)，
+         *   锁屏/Doze 下极易触发监督超时断连——这是排查「APP 偶发断连」的第一手数据。 */
+        PRINT("[DIAG] LinkEst int=%d(%dms) lat=%d timeout=%d(%dms)\n",
+              event->connInterval, (event->connInterval * 5) / 4,
+              event->connLatency, event->connTimeout, event->connTimeout * 10);
     }
 }
 
@@ -702,6 +801,12 @@ static void peripheralParamUpdateCB(uint16_t connHandle, uint16_t connInterval,
         peripheralConnList.connSlaveLatency = connSlaveLatency;
         peripheralConnList.connTimeout      = connTimeout;
         PRINT("Update %x - Int %x\n", connHandle, connInterval);
+        /* ★ 2026-07-17 埋点：打印参数更新协商结果（约连上 4s 后固件请求 min6/max100/lat0/timeout=100）。
+         *   若这里 timeout 仍是 100(1s)，说明手机接受了 1s 监督超时 → 断连风险高，
+         *   可作为「把 DEFAULT_DESIRED_CONN_TIMEOUT 提到 400(4s)」验证的对照数据。 */
+        PRINT("[DIAG] ParamUpd int=%d(%dms) lat=%d timeout=%d(%dms)\n",
+              connInterval, (connInterval * 5) / 4,
+              connSlaveLatency, connTimeout, connTimeout * 10);
     }
 }
 

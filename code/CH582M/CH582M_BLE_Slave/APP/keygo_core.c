@@ -1,7 +1,7 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : keygo_core.c
- * Author             : KeyGo v3.33.0 (CH582M)
- * Date               : 2026/07/02
+ * Author             : KeyGo v3.35.0 (CH582M)
+ * Date               : 2026/07/16
  * Description        : GPIO + Kalman + RSSI + 状态机 + JSON 通知 + 命令解析
  *********************************************************************************/
 
@@ -757,16 +757,24 @@ void KeyGo_ProcessStateMachine(void)
     //   手动 UNLOCK/LOCK 命令仍有独立会话鉴权门控（见 Peripheral_HandleFF03）。
     if (Bonding_Count() == 0) return;
 
-    // ★ 方案A+B 合并闸门（2026-07-12 晚修正）：RSSI 近场解锁须「链路已加密 OR 本连接已会话鉴权」。
-    //   纯方案A(LINK_ENCRYPTED)的坑：链路加密只在 bond 后、且 Android 常在「断连重连」时才自动加密，
-    //   保持连接时(前台/后台)链路往往未加密→闸门永久拦截→走近不解锁（用户实测复现）。
-    //   故改为 OR：
-    //     · App 活着且跑过 AUTH（前台服务 Keygo-Foreground 自动 AUTH）→ IsSessionAuthed=true → 立刻解锁；
-    //     · App 被杀 + 已配对 + OS 自动重连加密 → LINK_ENCRYPTED=true → 仍能走近解锁（方案A 收益保留）；
+    // ★ 方案A+B 合并闸门（2026-07-12 晚修正；2026-07-16 Option B 升级）
+    //   本闸门同时门控 RSSI 自动解锁 与 自动上锁 两条分支，授权条件 = 「OS 加密授予」OR「App 会话鉴权」。
+    //     · App 活着且跑过 AUTH（前台服务 Keygo-Foreground 自动 AUTH）→ IsSessionAuthed=true → 即刻解锁/上锁；
     //     · 陌生人连上、既未 bond 也未 AUTH → 两者皆 false → 拦截。
-    //   残留风险：Just Works 配对无需密码，任何手机可主动 createBond→LINK_ENCRYPTED=true→RSSI 解锁，
-    //   与「物理手机即钥匙」模型一致，属已知取舍。
-    if (!linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) &&
+    //   ★ 2026-07-16 Option B（修复"关无APP模式仍无APP解锁"矛盾）：
+    //     原逻辑 OS 加密(LINK_ENCRYPTED)无条件授予解锁——导致用户关闭"无APP模式"(g_encRequired=0)后，
+    //     已配对手机仍凭 OS 自动重连加密静默解锁，与开关语义冲突（串口日志实证：ENCRYPT:0 后 LINK_ENCRYPTED
+    //     仍触发 unlock）。现改为：仅当 g_encRequired=1(无APP模式开启)时 OS 加密才授予解锁/上锁权限；
+    //     关闭(g_encRequired=0)时 OS 加密不再授予，仅 App 会话鉴权可解锁——即"关了开关就真的不再无APP解锁"，
+    //     并因 OS 不再驱动解锁、顺带降低已配对手机 OS 自动重连抢占唯一连接槽的动机（双机抢连 bug 的根因之一）。
+    //   注：关开关后"仅 OS 加密、无 App"的连接既不自动解锁也不自动上锁；设备默认锁态 + 断连 6s 安全自动上锁
+    //       仍生效，不引入安全风险（锁定是安全态）。开开关(g_encRequired=1)时维持原方案A 收益不变。
+    //   残留风险：Just Works 配对无需密码，任何手机可主动 createBond→LINK_ENCRYPTED；但仅当无APP模式
+    //       开启(g_encRequired=1)时才解锁，与「物理手机即钥匙」模型一致，属已知取舍。
+    uint8_t osEncGrants = g_encRequired
+            ? (linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0)
+            : 0;
+    if (!osEncGrants &&
         !Bonding_IsSessionAuthed(peripheralConnList.connHandle)) return;
 
     // ★ 只在有新 Kalman 样本时才计数（每 ~500ms 一次，而非每 125ms）

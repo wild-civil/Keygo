@@ -1,7 +1,7 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : keygo_core.h
- * Author             : KeyGo v3.5 (CH582M)
- * Date               : 2026/06/30
+ * Author             : KeyGo v3.35.0 (CH582M)
+ * Date               : 2026/07/16
  * Description        : GPIO + Kalman + RSSI + 状态机 + 通知 + 命令
  *********************************************************************************/
 
@@ -13,12 +13,19 @@
 /* ─────────────────────────────────────────────────────────────────
  * 固件版本号（单一真源）
  * ───────────────────────────────────────────────────────────────── */
-/* ★ v3.34.0: 固件版本号 — 横幅 / [INIT] FW Version / FF02 status "v" 字段共用同一宏。
+/* ★ 固件版本号 — 横幅 / [INIT] FW Version / FF02 status "v" 字段共用同一宏。
  *   升级版本时只改这一处即可全局生效；App 据此做兼容性检查与烧录探针。
  *   v3.34.0 变更：叠加无App模式 HID 锚点（策略A 被动锚点，仅注册 HID-over-GATT
  *     服务 0x1812 + Report Map，保留主固件自定义 GAPRole；关白名单(AUTO_SYNC_WL=FALSE)
- *     修复 RPA 轮换重连被拒；无App模式高占空比广播(20/30ms)加快 OS 自动重连。 */
-#define KEYGO_FW_VERSION   "3.34.0"
+ *     修复 RPA 轮换重连被拒；无App模式高占空比广播(20/30ms)加快 OS 自动重连。
+ *   ★ v3.35.0 变更（2026-07-16，Option B）：解锁闸门新增 g_encRequired 维度。
+ *     关闭"无APP模式"(g_encRequired=0)时，OS 加密(LINK_ENCRYPTED)不再授予 RSSI 自动解锁/上锁，
+ *     仅本连接 App 会话鉴权(Bonding_IsSessionAuthed)可解锁——使"关开关就真的不再无APP解锁"自洽，
+ *     并降低已配对手机 OS 自动重连抢占唯一连接槽的动机。详见 keygo_core.c KeyGo_ProcessStateMachine()。
+ *     协议能力字段 fwsec 维持 1（本变更不改 BIND/AUTH/C1/JSON 协议，App 无需改协议分支）。
+ *   ★ 同一轮调试增强（2026-07-16）：新增串口 DEBUG 命令——输入 `scan` 切换 / `scan on` / `scan off`
+ *     控制 "Scan req from" 日志打印（默认开）；另支持 `help`。详见 peripheral.c KeyGo_UartCmdPoll()。 */
+#define KEYGO_FW_VERSION   "3.35.0"
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
@@ -92,6 +99,12 @@ extern uint8_t  g_cfgKalmanR;            // ★ v3.13: 卡尔曼滤波器 R 值 
 extern uint8_t g_encRequired;            // 1=固件配对模式切 INITIATE(连接即触发 OS 弹 passkey)；0=WAIT_FOR_REQ(默认)
 void KeyGo_LoadEncrypt(void);            // 上电时从 DataFlash 恢复 g_encRequired
 void KeyGo_SaveEncrypt(uint8_t v);       // 持久化 g_encRequired 到 DataFlash
+
+// ★ 2026-07-16 调试增强: "Scan req from" 串口日志开关（仅 DEBUG 构建生效）。
+//   默认 1(开，与历史行为一致)；串口输入 `scan` 切换 / `scan on` / `scan off` 控制。
+//   实现见 peripheral.c KeyGo_UartCmdPoll()（主循环每圈轮询 UART1 接收，非中断）。
+extern uint8_t  g_scanLogEnabled;        // 1=打印扫描请求日志；0=静默
+void KeyGo_UartCmdPoll(void);            // 主循环调用：解析 UART1 调试命令
 
 // ★ 方案1 扩展: 系统配对码(OS SMP passkey)，与绑定码完全独立，仅服务于无 App 模式。
 //   持久化于 KEYGO_PASSCODE_ADDR；默认 123456；仅接受 6 位数字(OS passkey 限制 0~999999)。
