@@ -245,6 +245,7 @@ export const useBleStore = defineStore('ble', {
     _notifyBuffer: '',
     _notifyTimer: null,
     _reconnectGuard: 0,            // 重连会话锁，蓝牙关闭时递增
+    _bondingInProgress: false,     // ★ 2026-07-16: 配对(_triggerBond)期间断开 GATT 让 OS 配对，抑制 store 自动重连
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
     /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
      *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
@@ -1158,6 +1159,13 @@ export const useBleStore = defineStore('ble', {
           console.warn('[Store] ⚡ GPS 异常，悲观启动围栏...')
           this._startGeofenceMonitor()
         })
+        return
+      }
+
+      // ★ 2026-07-16: 配对(_triggerBond)期间主动断开 GATT 是故意的（让 OS 能发起系统配对）。
+      //   此时必须抑制自动重连，否则 store 会立刻把 GATT 重连上 → createBond 在已连接状态下被系统拒绝、不弹窗。
+      if (this._bondingInProgress) {
+        console.log('[Store] 配对中断开 GATT，抑制自动重连（由 _triggerBond 接管重建）')
         return
       }
 
@@ -3327,33 +3335,40 @@ export const useBleStore = defineStore('ble', {
       const fg = uni.requireNativePlugin('Keygo-Foreground')
       if (!fg) return { ok: false, message: '原生插件不可用（标准基座不支持，请用自定义调试基座）' }
 
-      // ① 断开 GATT，让 OS 能发起系统配对
+      // ★ 2026-07-16: 标记配对进行中，抑制 store 自动重连（否则会抢连 GATT，
+      //   导致 createBond 在已连接状态下被系统拒绝、不弹配对窗）。
+      this._bondingInProgress = true
       try {
-        await new Promise((r) => { try { uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => r() }) } catch (e) { r() } })
-        await new Promise((r) => setTimeout(r, 600)) // 等 OS 真正拆链，避免与 createBond 竞争
-        console.log('[BOND] 已断开 GATT，准备发起系统配对')
-      } catch (e) { console.warn('[BOND] 断开 GATT 异常', e) }
+        // ① 断开 GATT，让 OS 能发起系统配对
+        try {
+          await new Promise((r) => { try { uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => r() }) } catch (e) { r() } })
+          await new Promise((r) => setTimeout(r, 600)) // 等 OS 真正拆链，避免与 createBond 竞争
+          console.log('[BOND] 已断开 GATT，准备发起系统配对')
+        } catch (e) { console.warn('[BOND] 断开 GATT 异常', e) }
 
-      // ② 调原生 createBond，等待单次最终结果
-      const res = await new Promise((resolve) => {
-        let done = false
-        const finish = (rr) => { if (!done) { done = true; resolve(rr || { ok: false, message: '无回传' }) } }
-        const timer = setTimeout(() => finish({ ok: false, message: '配对超时(>' + timeoutMs + 'ms)' }), timeoutMs)
-        fg.createBond({ mac: this.deviceId, forceRebond }, (rr) => {
-          console.log('[BOND] 原生返回:', JSON.stringify(rr))
-          clearTimeout(timer)
-          finish(rr)
+        // ② 调原生 createBond，等待单次最终结果（后台阻塞等 OS 配对广播，最多 30s）
+        const res = await new Promise((resolve) => {
+          let done = false
+          const finish = (rr) => { if (!done) { done = true; resolve(rr || { ok: false, message: '无回传' }) } }
+          const timer = setTimeout(() => finish({ ok: false, message: '配对超时(>' + timeoutMs + 'ms)' }), timeoutMs)
+          fg.createBond({ mac: this.deviceId, forceRebond }, (rr) => {
+            console.log('[BOND] 原生返回:', JSON.stringify(rr))
+            clearTimeout(timer)
+            finish(rr)
+          })
         })
-      })
 
-      // ③ 配对后重建 GATT 连接（后续 BIND 写命令依赖），失败不阻塞（store 自动重连兜底）
-      try {
-        console.log('[BOND] 配对结束，尝试重建 GATT 连接...')
-        await this.connect(this.deviceId)
-        console.log('[BOND] GATT 连接已重建')
-      } catch (e) { console.warn('[BOND] 重建连接失败（store 会自动重连）', e) }
+        // ③ 配对后重建 GATT 连接（后续 BIND 写命令依赖）；配对成功 OS 常自动加密重连，此处幂等
+        try {
+          console.log('[BOND] 配对结束，尝试重建 GATT 连接...')
+          await this.connect(this.deviceId)
+          console.log('[BOND] GATT 连接已重建')
+        } catch (e) { console.warn('[BOND] 重建连接失败（store 会自动重连）', e) }
 
-      return res
+        return res
+      } finally {
+        this._bondingInProgress = false
+      }
     },
 
     /** 从本地存储恢复 bindKey；存在则置 isBound=true */
