@@ -90,6 +90,7 @@ typedef struct {
 
 /* ── 生命周期 ── */
 void    Bonding_Init(void);                       /* 载入信任列表 + 配置 Bond Manager + 注册回调 + 跑密码学自测 */
+void    Bonding_ApplyPairingMode(void);           /* ★ 方案1: 根据 g_encRequired 切换配对模式(INITIATE/WAIT_FOR_REQ) */
 uint8_t Bonding_Load(void);                        /* 从 DataFlash 读入 RAM 表 */
 uint8_t Bonding_Save(void);                        /* RAM 表写回 DataFlash（擦+写） */
 

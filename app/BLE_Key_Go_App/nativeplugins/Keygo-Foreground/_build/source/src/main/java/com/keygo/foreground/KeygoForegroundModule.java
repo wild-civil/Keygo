@@ -153,8 +153,8 @@ public class KeygoForegroundModule extends UniModule {
      *
      * 回调返回 { ok: true/false, message: "..." }。
      * 固件已启用 passkey/MITM（mitm=1, DISPLAY_ONLY），配对时系统弹「输入配对码」窗，
-     * 用户输绑定码（默认 123456）完成 MITM 认证；bond 成功后 LTK 存手机 KeyStore 与
-     * 固件 SNV，后续 OS 重连自动加密（LINK_ENCRYPTED）→ 走近自动解锁，无需 App 进程。
+     * 用户输【系统配对码】(由固件 g_sysPasscode 回传，默认 123456，与绑定码独立)完成 MITM 认证；
+     * bond 成功后 LTK 存手机 KeyStore 与固件 SNV，后续 OS 重连自动加密（LINK_ENCRYPTED）→ 走近自动解锁，无需 App 进程。
      *
      * ★ 关键修复（2026-07-15）：若手机侧已配对（如设备恢复出厂清了 SNV 但手机 bond 还在），
      *   直接 device.createBond() 返回 false 且不弹窗 → passkey 永不出现。故：

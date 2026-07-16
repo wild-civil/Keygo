@@ -282,7 +282,9 @@ void Peripheral_Init(void)
     PRINT("[FLASH] DataFlash I/O ready (START_IO rc=%d)\n", ioRc);
     KeyGo_LoadConfig();   // ★ v3.5.1: 从 DataFlash 恢复上次保存的阈值
     KeyGo_LoadMode();     // ★ Phase 2: 从 DataFlash 恢复设备模式(car/ebike)
-    Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层）
+    KeyGo_LoadEncrypt();  // ★ 方案1: 从 DataFlash 恢复 无 App 模式(OS 配对)标志
+    KeyGo_LoadPasscode(); // ★ 方案1 扩展: 从 DataFlash 恢复系统配对码(OS passkey)
+    Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层，内部据 g_encRequired 设配对模式）
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
     GAPRole_BroadcasterSetCB(&Broadcaster_BroadcasterCBs);
 
@@ -826,6 +828,43 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         PRINT("[SETCODE] enter\n");
         uint8_t r = Bonding_HandleSetCodeCmd(connHandle, pValue + 8, len - 8);
         PRINT("[SETCODE] exit r=%d\n", r);
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 9 && tmos_memcmp(pValue, "ENCRYPT:", 8)) {
+        /* ★ 方案1: 无 App 模式(OS 系统配对)开关。
+         *   ENCRYPT:1 → g_encRequired=1 → 配对模式切 INITIATE → 下次连接 OS 弹 passkey 配对；
+         *   ENCRYPT:0 → 关闭，恢复明文最大兼容(仅 App 在场可解锁)。
+         *   回包 ENCRYPT:OK / ENCRYPT:OFF 供 App 确认。 */
+        uint8_t ev = (len > 8 && pValue[8] == '1') ? 1 : 0;
+        g_encRequired = ev;
+        KeyGo_SaveEncrypt(ev);
+        Bonding_ApplyPairingMode();
+        KeyGo_SendRawNotify(ev ? "ENCRYPT:OK" : "ENCRYPT:OFF");
+        PRINT("[ENCRYPT] set encRequired=%d\n", ev);
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 8 && tmos_memcmp(pValue, "SETPASS:", 8)) {
+        /* ★ 方案1 扩展: 设置系统配对码(OS SMP passkey)，与绑定码完全独立，仅服务于无 App 模式。
+         *   必须是 6 位数字(OS passkey 限制 0~999999)；非法 → SETPASS:FAIL。
+         *   立即生效(存 DataFlash)，下次(重)连配对时由 Bonding_PasscodeCB 回传新码。 */
+        uint8_t ok = 0;
+        if (len == 14) {   // "SETPASS:"(8) + 6 位数字
+            uint32_t v = 0;
+            ok = 1;
+            for (uint8_t i = 0; i < 6; i++) {
+                char c = pValue[8 + i];
+                if (c < '0' || c > '9') { ok = 0; break; }
+                v = v * 10u + (uint32_t)(c - '0');
+            }
+            if (ok) {
+                g_sysPasscode = v;
+                KeyGo_SavePasscode(v);
+                KeyGo_SendRawNotify("SETPASS:OK");
+                PRINT("[PASS] set sysPasscode=%lu\n", (unsigned long)v);
+            }
+        }
+        if (!ok) {
+            KeyGo_SendRawNotify("SETPASS:FAIL");
+            PRINT("[PASS] set sysPasscode FAILED (need 6 digits)\n");
+        }
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else {
         /* ── 通用控制命令（UNLOCK/LOCK/TRUNK/NAME 等）：须经 C1 签名 ── */

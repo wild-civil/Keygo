@@ -97,7 +97,7 @@ import {
 //   自定义码统一走 SETCODE 通道（先 AUTH 证明持有旧码）。
 //   继承 v3.33.0/3.33.1：手动模式前台自动连 + fwsec 能力协商 + T4 回推修复 + AUTH 握手互斥锁 +
 //   长按恢复出厂 + FF01 长写重组 + 配置下发去重 + 重绑信任态保持 + 恢复出厂绑码核验 + 复位后回首绑。
-export const APP_VERSION = 'v3.33.2'
+export const APP_VERSION = 'v3.33.4'
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
@@ -185,6 +185,15 @@ export const useBleStore = defineStore('ble', {
     // ★ 2026-07-15: passkey 系统配对偏好（全局，手机端保存，不入下发配置）
     //   开启=舒适进入/无 App 也能解锁（需自定义基座+原生插件）；关闭(默认)=明文最大兼容
     usePasskey: false,
+
+    // ★ 2026-07-16: 无 App 模式（固件 SMP 加密门控，基座无关）
+    //   由固件 g_encRequired 驱动：true=固件在(重)连时主动发 Slave Security Request →
+    //   系统弹 passkey 窗(输系统配对码) → OS 级加密重连 → 无需 App 也能解锁。
+    //   noAppMode = 用户期望态(开关显示)；_noAppModeDirty = 自上次切换后设备是否已应用。
+    //   连接首包以设备 pair 为权威初始化；之后仅当 dirty 且设备未对齐时才重发 ENCRYPT 对账，
+    //   避免「配对过程连接抖动导致下发被丢 → 设备仍报 pair=1 → 开关被弹回 ON」的关不掉 Bug。
+    noAppMode: false,
+    _noAppModeDirty: false,
 
     // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
@@ -2846,6 +2855,32 @@ export const useBleStore = defineStore('ble', {
         console.log('[Store] 设备安全协议能力 fwsec =', _fwsec, '(fwVersion=' + this.fwVersion + ')')
       }
 
+      // ★ 2026-07-16: 无 App 模式（固件 SMP 加密门控，基座无关）
+      //   status.pair = 固件 g_encRequired 的实时镜像。
+      //   对账逻辑：未切换(dirty=false)时以设备为准初始化/同步；切换后(dirty=true)若设备未对齐则重发 ENCRYPT 自愈。
+      if (data.pair !== undefined) {
+        const pair = (Number(data.pair) === 1)
+        if (this._noAppModeDirty) {
+          if (pair !== this.noAppMode) {
+            // 设备未应用期望态（如配对抖动期下发被丢）→ 重新下发校正
+            console.warn('[Store] 无 App 模式设备未对齐(pair=' + pair + ',期望=' + this.noAppMode + ')，重发 ENCRYPT:' + (this.noAppMode ? '1' : '0'))
+            if (this.connected && this.deviceId) {
+              enqueueWrite(() => rawSendCommand(this.deviceId, this.noAppMode ? 'ENCRYPT:1' : 'ENCRYPT:0'))
+                .catch((e) => console.error('[Store] 重发 ENCRYPT 失败:', e))
+            }
+          } else {
+            this._noAppModeDirty = false   // 设备已应用，清除脏标记
+            console.log('[Store] 无 App 模式已落盘 pair =', pair)
+          }
+        } else {
+          // 未切换：以设备为权威（处理掉电/重启后设备真实状态）
+          if (this.noAppMode !== pair) {
+            this.noAppMode = pair
+            console.log('[Store] 无 App 模式同步设备 pair =', pair, '(fwVersion=' + this.fwVersion + ')')
+          }
+        }
+      }
+
       // ★ 2026-07-10: 已绑定标志（bn 字段）—— 双保险确认绑定成功。
       //   固件 BIND 后连续发 BIND:OK + 状态包，浅通知队列下 BIND:OK 可能丢弃；
       //   但 status（含 bn，可靠送达）能确证绑定成功。仅在等待 BIND 回应时生效。
@@ -2864,6 +2899,9 @@ export const useBleStore = defineStore('ble', {
         if (!bound && (B._bindKey !== null || this.isBound)) {
           console.log('[Store] 🔄 设备端已解绑(bn=0)但本机仍有密钥 → 判定设备被复位，忘记本地密钥')
           this._forgetDeviceKey('设备已恢复出厂或已解绑，本机密钥失效，请重新绑定')
+          // ★ 2026-07-16: 设备复位会清掉 g_encRequired/系统配对码，本地期望态一并归零，避免对账时误把无 App 模式重新打开
+          this.noAppMode = false
+          this._noAppModeDirty = false
           // ★ 2026-07-14 修复：设备已复位(bn=0)，_finalizeConnection 的配置推送可能抢跑失败。
           //   重置去重标志，使后续重绑成功(BIND:OK/AUTH:OK)时 _syncConfigToDevice 能重新推送，
           //   避免 _configPushedThisConn 永久为 true 导致"确认次数不一致"（uc/lc 不匹配）。
@@ -3917,6 +3955,39 @@ export const useBleStore = defineStore('ble', {
     setUsePasskey(v) {
       this.usePasskey = !!v
       try { uni.setStorageSync('keygo_use_passkey', this.usePasskey) } catch (e) { /* 忽略 */ }
+    },
+
+    // ★ 2026-07-16: 设置无 App 模式（固件 SMP 加密门控，基座无关，推荐）
+    //   开启：经 FF03 下发 ENCRYPT:1 → 固件 g_encRequired=1 → 配对模式切 INITIATE →
+    //   (重)连时固件主动发 Slave Security Request → 系统弹 passkey 窗输系统配对码 → OS 级加密重连。
+    //   关闭：下发 ENCRYPT:0 → 回到 WAIT_FOR_REQ → 明文 BIND+AUTH（需 App 维持连接）。
+    //   走写队列串行化；置 _noAppModeDirty 标记，连接对账自愈（修复配对抖动期"关不掉"）。
+    setNoAppMode(v) {
+      const on = !!v
+      this.noAppMode = on
+      this._noAppModeDirty = true
+      if (!this.connected || !this.deviceId) {
+        console.warn('[Store] setNoAppMode: 未连接，仅记录期望态，连上后由 status.pair 对账下发')
+        return
+      }
+      enqueueWrite(() => rawSendCommand(this.deviceId, on ? 'ENCRYPT:1' : 'ENCRYPT:0'))
+        .then(() => console.log('[Store] 无 App 模式已下发 ENCRYPT:' + (on ? '1' : '0')))
+        .catch((e) => console.error('[Store] 下发 ENCRYPT 失败:', e))
+    },
+
+    // ★ 方案1 扩展: 设置系统配对码(OS SMP passkey)，与绑定码独立，仅服务于无 App 模式。
+    //   必须是 6 位数字；经 FF03 下发 SETPASS:<6位> → 固件存 DataFlash，下次配对时由 PasscodeCB 回传。
+    //   本地也持久化一份(keygo_sys_passcode)，便于 UI 提示用户在系统弹窗输入同一码。
+    setSysPasscode(code) {
+      const c = String(code || '').trim()
+      try { uni.setStorageSync('keygo_sys_passcode', c) } catch (e) { /* 忽略 */ }
+      if (!this.connected || !this.deviceId) {
+        console.warn('[Store] setSysPasscode: 未连接，仅持久化本地，连上后由启用流程下发')
+        return Promise.resolve(false)
+      }
+      return enqueueWrite(() => rawSendCommand(this.deviceId, 'SETPASS:' + c))
+        .then(() => { console.log('[Store] 系统配对码已下发 SETPASS:' + c); return true })
+        .catch((e) => { console.error('[Store] 下发 SETPASS 失败:', e); return false })
     },
 
     /**

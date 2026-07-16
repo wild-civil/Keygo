@@ -100,23 +100,8 @@ static void Bonding_ClearSnvBonds(void)
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
 }
 
-/* ★ Phase 2：把当前绑定码(字符串)转成数值 passkey 供 GAPBondMgr_PasscodeRsp。
- *   约定绑定码为数字串(默认 123456)；含非数字或超出 6 位 → 安全回退 123456，
- *   避免传入非法 passcode 导致配对吊死（passkey 必须为数值）。 */
-static uint32_t Bonding_GetPasscodeNumeric(void)
-{
-    uint32_t v = 0;
-    uint8_t len = g_curBindCodeLen;
-    if (len < 1 || len > 6) return 123456u;
-    for (uint8_t i = 0; i < len; i++) {
-        char c = g_curBindCode[i];
-        if (c < '0' || c > '9') return 123456u;
-        v = v * 10u + (uint32_t)(c - '0');
-    }
-    return v;
-}
 
-/* 前向声明（供 Bonding_BondCBs 初始化器引用） */
+/* ★ 前向声明（供 Bonding_BondCBs 初始化器引用） */
 static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
                                 uint8_t uiInputs, uint8_t uiOutputs);
 static void Bonding_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_t status);
@@ -182,7 +167,23 @@ void Bonding_Init(void)
         }
     }
 
+    // ★ 方案1: 应用 无App模式 配对模式(基于已加载的 g_encRequired)
+    Bonding_ApplyPairingMode();
+
     PRINT("[BOND] init done, owners=%d, bonding=%d, mitm=%d\n", s_bondCount, bondingEnabled, mitm);
+}
+
+/* ★ 方案1: 根据 g_encRequired 切换配对模式。
+ *   =1 → GAPBOND_PAIRING_MODE_INITIATE(连接即主动发 Slave Security Request → OS 弹 passkey 配对)；
+ *   =0 → GAPBOND_PAIRING_MODE_WAIT_FOR_REQ(默认，不强制配对)。
+ *   在 Bonding_Init(上电) 与 ENCRYPT 命令(运行时) 两处调用。 */
+void Bonding_ApplyPairingMode(void)
+{
+    uint8_t pm = g_encRequired ? GAPBOND_PAIRING_MODE_INITIATE
+                               : GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
+    GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pm);
+    PRINT("[BOND] pairing mode = %s (encRequired=%d)\n",
+          g_encRequired ? "INITIATE" : "WAIT_FOR_REQ", g_encRequired);
 }
 
 /*********************************************************************
@@ -803,12 +804,13 @@ static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
                                 uint8_t uiInputs, uint8_t uiOutputs)
 {
     (void)deviceAddr; (void)uiInputs; (void)uiOutputs;
-    /* ★ Phase 2：本设备无屏无键，以 DISPLAY_ONLY 身份把「绑定码」作为 passkey 提供给协议栈。
-     *   手机系统弹窗「输入密码」→ 用户输绑定码 → 完成 MITM 认证 bond。
-     *   只有知道绑定码的手机才能配对，陌生人无码配不上 → 加固 RSSI 自动解锁的「主人」判定。
+    /* ★ 方案1 扩展：系统配对码(OS SMP passkey) 与 绑定码 完全解耦。
+     *   本设备无屏无键，以 DISPLAY_ONLY 身份把「系统配对码 g_sysPasscode」回传给协议栈，
+     *   手机系统弹窗「输入密码」→ 用户输系统配对码 → 完成 MITM 认证 bond。
+     *   系统配对码仅服务于无 App 模式的系统层配对(确认是主人手机)，与绑定码(应用层车锁钥匙) 是两道独立秘密。
      *   此回调在配对需 passkey 时由协议栈触发；必须回 SUCCESS + 数值 passcode，否则配对会吊死/失败。 */
-    uint32_t passcode = Bonding_GetPasscodeNumeric();
-    PRINT("[BOND] passcode requested -> respond with bind-code passkey\n");
+    uint32_t passcode = (g_sysPasscode >= 100000u && g_sysPasscode <= 999999u) ? g_sysPasscode : 123456u;
+    PRINT("[BOND] passcode requested -> respond with sys passcode\n");
     GAPBondMgr_PasscodeRsp(connectionHandle, SUCCESS, passcode);
 }
 

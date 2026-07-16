@@ -15,7 +15,7 @@
  * ───────────────────────────────────────────────────────────────── */
 /* ★ v3.33.0: 固件版本号 — 横幅 / [INIT] FW Version / FF02 status "v" 字段共用同一宏。
  *   升级版本时只改这一处即可全局生效；App 据此做兼容性检查与烧录探针。 */
-#define KEYGO_FW_VERSION   "3.33.2"
+#define KEYGO_FW_VERSION   "3.33.4"
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
@@ -85,6 +85,23 @@ extern uint16_t g_cfgManualCooldownMs;   // ★ v3.7: 手动命令冷却时间 m
 extern uint16_t g_cfgRssiPeriodMs;       // ★ v3.13: 固件 RSSI 读取间隔 ms (默认 500, 范围 100~2000)
 extern uint8_t  g_cfgKalmanR;            // ★ v3.13: 卡尔曼滤波器 R 值 (默认 25, 范围 1~50)
 
+// ★ 方案1: 无 App 模式(OS 系统配对)使能标志，持久化于 KEYGO_ENCRYPT_ADDR
+extern uint8_t g_encRequired;            // 1=固件配对模式切 INITIATE(连接即触发 OS 弹 passkey)；0=WAIT_FOR_REQ(默认)
+void KeyGo_LoadEncrypt(void);            // 上电时从 DataFlash 恢复 g_encRequired
+void KeyGo_SaveEncrypt(uint8_t v);       // 持久化 g_encRequired 到 DataFlash
+
+// ★ 方案1 扩展: 系统配对码(OS SMP passkey)，与绑定码完全独立，仅服务于无 App 模式。
+//   持久化于 KEYGO_PASSCODE_ADDR；默认 123456；仅接受 6 位数字(OS passkey 限制 0~999999)。
+//   配对时 Bonding_PasscodeCB 回传给协议栈，手机弹窗输此码完成 MITM 绑定；与绑定码解耦后，
+//   绑定码(应用层车锁钥匙) 与 系统配对码(系统层配对) 成为两道独立秘密。
+#define KEYGO_PASSCODE_ADDR      0x7600      // 物理 0x77600 = 0x70000 + 0x7600
+#if (KEYGO_PASSCODE_ADDR + 256) > 0x07E00
+#error "KEYGO_PASSCODE region overlaps BLE SNV (0x07E00)!"
+#endif
+extern uint32_t g_sysPasscode;           // 当前生效的系统配对码(数值)
+void KeyGo_LoadPasscode(void);           // 上电时从 DataFlash 恢复(非法→默认 123456)
+void KeyGo_SavePasscode(uint32_t v);     // 持久化系统配对码到 DataFlash
+
 // ★ FF01 配置解析: "unlock=-30 lock=-45 uc=2 lc=3 interval=500 dlock=5000 cooldown_ms=8000"
 //    返回: 0=无配置变更, 1=有配置变更需通知 App
 uint8_t KeyGo_ParseConfig(const char *line);
@@ -104,6 +121,13 @@ uint16_t KeyGo_GetDisconnectLockTicks(void);
 //      物理 0x77000 = 偏移 0x7000，位于 BLE SNV(0x77E00) 之前，安全不冲突。
 #define KEYGO_CFG_ADDR          0x7000      // 物理 0x77000 = 0x70000 + 0x7000
 #define KEYGO_CFG_MAGIC         0x4B474346  // "KGCF"
+
+// ★ 方案1: 无 App 模式(OS 系统配对)持久化标志位（单字节）。
+//   偏移 0x7500 独占一页(256B)，右界 0x7600 < BLE SNV(0x07E00)，不冲突。
+#define KEYGO_ENCRYPT_ADDR      0x7500      // 物理 0x77500 = 0x70000 + 0x7500
+#if (KEYGO_ENCRYPT_ADDR + 256) > 0x07E00
+#error "KEYGO_ENCRYPT region overlaps BLE SNV (0x07E00)!"
+#endif
 
 void KeyGo_LoadConfig(void);    // 上电时从 DataFlash 恢复配置
 void KeyGo_SaveConfig(void);    // 配置变更后持久化到 DataFlash

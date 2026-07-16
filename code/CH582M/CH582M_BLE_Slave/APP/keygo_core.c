@@ -119,6 +119,9 @@ uint16_t g_cfgManualCooldownMs  = 8000;  // 手动命令冷却时间 ms (范围 
 uint16_t g_cfgRssiPeriodMs      = 500;   // GAP RSSI 读取间隔 ms (范围 100~2000, 默认 500)
 uint8_t  g_cfgKalmanR           = 15;    // 卡尔曼滤波器 R 值 (范围 1~50, 默认 15)
 
+uint8_t  g_encRequired       = 0;     // ★ 方案1: 无 App 模式(OS 系统配对)使能标志
+uint32_t g_sysPasscode        = 123456u; // ★ 方案1 扩展: 系统配对码(OS SMP passkey)，默认 123456，与绑定码独立
+
 /* ─────────────────────────────────────────────────────────────────
  * 模块内部状态 (仅 keygo_core 可见)
  * ───────────────────────────────────────────────────────────────── */
@@ -276,6 +279,10 @@ static void KeyGo_FactoryReset_DoErase(void)
     Bonding_ResetBindCode();     // 绑定码重置回默认 123456
     EEPROM_ERASE(KEYGO_CFG_ADDR, 256);    // 配置页(阈值/cooldown/autolock...)
     EEPROM_ERASE(KEYGO_MODE_ADDR, 256);   // 模式页(car/ebike)
+    EEPROM_ERASE(KEYGO_ENCRYPT_ADDR, 256);// ★ 方案1: 无 App 模式标志位
+    EEPROM_ERASE(KEYGO_PASSCODE_ADDR, 256);// ★ 方案1 扩展: 系统配对码(恢复默认 123456)
+    g_encRequired = 0;                    // 运行态同步为关闭(即将重启，重启后从 0xFF 加载仍为 0)
+    g_sysPasscode = 123456u;              // 运行态同步为默认(即将重启，重启后从 0xFF 加载仍为默认)
     PRINT("[FR] all erased, will reboot\n");
 }
 
@@ -783,7 +790,7 @@ void KeyGo_NotifyStatus(void)
     s_lastReportedLcnt = g_lockCounter;
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"m\":%d,\"fwsec\":%d}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
@@ -800,6 +807,7 @@ void KeyGo_NotifyStatus(void)
         (int)g_lockCounter,          // ★ v3.31 方案B: 当前锁车进度计数
         (int)th,                    // ★ v3.31 方案B: 当前区间
         (int)g_deviceMode,           // ★ Phase 2: 设备模式 0=car / 1=ebike
+        (int)g_encRequired,          // ★ 方案1: 无 App 模式(OS 系统配对)使能标志，App 据此反映开关/判断弹窗
         (int)KEYGO_FWSEC);           // ★ v3.33: 安全协议能力版本（授权体系升级总闸门）
 
     if (n > 0 && n < (int)sizeof(json)) {
@@ -1239,6 +1247,62 @@ void KeyGo_SaveMode(uint8_t mode)
     } else {
         g_deviceMode = val;
         PRINT("[MODE] saved mode=%d\n", val);
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ 方案1: 无 App 模式(OS 系统配对)标志持久化
+ *   g_encRequired=1 → 固件配对模式 INITIATE(连接即主动发 Slave Security Request
+ *   → OS 弹 passkey 窗 → 配对 → 之后 OS 加密重连, 无 App 也能解锁)。
+ *   单字节存于 KEYGO_ENCRYPT_ADDR(默认 0xFF=未初始化→关闭)。
+ * ───────────────────────────────────────────────────────────────── */
+void KeyGo_LoadEncrypt(void)
+{
+    uint8_t b = 0xFF;
+    if (EEPROM_READ(KEYGO_ENCRYPT_ADDR, &b, 1) == 0 && b != 0xFF) {
+        g_encRequired = (b & 0x01) ? 1 : 0;
+    } else {
+        g_encRequired = 0;   // 未初始化 → 默认关闭(明文最大兼容)
+    }
+    PRINT("[ENC] loaded encRequired=%d\n", g_encRequired);
+}
+
+void KeyGo_SaveEncrypt(uint8_t v)
+{
+    uint8_t b = (v ? 1 : 0);
+    EEPROM_ERASE(KEYGO_ENCRYPT_ADDR, 256);   // DataFlash 写只能 1→0，改值前先擦本页
+    if (EEPROM_WRITE(KEYGO_ENCRYPT_ADDR, &b, 1) != 0) {
+        PRINT("[ENC] save FAILED\n");
+    } else {
+        g_encRequired = b;
+        PRINT("[ENC] saved encRequired=%d\n", b);
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ 方案1 扩展: 系统配对码(OS SMP passkey)持久化 —— 与绑定码完全独立。
+ *   仅接受 6 位数字(100000~999999)；未初始化/越界 → 默认 123456。
+ * ───────────────────────────────────────────────────────────────── */
+void KeyGo_LoadPasscode(void)
+{
+    uint32_t v = 0;
+    if (EEPROM_READ(KEYGO_PASSCODE_ADDR, (uint8_t *)&v, 4) == 0 &&
+        v >= 100000u && v <= 999999u) {
+        g_sysPasscode = v;
+    } else {
+        g_sysPasscode = 123456u;   // 未初始化/越界 → 默认
+    }
+    PRINT("[PASS] loaded sysPasscode=%lu\n", (unsigned long)g_sysPasscode);
+}
+
+void KeyGo_SavePasscode(uint32_t v)
+{
+    EEPROM_ERASE(KEYGO_PASSCODE_ADDR, 256);   // DataFlash 写只能 1→0，改值前先擦本页
+    if (EEPROM_WRITE(KEYGO_PASSCODE_ADDR, (uint8_t *)&v, 4) != 0) {
+        PRINT("[PASS] save FAILED\n");
+    } else {
+        g_sysPasscode = v;
+        PRINT("[PASS] saved sysPasscode=%lu\n", (unsigned long)v);
     }
 }
 
