@@ -939,6 +939,11 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         PRINT("[SETCODE] too short\n");
         return;
     }
+    if (len >= 8 && tmos_memcmp(pValue, "RSSISET:", 8) && len < 9) {
+        KeyGo_SendRawNotify("RSSISET:FAIL:SHORT");
+        PRINT("[RSSISET] too short\n");
+        return;
+    }
     if (len >= 5 && tmos_memcmp(pValue, "NONCE", 5) && !(len == 5 || pValue[5] == ':')) {
         KeyGo_SendRawNotify("AUTH:FAIL:BAD_CMD");
         return;
@@ -951,7 +956,11 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         PRINT("[BIND] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 69 && tmos_memcmp(pValue, "AUTH:", 5)) {
-        Bonding_HandleAuthResp(connHandle, peerAddr, pValue + 5, 64);
+        /* ★ v3.36: AUTH 支持两种载荷，须把「AUTH:」之后的全部字节交给解析器（勿再硬编码 64）：
+         *   遗留:  AUTH:<hmacHex64>            → 总长 69，payload 长 64
+         *   新格式: AUTH:<phoneIdHex16>:<hmacHex64> → 总长 86，payload 长 81
+         *   Bonding_HandleAuthResp 内按首个 ':' 自动分流；旧代码固定传 64 会截断新格式的 hmac。 */
+        Bonding_HandleAuthResp(connHandle, peerAddr, pValue + 5, (uint8_t)(len - 5));
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 5 && tmos_memcmp(pValue, "NONCE", 5) && (len == 5 || pValue[5] == ':')) {
         Bonding_HandleNonceReq(connHandle);
@@ -964,6 +973,12 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         PRINT("[SETCODE] enter\n");
         uint8_t r = Bonding_HandleSetCodeCmd(connHandle, pValue + 8, len - 8);
         PRINT("[SETCODE] exit r=%d\n", r);
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 8 && tmos_memcmp(pValue, "RSSISET:", 8)) {
+        /* ★ v3.36: per-phone RSSI 阈值校准（须已会话鉴权且有 owner 身份）。 */
+        PRINT("[RSSISET] enter\n");
+        uint8_t r = Bonding_HandleRssiSetCmd(connHandle, pValue + 8, len - 8);
+        PRINT("[RSSISET] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 9 && tmos_memcmp(pValue, "ENCRYPT:", 8)) {
         /* ★ 方案1: 无 App 模式(OS 系统配对)开关。

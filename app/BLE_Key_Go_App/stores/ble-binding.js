@@ -8,8 +8,14 @@
  */
 
 export const B = {
-  /** 本机持有的 bindKey（Uint8Array(16)），本地持久化于 uni storage（按序列号） */
+  /** ★ v3.36(2026-07-17): 本机持有的 phoneKey（Uint8Array(16)）= HMAC-SHA256(gk, phoneId)[0:16]，
+   *   本地持久化于 uni storage（按序列号）。语义由旧版「gk 组密钥」升级为「per-phone 密钥」，
+   *   变量名沿用 _bindKey 以最小化改动面（AUTH/C1 签名逻辑不变，只是密钥来源变 per-phone）。 */
   _bindKey: null,
+
+  /** ★ v3.36: 本机稳定身份 phoneId 缓存 { hex:'16字符', bytes:Uint8Array(8) }。
+   *   懒生成 + 持久化于 uni storage key `keygo_phone_id`（见 ble.js _getPhoneId）。 */
+  _phoneId: null,
 
   /** 绑定进行中标志——防止连接时自动 ensureSession 的并发 AUTH 干扰 BIND 流程 */
   _bindInProgress: false,

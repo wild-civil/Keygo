@@ -13,6 +13,7 @@
 #include "bonding.h"
 #include "HAL.h"   // PRINT / tmos_mem*
 #include "keygo_core.h"  // ★ 方案A：KeyGo_CancelUnauthTimer / KeyGo_SendRawNotify 声明
+#include <stdlib.h>   /* ★ v3.36: atoi（Bonding_HandleRssiSetCmd 解析有符号 RSSI 阈值） */
 
 /* GetMACAddress 是 ISP583.h 提供的宏（FLASH_EEPROM_CMD 封装），经 CONFIG.h 已可见，
  * 直接调用即可，无需也不能做函数前向声明（否则宏展开成非法语法）。 */
@@ -117,10 +118,13 @@ void Bonding_DumpStatus(const char *tag)
     PRINT("[DIAG][%s] appOwners=%d snvBonds=%d authed=%d\n",
           tag ? tag : "?", s_bondCount, snvBonds, s_sessionAuthed);
     for (uint8_t i = 0; i < s_bondCount && i < BOND_ENTRY_MAX; i++) {
-        PRINT("[DIAG]   owner[%d] key=%02X%02X%02X%02X.. addrType=%d\n",
-              i, s_bondTbl[i].bindKey[0], s_bondTbl[i].bindKey[1],
-              s_bondTbl[i].bindKey[2], s_bondTbl[i].bindKey[3],
-              s_bondTbl[i].peerAddrType);
+        PRINT("[DIAG]   owner[%d] phoneId=%02X%02X%02X%02X%02X%02X%02X%02X phoneKey=%02X%02X%02X%02X.. rssi=%d/%d\n",
+              i, s_bondTbl[i].phoneId[0], s_bondTbl[i].phoneId[1], s_bondTbl[i].phoneId[2],
+              s_bondTbl[i].phoneId[3], s_bondTbl[i].phoneId[4], s_bondTbl[i].phoneId[5],
+              s_bondTbl[i].phoneId[6], s_bondTbl[i].phoneId[7],
+              s_bondTbl[i].phoneKey[0], s_bondTbl[i].phoneKey[1],
+              s_bondTbl[i].phoneKey[2], s_bondTbl[i].phoneKey[3],
+              (int)s_bondTbl[i].rssiUnlock, (int)s_bondTbl[i].rssiLock);
     }
 }
 
@@ -247,12 +251,23 @@ uint8_t Bonding_Load(void)
         s_bondCount = 0;
         return 1;
     }
+    /* ★ v3.36: 格式魔数校验。旧固件(≤3.35) 写入的是无魔数 28B/条格式，
+     *   首 4 字节几乎不可能等于 BOND_MAGIC → 判定为旧格式，清空重绑（一次性代价）。 */
+    uint32_t magic = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+                     ((uint32_t)buf[2] << 8)  | (uint32_t)buf[3];
+    if (magic != BOND_MAGIC) {
+        PRINT("[BOND] legacy/unrecognized BOND format (magic=%08X), erasing to fresh v3.36 layout\n", magic);
+        Bonding_EraseAll();
+        return 0;
+    }
     s_bondCount = 0;
     for (uint8_t i = 0; i < BOND_ENTRY_MAX; i++) {
-        bondEntry_t *e = (bondEntry_t *)(buf + i * BOND_ENTRY_SIZE);
+        bondEntry_t *e = (bondEntry_t *)(buf + 4 + i * BOND_ENTRY_SIZE);
+        /* 空槽判定：整条全 0xFF（Save 对未用槽 tmos_memset 0xFF） */
         uint8_t allFF = 1;
-        for (uint8_t j = 0; j < 6; j++) {
-            if (e->peerAddr[j] != 0xFF) { allFF = 0; break; }
+        const uint8_t *p = (const uint8_t *)e;
+        for (uint8_t j = 0; j < BOND_ENTRY_SIZE; j++) {
+            if (p[j] != 0xFF) { allFF = 0; break; }
         }
         if (allFF) continue; /* 空槽 */
         tmos_memcpy(&s_bondTbl[s_bondCount], e, BOND_ENTRY_SIZE);
@@ -266,8 +281,13 @@ uint8_t Bonding_Save(void)
     __attribute__((aligned(4))) uint8_t buf[BOND_IO_BYTES];
     __attribute__((aligned(4))) uint8_t chk[BOND_IO_BYTES];
     tmos_memset(buf, 0xFF, BOND_IO_BYTES);
+    /* 首 4 字节写格式魔数（便于Load识别 v3.36 布局） */
+    buf[0] = (uint8_t)(BOND_MAGIC >> 24);
+    buf[1] = (uint8_t)(BOND_MAGIC >> 16);
+    buf[2] = (uint8_t)(BOND_MAGIC >> 8);
+    buf[3] = (uint8_t)(BOND_MAGIC);
     for (uint8_t i = 0; i < s_bondCount && i < BOND_ENTRY_MAX; i++) {
-        tmos_memcpy(buf + i * BOND_ENTRY_SIZE, &s_bondTbl[i], BOND_ENTRY_SIZE);
+        tmos_memcpy(buf + 4 + i * BOND_ENTRY_SIZE, &s_bondTbl[i], BOND_ENTRY_SIZE);
     }
     for (uint8_t p = 0; p < BOND_PAGES; p++) {
         EEPROM_ERASE(KEYGO_BOND_ADDR + p * BOND_PAGE_SIZE, BOND_PAGE_SIZE);
@@ -341,21 +361,15 @@ void Bonding_ResetBindCode(void)
 }
 
 /*********************************************************************
- * @fn      Bonding_Find / Bonding_IsOwner / Bonding_Count
+ * @fn      Bonding_FindByPhoneId / Bonding_Count
  *********************************************************************/
-int8_t Bonding_Find(const uint8_t *peerAddr)
+/* ★ v3.36: 按 phoneId 查 owner 下标（owner 身份锚=phoneId，随机私有地址已弃用）。 */
+int8_t Bonding_FindByPhoneId(const uint8_t *phoneId)
 {
     for (uint8_t i = 0; i < s_bondCount; i++) {
-        if (tmos_memcmp(s_bondTbl[i].peerAddr, peerAddr, 6) != 0) {   /* tmos_memcmp: TRUE=相等，故 !=0 表示匹配 */
-            return (int8_t)i;
-        }
+        if (ct_eq(s_bondTbl[i].phoneId, phoneId, BOND_PHONE_ID_LEN)) return (int8_t)i;
     }
     return -1;
-}
-
-uint8_t Bonding_IsOwner(const uint8_t *peerAddr)
-{
-    return (Bonding_Find(peerAddr) >= 0) ? 1 : 0;
 }
 
 uint8_t Bonding_Count(void)
@@ -363,33 +377,28 @@ uint8_t Bonding_Count(void)
     return s_bondCount;
 }
 
-/* ★ v3.36 多 owner：按 bindKey 查重（随机私有地址下 MAC 不可靠，owner 身份锚=密钥）。 */
-int8_t Bonding_FindByKey(const uint8_t *bindKey)
-{
-    for (uint8_t i = 0; i < s_bondCount; i++) {
-        if (ct_eq(s_bondTbl[i].bindKey, bindKey, BOND_KEY_LEN)) return (int8_t)i;
-    }
-    return -1;
-}
-
 /*********************************************************************
  * @fn      Bonding_AddOwner / Bonding_RemoveOwner / Bonding_EraseAll
  *********************************************************************/
-uint8_t Bonding_AddOwner(const uint8_t *peerAddr, uint8_t addrType, const uint8_t *bindKey)
+/* ★ v3.36: 新增/刷新 owner。phoneId 为身份锚；phoneKey=HMAC(gk,phoneId)（遗留条目 phoneId=0→=gk）。
+ *   新增时初始化 rssiUnlock/rssiLock = 当前全局配置（绑定即继承家庭默认阈值，之后可 RSSISET 覆写）。 */
+uint8_t Bonding_AddOwner(const uint8_t *phoneId, const uint8_t *phoneKey)
 {
     if (s_bondCount >= BOND_ENTRY_MAX) return 2; /* 信任列表已满 */
 
-    int8_t idx = Bonding_Find(peerAddr);
+    int8_t idx = Bonding_FindByPhoneId(phoneId);
     if (idx >= 0) {
-        tmos_memcpy(s_bondTbl[idx].bindKey, bindKey, BOND_KEY_LEN);
-        s_bondTbl[idx].peerAddrType = addrType;
+        /* 已存在（同手机重绑/改码后重绑）→ 仅刷新 phoneKey，保留其已校准的 RSSI 阈值 */
+        tmos_memcpy(s_bondTbl[idx].phoneKey, phoneKey, BOND_KEY_LEN);
         return Bonding_Save();
     }
-    tmos_memcpy(s_bondTbl[s_bondCount].peerAddr, peerAddr, 6);
-    s_bondTbl[s_bondCount].peerAddrType = addrType;
+    tmos_memset(&s_bondTbl[s_bondCount], 0, BOND_ENTRY_SIZE);
+    tmos_memcpy(s_bondTbl[s_bondCount].phoneId, phoneId, BOND_PHONE_ID_LEN);
+    tmos_memcpy(s_bondTbl[s_bondCount].phoneKey, phoneKey, BOND_KEY_LEN);
     s_bondTbl[s_bondCount].role         = 0; /* owner */
-    tmos_memcpy(s_bondTbl[s_bondCount].bindKey, bindKey, BOND_KEY_LEN);
-    s_bondTbl[s_bondCount].addedAt      = 0;
+    /* ★ 新手机绑定即继承当前全局 RSSI 阈值（家庭默认），之后可 RSSISET 单独校准本机 */
+    s_bondTbl[s_bondCount].rssiUnlock   = g_cfgUnlockThreshold;
+    s_bondTbl[s_bondCount].rssiLock     = g_cfgLockThreshold;
     s_bondCount++;
     return Bonding_Save();
 }
@@ -409,10 +418,10 @@ uint8_t Bonding_RemoveOwnerByIndex(uint8_t idx)
     return Bonding_Save();
 }
 
-uint8_t Bonding_RemoveOwner(const uint8_t *peerAddr)
+uint8_t Bonding_RemoveOwner(const uint8_t *phoneId)
 {
-    int8_t idx = Bonding_Find(peerAddr);
-    if (idx < 0) return 1; /* 不在列表（随机地址下基本恒为 -1，仅兼容保留） */
+    int8_t idx = Bonding_FindByPhoneId(phoneId);
+    if (idx < 0) return 1; /* 不在列表 */
     return Bonding_RemoveOwnerByIndex((uint8_t)idx);
 }
 
@@ -457,6 +466,34 @@ static void Bonding_BuildSerial(char serial[13])
     GetMACAddress(mac);
     snprintf(serial, 13, "%02X%02X%02X%02X%02X%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+/* ★ v3.36: 由「当前有效绑定码 g_curBindCode + 序列号」计算组密钥 gk = SHA256(code||serial)[0:16]。
+ *   gk 不落盘，可随时重算（SETCODE 改码后据此刷新各 owner 的 phoneKey）。 */
+static void Bonding_ComputeGk(uint8_t outGk[BOND_KEY_LEN])
+{
+    char serial[13];
+    Bonding_BuildSerial(serial);
+    Bonding_DeriveKey((const uint8_t *)g_curBindCode, g_curBindCodeLen,
+                      (const uint8_t *)serial, 12, outGk);
+}
+
+/* ★ v3.36: per-phone 密钥派生：phoneKey = HMAC-SHA256(gk, phoneId)[0:16]。
+ *   phoneId 全 0（遗留条目）→ 退化为 phoneKey = gk（保持与旧 App gk 兼容）。 */
+void Bonding_DerivePhoneKey(const uint8_t *gk, const uint8_t *phoneId,
+                            uint8_t outKey[BOND_KEY_LEN])
+{
+    uint8_t allZero = 1;
+    for (uint8_t i = 0; i < BOND_PHONE_ID_LEN; i++) { if (phoneId[i] != 0) { allZero = 0; break; } }
+    if (allZero) {
+        tmos_memcpy(outKey, gk, BOND_KEY_LEN);   /* 遗留条目：phoneKey = gk */
+        return;
+    }
+    /* ★ hmac_sha256 输出 32 字节，先写入临时 full 再取前 16 字节（与 App derivePhoneKey 一致）。
+     *   不可直接写入 16 字节 outKey（越界）。 */
+    uint8_t full[SHA256_DIGEST_LEN];
+    hmac_sha256(gk, BOND_KEY_LEN, phoneId, BOND_PHONE_ID_LEN, full);
+    tmos_memcpy(outKey, full, BOND_KEY_LEN);
 }
 
 /*********************************************************************
@@ -513,21 +550,40 @@ uint8_t Bonding_IsSessionAuthed(uint16_t connHandle)
 
 /*********************************************************************
  * @fn      Bonding_HandleBindCmd
- * @brief   处理 BIND 指令（payload = 绑定码明文字节）。
- *   ★ v3.30-fix：改为「基于共享密钥」的信任模型，不再依赖对端 MAC 做 owner 判定。
- *     原因：Android/iOS 的 BLE 地址是随机化私有地址，每次连接都变，
- *           用 peerAddr 做 owner 会导致「同一台手机二次连接也 NOT_OWNER」的死锁。
- *   默认绑定码（贴于机身）= 物理持有即视为可恢复。已知当前有效码即可：
- *     - 首绑（选项 B，2026-07-14）：校验 == 当前有效码（全新/恢复出厂设备即默认 123456）
- *       → 派生 key 写入信任列表；不再接受任意码，杜绝「未绑定窗口任意抢绑」。
- *     - 已绑：用当前有效码覆盖重绑（takeover），彻底消除 NOT_OWNER 死锁。
- *   ★ 自定义码统一经 SETCODE 通道设定（先 AUTH 证明持有旧码），不在此处开放。
- *   回报文：BIND:OK / BIND:FAIL:SHORT / BIND:FAIL:CODE / BIND:FAIL:SAVE
+ * @brief   处理 BIND 指令（★ v3.36 fwsec=2 协议）。
+ *   载荷格式：
+ *     fwsec≥2: <code ASCII><0x00><phoneIdHex16>   （phoneId = App 生成 8 字节随机的 hex）
+ *     遗留:     <code ASCII>                        （无 NUL → phoneId=0 的遗留条目）
+ *   处理：① 校验码匹配当前有效码（堵未绑定窗口抢绑）；② 算 gk=SHA256(code||serial)，
+ *         再派生 per-phone phoneKey=HMAC(gk,phoneId)（遗留 phoneId=0→phoneKey=gk）；
+ *         ③ 以 phoneId 为身份锚写入/刷新信任列表（新手机继承全局 RSSI 阈值）。
+ *   不再依赖对端 MAC 做 owner 判定（随机私有地址每次变，见 v3.30-fix）。
+ *   回报文：BIND:OK / BIND:FAIL:SHORT / BIND:FAIL:CODE / BIND:FAIL:FULL / BIND:FAIL:SAVE
  *********************************************************************/
 uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint8_t peerAddrType,
                               const uint8_t *payload, uint16_t len)
 {
     (void)connHandle; (void)peerAddr; (void)peerAddrType;  /* ★ 不再使用 MAC 做身份判定 */
+
+    /* ★ v3.36: 解析 payload。格式：
+     *     fwsec≥2: <code ASCII><0x00><phoneIdHex16>
+     *     遗留:     <code ASCII>                        （无 NUL → phoneId=0 遗留条目）
+     *   按首个 0x00 切分；找不到 0x00 则整段即 code（遗留）。 */
+    uint16_t codeLen = len;
+    uint8_t  phoneId[BOND_PHONE_ID_LEN];
+    uint8_t  hasPhoneId = 0;
+    for (uint16_t i = 0; i < len; i++) {
+        if (payload[i] == 0x00) {
+            codeLen = i;                         /* code = payload[0..i) */
+            uint16_t rest = len - (i + 1);
+            if (rest == 16 &&
+                hex2bin((const char *)(payload + i + 1), 16, phoneId) == BOND_PHONE_ID_LEN) {
+                hasPhoneId = 1;
+            }
+            break;
+        }
+    }
+    if (!hasPhoneId) tmos_memset(phoneId, 0, BOND_PHONE_ID_LEN);  /* 遗留/无效 → phoneId=0 */
 
     /* ★ 选项 B（2026-07-14）：堵住「未绑定窗口任意抢绑」。
      *   绑定始终要求「匹配当前有效码 g_curBindCode」——不再允许首绑时用任意码。
@@ -536,54 +592,38 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
      *       仍须用当时保留的自定义码首绑，不会因解绑而把码重置成 123456。
      *   之后想用自定义码，一律走『修改绑定码』(SETCODE) 通道（先 AUTH 证明持有旧码）。
      *   tmos_memcmp 返回 TRUE(非零)=相等，故「不相等」即写成 (== 0)。 */
-    const uint8_t *effCode = (const uint8_t *)g_curBindCode;
-    uint8_t        effLen  = g_curBindCodeLen;
-
-    /* ★ v3.36：统一码校验（首绑/已绑共用当前有效码）。
-     *   首绑窗口额外校验长度(SHORT)；码不匹配一律 CODE 拒绝。
-     *   删除了旧「已绑即 ALREADY_BOUND 硬拒」——那会让第二台同码手机进不了信任列表，
-     *   违背「家庭多主人」定位。现在已绑且码对即允许新增/刷新 owner。 */
+    /* 首绑窗口额外校验 code 长度(SHORT) */
     if (Bonding_Count() == 0) {
-        if (len < BOND_CODE_MINLEN || len > BOND_CODE_MAXLEN) {
+        if (codeLen < BOND_CODE_MINLEN || codeLen > BOND_CODE_MAXLEN) {
             KeyGo_SendRawNotify("BIND:FAIL:SHORT");
             return 1;
         }
     }
-    if (len != g_curBindCodeLen ||
+    if (codeLen != g_curBindCodeLen ||
         tmos_memcmp(payload, (const uint8_t *)g_curBindCode, g_curBindCodeLen) == 0) {
         PRINT("[BIND] code mismatch (want len=%d)\n", g_curBindCodeLen);
         KeyGo_SendRawNotify("BIND:FAIL:CODE");
         return (Bonding_Count() == 0) ? 1 : 3;
     }
 
-    /* 派生 bindKey = SHA256(code||serial)[0:16]（与 App 端同输入 → 同密钥） */
+    /* ★ v3.36: 由「当前有效码 + 序列号」算 gk，再派生 per-phone phoneKey = HMAC(gk, phoneId)。
+     *   遗留(phoneId=0) → phoneKey = gk（与旧 App 兼容）。 */
     char serial[13];
     Bonding_BuildSerial(serial);
-    uint8_t key[BOND_KEY_LEN];
-    Bonding_DeriveKey(effCode, effLen, (uint8_t *)serial, 12, key);
+    uint8_t gk[BOND_KEY_LEN];
+    Bonding_DeriveKey(g_curBindCode, g_curBindCodeLen, (uint8_t *)serial, 12, gk);
+    uint8_t phoneKey[BOND_KEY_LEN];
+    Bonding_DerivePhoneKey(gk, phoneId, phoneKey);
 
-    /* ★ v3.36 多 owner：以「密钥即身份」写入信任列表（随机私有地址下 MAC 不可靠）。
-     *   - 同码多手机派生 key 相同 → Bonding_FindByKey 命中既有 owner → 仅刷新地址类型（不新增条数）；
-     *   - 新 key（如改码后用新码首绑的手机）→ 写入新槽，最多 BOND_ENTRY_MAX(8) 个 owner。
-     *   删除了旧「已绑即 ALREADY_BOUND 硬拒」，让第二台同码手机能进入信任列表。 */
-    int8_t idx = Bonding_FindByKey(key);
-    if (idx >= 0) {
-        s_bondTbl[idx].peerAddrType = peerAddrType;   /* 仅刷新地址类型（调试/展示用） */
-        Bonding_Save();
-        s_authedOwnerIdx = idx;
-    } else {
-        if (s_bondCount >= BOND_ENTRY_MAX) {
-            PRINT("[BIND] trust list FULL (%d owners)\n", s_bondCount);
-            KeyGo_SendRawNotify("BIND:FAIL:FULL");
-            return 5;
-        }
-        tmos_memcpy(s_bondTbl[s_bondCount].peerAddr, peerAddr, 6);
-        s_bondTbl[s_bondCount].peerAddrType = peerAddrType;
-        tmos_memcpy(s_bondTbl[s_bondCount].bindKey, key, BOND_KEY_LEN);
-        s_bondCount++;
-        Bonding_Save();
-        s_authedOwnerIdx = (int8_t)(s_bondCount - 1);
+    /* ★ v3.36 多 owner：以 phoneId 为身份锚写入信任列表（Bonding_AddOwner 内部完成
+     *   去重/新增 + 新手机 RSSI 阈值初始化=全局配置）。返回 2 = 列表满。 */
+    uint8_t rc = Bonding_AddOwner(phoneId, phoneKey);
+    if (rc == 2) {
+        PRINT("[BIND] trust list FULL (%d owners)\n", s_bondCount);
+        KeyGo_SendRawNotify("BIND:FAIL:FULL");
+        return 5;
     }
+    s_authedOwnerIdx = Bonding_FindByPhoneId(phoneId);  /* 定位本 owner（刷新/新增都命中） */
     /* BIND 成功即视为本连接已会话鉴权（证明了码知识） */
     s_sessionAuthed = 1;
     /* ★ 方案A（2026-07-12）：BIND 成功 → 取消未鉴权计时（合法用户长连不受限） */
@@ -600,7 +640,7 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
          *   若每次都出现，需排查 DataFlash 初始化(FLASH_ROM_START_IO)。 */
         PRINT("[BIND] WARNING: Bonding_Save failed; key kept in RAM only (not persisted)\n");
     }
-    PRINT("[BIND] owner set (key-based, MAC-independent), count=%d\n", s_bondCount);
+    PRINT("[BIND] owner set (per-phone, phoneId-based), count=%d\n", s_bondCount);
     Bonding_DumpStatus("BIND");   /* ★ 2026-07-17 埋点：BIND 后看 SNV bond 是否变化（多手机挤占） */
     /* ★ P0-2：BIND:OK 内联 C1 会话盐，App 据此对后续控制命令签名 */
     char _bok[48];
@@ -643,11 +683,13 @@ uint8_t Bonding_HandleSetCodeCmd(uint16_t connHandle, const uint8_t *payload, ui
 
     /* 用新码重新派生 bindKey，覆盖所有 owner（全家共享同一绑定码 → key 同源，须同步更新） */
     char serial[13];
+    /* ★ v3.36: 改码后用新 gk 重新派生每个 owner 的 per-phone phoneKey = HMAC(gk, phoneId)。
+     *   遗留条目(phoneId=0) → phoneKey=gk（保持与旧 App 兼容）。各 owner 的 RSSI 阈值保持不变。 */
     Bonding_BuildSerial(serial);
-    uint8_t key[BOND_KEY_LEN];
-    Bonding_DeriveKey((const uint8_t *)g_curBindCode, g_curBindCodeLen, (uint8_t *)serial, 12, key);
+    uint8_t gk[BOND_KEY_LEN];
+    Bonding_DeriveKey((const uint8_t *)g_curBindCode, g_curBindCodeLen, (uint8_t *)serial, 12, gk);
     for (uint8_t i = 0; i < s_bondCount; i++) {
-        tmos_memcpy(s_bondTbl[i].bindKey, key, BOND_KEY_LEN);
+        Bonding_DerivePhoneKey(gk, s_bondTbl[i].phoneId, s_bondTbl[i].phoneKey);
     }
 
     /* 持久化：绑定码页 + 信任列表（含新 key） */
@@ -661,6 +703,70 @@ uint8_t Bonding_HandleSetCodeCmd(uint16_t connHandle, const uint8_t *payload, ui
 
     PRINT("[SETCODE] code updated len=%d, key rederived\n", len);
     KeyGo_SendRawNotify("SETCODE:OK");
+    return 0;
+}
+
+/*********************************************************************
+ * @fn      Bonding_HandleRssiSetCmd（★ v3.36：per-phone RSSI 阈值跟随）
+ * @brief   处理 RSSISET:<unlock>:<lock>（有符号十进制 RSSI）。
+ *   前置：已会话鉴权且 s_authedOwnerIdx≥0（本机知道自己是谁）。
+ *   改写当前 owner 的 rssiUnlock/rssiLock 并落盘。
+ *   回报文：RSSISET:OK / RSSISET:FAIL:NO_AUTH / RSSISET:FAIL:SHORT
+ *********************************************************************/
+uint8_t Bonding_HandleRssiSetCmd(uint16_t connHandle, const uint8_t *payload, uint16_t len)
+{
+    (void)connHandle;
+    if (s_bondCount == 0) {
+        KeyGo_SendRawNotify("RSSISET:FAIL:NO_AUTH");
+        return 1;
+    }
+    if (!s_sessionAuthed || s_authedOwnerIdx < 0 ||
+        (uint8_t)s_authedOwnerIdx >= s_bondCount) {
+        KeyGo_SendRawNotify("RSSISET:FAIL:NO_AUTH");
+        return 2;
+    }
+    /* 解析 "<unlock>:<lock>"（有符号十进制，如 "-45:-65"）*/
+    if (len == 0 || len > 24) {
+        KeyGo_SendRawNotify("RSSISET:FAIL:SHORT");
+        return 3;
+    }
+    char buf[25];
+    for (uint16_t i = 0; i < len && i < 24; i++) buf[i] = (char)payload[i];
+    buf[len < 24 ? len : 24] = '\0';
+    int16_t u = 0, l = 0;
+    char *colon = NULL;
+    for (uint16_t i = 0; i < len; i++) { if (payload[i] == ':') { colon = (char *)(buf + i); break; } }
+    if (!colon) {
+        KeyGo_SendRawNotify("RSSISET:FAIL:SHORT");
+        return 3;
+    }
+    *colon = '\0';
+    u = (int16_t)atoi(buf);
+    l = (int16_t)atoi(colon + 1);
+    s_bondTbl[s_authedOwnerIdx].rssiUnlock = u;
+    s_bondTbl[s_authedOwnerIdx].rssiLock   = l;
+    if (Bonding_Save() != 0) {
+        PRINT("[RSSISET] WARNING: save failed (not persisted)\n");
+    }
+    PRINT("[RSSISET] owner[%d] unlock=%d lock=%d\n", s_authedOwnerIdx, u, l);
+    KeyGo_SendRawNotify("RSSISET:OK");
+    return 0;
+}
+
+/*********************************************************************
+ * @fn      Bonding_GetActiveOwnerRssi（★ v3.36：状态机按 owner 选阈值）
+ * @brief   返回当前已鉴权 owner 的 RSSI 阈值。
+ *   返回 1 = 使用了 owner 专属阈值（*unlock/*lock 已填）；
+ *   返回 0 = 无 owner 身份（调用方应使用全局 g_cfgUnlockThreshold/g_cfgLockThreshold）。
+ *********************************************************************/
+uint8_t Bonding_GetActiveOwnerRssi(int16_t *unlock, int16_t *lock)
+{
+    if (s_sessionAuthed && s_authedOwnerIdx >= 0 &&
+        (uint8_t)s_authedOwnerIdx < s_bondCount) {
+        *unlock = s_bondTbl[s_authedOwnerIdx].rssiUnlock;
+        *lock   = s_bondTbl[s_authedOwnerIdx].rssiLock;
+        return 1;
+    }
     return 0;
 }
 
@@ -681,8 +787,10 @@ void Bonding_HandleNonceReq(uint16_t connHandle)
 
 /*********************************************************************
  * @fn      Bonding_HandleAuthResp
- * @brief   校验 HMAC-SHA256(nonce, peerKey) == response。
- *   payload 为 64 个 hex（HMAC 输出）。成功置会话鉴权，nonce 一次性作废。
+ * @brief   ★ v3.36 fwsec=2 校验。payload 格式：
+ *     新格式: <phoneIdHex16>:<hmacHex64>  → 按 phoneId 定位 owner，验 HMAC(nonce, owner.phoneKey)
+ *     遗留格式: <hmacHex64>               → 算 gk 验 HMAC(nonce, gk)（旧 App 兼容，无 per-phone 身份）
+ *   成功置会话鉴权，nonce 一次性作废；新格式命中写 s_authedOwnerIdx（供精准解绑 + 选本机 RSSI 阈值）。
  *   回报文：AUTH:OK / AUTH:FAIL / AUTH:FAIL:NO_NONCE / AUTH:FAIL:NO_PEER / AUTH:FAIL:CRYPTO
  *********************************************************************/
 uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
@@ -707,27 +815,58 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
         return 1;
     }
 
+    /* ★ v3.36: 解析 AUTH 格式。
+     *   新格式(fwsec≥2): <phoneIdHex16>:<hmacHex64>  → 按 phoneId 定位 owner 验 phoneKey
+     *   遗留格式:        <hmacHex64>                  → 算 gk 验 HMAC(nonce,gk)（旧 App 兼容）
+     *   定位首个 ':'：若前 16 字符为合法 hex 且其后跟 ':' → 新格式。 */
+    const uint8_t *hmacHex = payload;
+    uint8_t        hmacLen = len;
+    uint8_t        phoneId[BOND_PHONE_ID_LEN];
+    uint8_t        hasPhoneId = 0;
+    for (uint8_t i = 0; i < len; i++) {
+        if (payload[i] == ':') {
+            if (i == 16 && hex2bin((const char *)payload, 16, phoneId) == BOND_PHONE_ID_LEN) {
+                hasPhoneId   = 1;
+                hmacHex      = payload + i + 1;
+                hmacLen      = len - (i + 1);
+            }
+            break;
+        }
+    }
+
     uint8_t resp[SHA256_DIGEST_LEN];
-    if (hex2bin((const char *)payload, len, resp) != SHA256_DIGEST_LEN) {
+    if (hex2bin((const char *)hmacHex, hmacLen, resp) != SHA256_DIGEST_LEN) {
         KeyGo_SendRawNotify("AUTH:FAIL:BAD_HEX");
         return 3;
     }
 
-    /* ★ v3.36 多 owner：遍历所有 owner 的 bindKey 校验 HMAC(nonce, key)，任一命中即鉴权通过。
-     *   owner 身份锚=密钥（随机私有地址下 MAC 不可靠）。命中下标记 s_authedOwnerIdx 供精准解绑。 */
-    uint8_t expect[SHA256_DIGEST_LEN];
     uint8_t authed = 0;
-    for (uint8_t i = 0; i < s_bondCount; i++) {
-        hmac_sha256(s_bondTbl[i].bindKey, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
+    if (hasPhoneId) {
+        /* 新格式：按 phoneId 定位 owner，验其 per-phone phoneKey */
+        int8_t idx = Bonding_FindByPhoneId(phoneId);
+        if (idx >= 0) {
+            uint8_t expect[SHA256_DIGEST_LEN];
+            hmac_sha256(s_bondTbl[idx].phoneKey, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
+            if (ct_eq(expect, resp, SHA256_DIGEST_LEN)) {
+                authed = 1;
+                s_authedOwnerIdx = idx;
+            }
+        }
+        /* phoneId 未知或校验失败 → authed 保持 0，下面统一 FAIL（该手机需重新绑定） */
+    } else {
+        /* 遗留格式：算 gk，验 HMAC(nonce, gk)。命中即鉴权，但无 per-phone 身份(idx=-1) */
+        uint8_t gk[BOND_KEY_LEN];
+        Bonding_ComputeGk(gk);
+        uint8_t expect[SHA256_DIGEST_LEN];
+        hmac_sha256(gk, BOND_KEY_LEN, s_nonce, BOND_NONCE_LEN, expect);
         if (ct_eq(expect, resp, SHA256_DIGEST_LEN)) {
             authed = 1;
-            s_authedOwnerIdx = (int8_t)i;
-            break;
+            s_authedOwnerIdx = -1;
         }
     }
     /* ★ 2026-07-12 加固：用自包含 ct_eq 替代 tmos_memcmp，语义自主、不依赖 SDK 版本。 */
     if (!authed) {
-        PRINT("[AUTH] mismatch (no owner key matched)\n");
+        PRINT("[AUTH] mismatch (phoneId unknown or key mismatch)\n");
         KeyGo_SendRawNotify("AUTH:FAIL");
         return 4;
     }
@@ -852,7 +991,7 @@ uint8_t Bonding_VerifySignedCmd(const char *tail, uint16_t len, char *outBody, u
     uint8_t expect[SHA256_DIGEST_LEN];
     uint8_t authed = 0;
     for (uint8_t i = 0; i < s_bondCount; i++) {
-        hmac_sha256(s_bondTbl[i].bindKey, BOND_KEY_LEN, material, mlen, expect);
+        hmac_sha256(s_bondTbl[i].phoneKey, BOND_KEY_LEN, material, mlen, expect);
         if (ct_eq(expect, resp, SHA256_DIGEST_LEN)) {
             authed = 1;
             s_authedOwnerIdx = (int8_t)i;

@@ -1,6 +1,6 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : keygo_core.h
- * Author             : KeyGo v3.35.0 (CH582M)
+ * Author             : KeyGo v3.36.0 (CH582M)
  * Date               : 2026/07/16
  * Description        : GPIO + Kalman + RSSI + 状态机 + 通知 + 命令
  *********************************************************************************/
@@ -22,10 +22,16 @@
  *     关闭"无APP模式"(g_encRequired=0)时，OS 加密(LINK_ENCRYPTED)不再授予 RSSI 自动解锁/上锁，
  *     仅本连接 App 会话鉴权(Bonding_IsSessionAuthed)可解锁——使"关开关就真的不再无APP解锁"自洽，
  *     并降低已配对手机 OS 自动重连抢占唯一连接槽的动机。详见 keygo_core.c KeyGo_ProcessStateMachine()。
- *     协议能力字段 fwsec 维持 1（本变更不改 BIND/AUTH/C1/JSON 协议，App 无需改协议分支）。
+ *   ★ v3.36.0 变更（2026-07-17，授权体系 v1 / fwsec=2）：根治「per-phone 缺失」与「RSSI 阈值不跟随」。
+ *     - per-phone 身份：信任条目由「共享 bindKey」改为「phoneId + per-phone phoneKey=HMAC(gk,phoneId)」，
+ *       每台手机密钥各异（详见 bonding.h / docs/授权体系v1_per-phone与RSSI阈值跟随.md）。
+ *     - RSSI 阈值跟随：信任条目新增每 owner 的 rssiUnlock/rssiLock；状态机按「当前已鉴权 owner」选阈值，
+ *       新增 FF03 命令 RSSISET 供 App 校准本机阈值（见 bonding.c Bonding_HandleRssiSetCmd）。
+ *     - BIND/AUTH 协议破坏性升级（fwsec 1→2）：BIND 增 <phoneId>，AUTH 增 <phoneId> 段；旧 App 走 gk 兼容分支。
+ *     - 协议能力字段 fwsec = 2（App 据此外部分流走新/旧路径；详见 keygo_core.c KEYGO_FWSEC）。
  *   ★ 同一轮调试增强（2026-07-16）：新增串口 DEBUG 命令——输入 `scan` 切换 / `scan on` / `scan off`
  *     控制 "Scan req from" 日志打印（默认开）；另支持 `help`。详见 peripheral.c KeyGo_UartCmdPoll()。 */
-#define KEYGO_FW_VERSION   "3.35.0"
+#define KEYGO_FW_VERSION   "3.36.0"
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

@@ -59,6 +59,7 @@ import {
 // ★ ②: 绑定层密码学（与固件 crypto_sha256.c 完全对齐：SHA256/HMAC/派生）
 import {
   deriveBindKey,
+  derivePhoneKey,   // ★ v3.36(2026-07-17): 授权体系 v1 —— phoneKey = HMAC(gk, phoneId)[0:16]
   hmacSha256Hex,
   hexToBytes,
   bytesToHex,
@@ -177,6 +178,10 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.31 方案B: 设备真实确认参数与实时进度（FF02 新增字段 uc/lc/ucnt/lcnt/th 同步）
     deviceUc: -1,                 // 设备真实解锁确认次数（回显验证 App 下发的 uc 是否真落到设备；-1=未同步）
     deviceLc: -1,                 // 设备真实锁车确认次数
+    // ★ v3.36(2026-07-17): 设备当前「生效的」RSSI 阈值（owner 专属阈值 or 全局；FF02 status 的 ou/ol）。
+    //   用于验证 per-phone 阈值跟随：不同手机鉴权后 ou/ol 应反映各自 RSSISET 设的值。-999=未同步
+    deviceOu: -999,               // 设备当前生效的解锁 RSSI 阈值
+    deviceOl: -999,               // 设备当前生效的锁车 RSSI 阈值
     unlockProgress: 0,            // 当前解锁进度计数（连续几次滤波 RSSI 在解锁区）
     lockProgress: 0,              // 当前锁车进度计数
     thresholdZone: 0,             // 当前区间：0 中性 / 1 解锁区 / 2 锁车区
@@ -2933,6 +2938,9 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.31 方案B: 设备真实确认参数（uc/lc）—— 回显验证 App 下发的配置是否真落到设备
       if (data.uc !== undefined) this.deviceUc = Number(data.uc)
       if (data.lc !== undefined) this.deviceLc = Number(data.lc)
+      // ★ v3.36: 设备当前生效阈值（owner 专属或全局）—— 验证 per-phone RSSI 阈值跟随是否落地
+      if (data.ou !== undefined) this.deviceOu = Number(data.ou)
+      if (data.ol !== undefined) this.deviceOl = Number(data.ol)
       // ★ v3.31 方案B: 实时确认进度（ucnt/lcnt）与当前区间（th）
       //   注: 进区瞬间 RSSI 在阈值边缘徘徊会先 ++ 出 ucnt=1(th=1) 再抖回中性区清零(th=0),
       //   如实显示即 1→0→1→2 的轻微闪烁(边界抖动真实反映)。曾尝试 App 端区间延迟去抖,
@@ -3024,6 +3032,12 @@ export const useBleStore = defineStore('ble', {
       if (config.cooldown_ms !== undefined) this.manualCooldownMs = config.cooldown_ms
       // ★ 持久化到本地存储（退出应用后重新进入不丢失）
       this._persistConfig()
+      // ★ v3.36(2026-07-17): 用户改了解锁/上锁阈值 → 同步刷新「本机 owner」的 per-phone 阈值
+      //   （RSSISET）。仅在已会话鉴权 + fwsec≥2 时生效；未鉴权时固件回 FAIL:NO_AUTH（无害，
+      //   下次 AUTH:OK 会再推一次）。使自动解锁/上锁按这台手机自己的阈值判定，实现阈值跟随。
+      if ((config.unlock !== undefined || config.lock !== undefined) && this.sessionAuthed) {
+        this._pushRssiThresholds()
+      }
     },
 
     /**
@@ -3123,7 +3137,7 @@ export const useBleStore = defineStore('ble', {
           if (!done) { done = true; _resolveWaiter('AUTH', false) }
         }, 4000)
         try {
-          await enqueueWrite(() => rawSendCommand(this.deviceId, 'AUTH:' + hmac))
+          await enqueueWrite(() => rawSendCommand(this.deviceId, this._authCmd(hmac)))
         } catch (e) {
           clearTimeout(timer)
           _resolveWaiter('AUTH', false)
@@ -3234,6 +3248,9 @@ export const useBleStore = defineStore('ble', {
         //   抢跑失败，此处补发一次，确保断电重启后阈值被可靠回推（T4 核心）。
         //   会话已建立 + 串行化(_configWriteBusy/_configSyncPending)保证不重复、不竞态。
         this._syncConfigToDevice()
+        // ★ v3.36(2026-07-17): AUTH 成功后下发本机 RSSI 阈值 → 固件写入「当前 owner」的
+        //   rssiUnlock/rssiLock，实现 per-phone 阈值跟随（每台手机用自己的解锁/上锁阈值）。
+        this._pushRssiThresholds()
         B._sessionSalt = B._lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
         B._cmdSeq = 0
         _resolveWaiter('AUTH', true)
@@ -3316,7 +3333,7 @@ export const useBleStore = defineStore('ble', {
         B._lastNonce = nonceHex   // ★ P0-2: 该 nonce 即本次会话盐来源（AUTH:OK 时采用）
         if (B._bindKey) {
           const hmac = hmacSha256Hex(hexToBytes(nonceHex), B._bindKey)
-          rawSendCommand(this.deviceId, 'AUTH:' + hmac).catch(() => {})
+          rawSendCommand(this.deviceId, this._authCmd(hmac)).catch(() => {})   // ★ v3.36: per-phone AUTH
         } else {
           this.bindHint = '设备未绑定，请先绑定'
         }
@@ -3441,6 +3458,56 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.36(2026-07-17) 授权体系 v1：取本机稳定身份 phoneId（8 字节）。
+     *   懒生成 + 持久化于 uni storage `keygo_phone_id`；同一台手机同一次装机保持不变，
+     *   作为固件信任列表里的 owner 身份锚（取代不可靠的随机私有地址 RPA）。
+     *   非密码级随机即可（仅唯一性要求）：用时间戳与 Math.random 混淆降低碰撞概率。
+     *   @returns {{hex:string, bytes:Uint8Array}} hex=16 字符十六进制串
+     */
+    _getPhoneId() {
+      if (B._phoneId) return B._phoneId
+      let hex = ''
+      try { hex = uni.getStorageSync('keygo_phone_id') || '' } catch (e) { hex = '' }
+      if (!hex || hex.length !== 16) {
+        const b = new Uint8Array(8)
+        const t = Date.now()
+        for (let i = 0; i < 8; i++) {
+          b[i] = (Math.floor(Math.random() * 256) ^ ((t >>> ((i & 3) * 8)) & 0xff)) & 0xff
+        }
+        hex = bytesToHex(b)
+        try { uni.setStorageSync('keygo_phone_id', hex) } catch (e) { /* 忽略 */ }
+      }
+      B._phoneId = { hex, bytes: hexToBytes(hex) }
+      return B._phoneId
+    },
+
+    /**
+     * ★ v3.36: 构造 AUTH 指令。
+     *   fwsec≥2（新固件）：per-phone 格式 `AUTH:<phoneIdHex16>:<hmacHex64>`，
+     *     hmac = HMAC-SHA256(nonce, phoneKey)，固件按 phoneId 定位 owner 并校验其 phoneKey。
+     *   fwsec<2（旧固件/未知）：遗留格式 `AUTH:<hmacHex64>`（此时本机应持有 gk 而非 phoneKey，
+     *     属旧 App 行为；新 App 与新固件配套，正常总走 per-phone 分支）。
+     */
+    _authCmd(hmac) {
+      if (this.fwSec >= 2) {
+        return 'AUTH:' + this._getPhoneId().hex + ':' + hmac
+      }
+      return 'AUTH:' + hmac
+    },
+
+    /**
+     * ★ v3.36: AUTH 成功后（或配置阈值变更且已鉴权时）下发本机 RSSI 阈值，实现「per-phone 阈值跟随」。
+     *   固件把当前已鉴权 owner 的 rssiUnlock/rssiLock 改写为本机配置值并落盘，
+     *   之后自动解锁/上锁按「这台手机自己的阈值」判定（不同手机发射功率/天线不同，全局阈值不通用）。
+     *   仅 fwsec≥2 生效；经写队列串行化，避免与配置/命令写抢 GATT 通道。回包 RSSISET:OK/FAIL:*。
+     */
+    _pushRssiThresholds() {
+      if (this.fwSec < 2 || !this.deviceId || !this.connected) return
+      const cmd = 'RSSISET:' + this.unlockThreshold + ':' + this.lockThreshold
+      enqueueWrite(() => rawSendCommand(this.deviceId, cmd)).catch(() => {})
+    },
+
+    /**
      * ★ 设备端已解绑（恢复出厂 / 被其他手机解绑）：本机持有的旧密钥已彻底失效。
      *   必须忘记本地密钥并回到首绑界面，否则会拿旧码去 AUTH/SETCODE → FAIL:NOT_BOUND / AUTH_FAIL。
      *   触发来源：① status.bn=0 但本机仍有密钥（最可靠，复位瞬间连接断开 RESET:OK 多半收不到，
@@ -3505,7 +3572,17 @@ export const useBleStore = defineStore('ble', {
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2
       _resolveWaiter('AUTH', false)  // 清掉连接时可能残留的 AUTH waiter
 
-      const key = deriveBindKey(code, sn)
+      // ★ v3.36(2026-07-17) 授权体系 v1：
+      //   gk（组密钥）= SHA256(code||serial)[0:16]，不落盘、可随时由「码+序列号」重算；
+      //   phoneKey（本机密钥）= HMAC-SHA256(gk, phoneId)[0:16]，每台手机因 phoneId 不同而不同。
+      //   fwsec≥2（新固件）→ 本机存/用 phoneKey，BIND 带 phoneId；否则遗留 gk（兼容旧固件）。
+      //   ⚠ 密钥与 BIND 格式必须成对匹配：若对新固件发遗留 BIND（无 phoneId），固件会把 gk 存成
+      //     phoneKey，与本机 phoneKey 不一致 → 后续 AUTH 必失败。故一律按 fwSec 分流。
+      const phoneId = this._getPhoneId()
+      const gk = deriveBindKey(code, sn)
+      const _perPhone = (this.fwSec >= 2)
+      const key = _perPhone ? derivePhoneKey(gk, phoneId.bytes) : gk
+      const bindCmd = _perPhone ? ('BIND:' + code + '\u0000' + phoneId.hex) : ('BIND:' + code)
 
       // ★ 变量分析诊断：绑定开始即打印固件版本号。
       //   若 fwVersion !== "3.30.2" → 当前烧的不是含「延迟发送 + bn 字段」的新固件，
@@ -3538,7 +3615,7 @@ export const useBleStore = defineStore('ble', {
 
       // 1) 发 BIND（经写队列串行，避免与并发命令抢 GATT 通道导致乱序/覆盖）
       try {
-        await enqueueWrite(() => rawSendCommand(this.deviceId, 'BIND:' + code))
+        await enqueueWrite(() => rawSendCommand(this.deviceId, bindCmd))
       } catch (e) {
         _resolveWaiter('BIND', false)   // 写失败释放 waiter，避免 _authWithKey 误用残留
         B._bindInProgress = false
@@ -3609,7 +3686,7 @@ export const useBleStore = defineStore('ble', {
           if (!done) { done = true; _resolveWaiter('AUTH', false) }
         }, 4000)
         try {
-          await enqueueWrite(() => rawSendCommand(this.deviceId, 'AUTH:' + hmac))
+          await enqueueWrite(() => rawSendCommand(this.deviceId, this._authCmd(hmac)))
         } catch (e) {
           clearTimeout(timer)
           _resolveWaiter('AUTH', false)
@@ -3734,7 +3811,10 @@ export const useBleStore = defineStore('ble', {
           let sn = this.serialNumber
           if (!sn) { try { sn = await readSerialNumber(this.deviceId, 5000) } catch (e) { sn = '' } }
           if (!sn) { this.bindHint = '修改成功，但读取序列号失败，请重连以刷新密钥'; return true }
-          const key = deriveBindKey(newCode, sn)
+          // ★ v3.36(2026-07-17): 用新码重派生本机 phoneKey（固件 SETCODE 已用新 gk 重算所有 owner
+          //   的 phoneKey=HMAC(gk,phoneId)，此处保持与之同源）。fwsec<2 遗留模式则仍用 gk。
+          const gk = deriveBindKey(newCode, sn)
+          const key = (this.fwSec >= 2) ? derivePhoneKey(gk, this._getPhoneId().bytes) : gk
           B._bindKey = key
           this._saveBindKey(sn, key)
           // ★ 改码后固件 s_sessionAuthed 仍=1（基于旧码 nonce 标记），但内部 s_nonceValid=0，
@@ -3772,11 +3852,15 @@ export const useBleStore = defineStore('ble', {
       }
       return this._verifyWithSerial(code, sn)
     },
-    /** 纯同步 KDF 比对（提取为独立方法，避免串行读 FF04 卡住 UI） */
+    /** 纯同步 KDF 比对（提取为独立方法，避免串行读 FF04 卡住 UI）
+     *  ★ v3.36(2026-07-17): B._bindKey 现为 per-phone phoneKey，故比对目标改为
+     *    derivePhoneKey(deriveBindKey(code,sn), phoneId)，与绑定时的派生链一致。
+     *    fwsec<2（遗留 gk 模式）时 B._bindKey=gk，直接比 deriveBindKey(code,sn)。 */
     _verifyWithSerial(code, sn) {
       if (!sn || !B._bindKey) return false
       try {
-        const k = deriveBindKey(code, sn)
+        const gk = deriveBindKey(code, sn)
+        const k = (this.fwSec >= 2) ? derivePhoneKey(gk, this._getPhoneId().bytes) : gk
         if (k.length !== B._bindKey.length) return false
         for (let i = 0; i < k.length; i++) { if (k[i] !== B._bindKey[i]) return false }
         return true

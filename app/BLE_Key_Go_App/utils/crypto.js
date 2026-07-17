@@ -154,3 +154,17 @@ export function deriveBindKey(code, serial) {
   const full = sha256Bytes(mat)
   return full.slice(0, 16)
 }
+
+/**
+ * ★ v3.36（2026-07-17）授权体系 v1：由 gk(组密钥) + phoneId 派生 per-phone 密钥。
+ *   phoneKey[16] = HMAC-SHA256( gk, phoneId )[0:16]
+ *   与固件端 Bonding_DerivePhoneKey（bonding.c）完全同源：每台手机 phoneId 不同 → phoneKey 不同，
+ *   从而实现真正的 per-phone 身份（旧模型 8 个 owner 共用同一把 bindKey）。
+ * @param {Uint8Array} gkBytes      组密钥 gk（= deriveBindKey(code, serial)，16 字节）
+ * @param {Uint8Array} phoneIdBytes 本机 phoneId（8 字节随机，见 ble.js getPhoneId()）
+ * @returns {Uint8Array(16)}
+ */
+export function derivePhoneKey(gkBytes, phoneIdBytes) {
+  const full = hmacSha256Bytes(gkBytes, phoneIdBytes)
+  return full.slice(0, 16)
+}
