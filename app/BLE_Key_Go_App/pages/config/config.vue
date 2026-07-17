@@ -240,13 +240,10 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">启用无 App 模式</text>
-          <button
-            class="noapp-btn"
-            :class="{ 'noapp-btn-on': noAppMode }"
-            @tap="onTapNoAppMode"
-            size="mini"
-            :disabled="!bleStore.connected || bleStore.fwSec < 1"
-          >{{ noAppMode ? '已开启' : '已关闭' }}</button>
+          <!-- ★ uni-app 原生 switch 不响应 :checked/:key 程序化变更，改用纯 CSS toggle，由 Vue :class 驱动，100% 响应式 -->
+          <view class="toggle-track" :class="{ 'toggle-on': noAppMode }" @tap="onTapNoAppMode">
+            <view class="toggle-knob" :class="{ 'toggle-knob-on': noAppMode }"></view>
+          </view>
         </view>
         <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
         <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
@@ -350,8 +347,10 @@ async function onToggleNoAppMode(e) {
 
 // ★ 自定义 toggle 点击封装（替代原生 switch @change，避免原生组件不响应程序化 :checked 的坑）
 function onTapNoAppMode() {
-  // 按钮文字和颜色由 Vue :class 驱动，不需乐观更新；校验不通过时 onToggleNoAppMode 会 setNoAppMode(false) 自动拉回
-  onToggleNoAppMode({ detail: { value: !bleStore.noAppMode } })
+  const next = !bleStore.noAppMode
+  // ★ 乐观更新：先让 toggle 滑过去，校验不通过再由 onToggleNoAppMode 拉回来（弹回效果）
+  if (next) bleStore.setNoAppMode(true)
+  onToggleNoAppMode({ detail: { value: next } })
 }
 
 // ★ 系统配对码失焦/回车校验：若不是 6 位数字（不足 6 位或含字符），提示并联动关闭无 App 模式
@@ -1166,21 +1165,25 @@ const bindStatusClass = computed(() => {
   line-height: 1.5;
 }
 
-/* ★ 无 App 模式按钮 toggle */
-.noapp-btn {
-  background: #d1d5db;
-  color: #6b7280;
-  border-radius: 20rpx;
-  font-size: 22rpx;
-  padding: 4rpx 16rpx;
-  border: none;
-  line-height: 1.8;
-  min-width: 100rpx;
-  text-align: center;
+
+/* ★ 无 App 模式自定义 toggle（替代原生 switch，纯 View+CSS，响应式可靠） */
+.toggle-track {
+  width: 88rpx; height: 48rpx;
+  background: #d1d5db; border-radius: 24rpx;
+  display: flex; align-items: center;
+  transition: background 0.2s;
+  padding: 4rpx;
 }
-.noapp-btn::after { border: none; }
-.noapp-btn-on {
+.toggle-track.toggle-on {
   background: #3b82f6;
-  color: #fff;
+}
+.toggle-knob {
+  width: 40rpx; height: 40rpx;
+  background: #fff; border-radius: 20rpx;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: transform 0.2s ease;
+}
+.toggle-knob-on {
+  transform: translateX(40rpx);
 }
 </style>
