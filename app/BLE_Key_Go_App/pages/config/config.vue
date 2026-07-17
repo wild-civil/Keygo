@@ -144,10 +144,11 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">📊 连接页显示确认进度条</text>
-		  <switch :checked="localConfig.showProgress" @change="onToggleProgress" color="#3b82f6" style="transform: scale(0.7);" />
+          <view class="tg-switch" :class="{ 'tg-on': localConfig.showProgress }" @click="onToggleProgress">
+            <view class="tg-knob"></view>
+          </view>
         </view>
         <view class="config-desc">开启后，连接页会在走近/走远时显示「解锁/锁车进度 N/总」（需固件 v3.31+ 上报进度）</view>
-        <!-- <switch :checked="localConfig.showProgress" @change="onToggleProgress" color="#3b82f6" style="transform: scale(0.7);" /> -->
       </view>
 
       <view class="config-item">
@@ -240,9 +241,9 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">启用无 App 模式</text>
-          <!-- ★ v-if/v-else 强制重建原生 switch：值翻转时销毁旧实例创建新实例，初始 checked 正确，绕开原生组件不跟 :checked 的坑 -->
-          <switch v-if="!noAppVisual" :checked="false" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
-          <switch v-else :checked="true" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
+          <view class="tg-switch" :class="{ 'tg-on': noAppVisual }" @click="onToggleNoAppMode">
+            <view class="tg-knob"></view>
+          </view>
         </view>
         <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
         <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
@@ -324,22 +325,22 @@ const noAppVisual = ref(bleStore.noAppMode)
 watch(() => bleStore.noAppMode, (v) => { noAppVisual.value = v })
 const sysPasscode = ref(uni.getStorageSync('keygo_sys_passcode') || '123456')
 const pluginReady = ref(false)
-async function onToggleNoAppMode(e) {
-  const on = e.detail.value
+// ★ CSS toggle + @click：点击即翻转 noAppVisual，完全受控，无需 v-if 重建
+async function onToggleNoAppMode() {
+  const on = !noAppVisual.value
+  noAppVisual.value = on   // 视觉立即翻转（CSS transition）
   if (on) {
     const code = (sysPasscode.value || '').trim()
     if (!/^\d{6}$/.test(code)) {
       uni.showToast({ title: '系统配对码需为 6 位数字', icon: 'none' })
-      // ★ 纯视觉弹回：只操控本地 ref，不写 BLE（避免 ENCRYPT 下发失败被对账拉回）
-      noAppVisual.value = true
-      await nextTick()
-      noAppVisual.value = false
+      noAppVisual.value = false  // 回弹，CSS 自动过渡
       return
     }
     // 先下发系统配对码（与绑定码独立），再开启无 App 模式
     const ok = await bleStore.setSysPasscode(code)
     if (!ok) {
       uni.showToast({ title: '系统配对码下发失败', icon: 'none' })
+      noAppVisual.value = false  // 回弹
       bleStore.setNoAppMode(false)
       return
     }
@@ -563,9 +564,10 @@ function onLcChange(delta) { localConfig.lc = Math.max(1, Math.min(30, localConf
 function onIntervalChange(e) { localConfig.interval = e.detail.value }
 function onDlockChange(e) { localConfig.dlock = e.detail.value }
 // ★ v3.31 方案B-修正: 进度条开关是手机端偏好，不入下发配置，直接写 store 并持久化
-function onToggleProgress(e) {
-  localConfig.showProgress = e.detail.value
-  bleStore.showProgressCard = e.detail.value
+//   改用 @click（非原生 switch @change），点击即翻转，完全受控
+function onToggleProgress() {
+  localConfig.showProgress = !localConfig.showProgress
+  bleStore.showProgressCard = localConfig.showProgress
   bleStore._persistConfig()
 }
 
@@ -644,6 +646,34 @@ const bindStatusClass = computed(() => {
 </script>
 
 <style scoped>
+/* ★ CSS toggle 开关：替代 uni-app 原生 switch（:checked 不跟程序化变更的坑） */
+.tg-switch {
+  width: 84rpx;
+  height: 48rpx;
+  border-radius: 24rpx;
+  background: #e5e7eb;
+  position: relative;
+  transition: background-color 0.25s ease;
+  flex-shrink: 0;
+}
+.tg-switch.tg-on {
+  background: #3b82f6;
+}
+.tg-knob {
+  width: 40rpx;
+  height: 40rpx;
+  border-radius: 50%;
+  background: #fff;
+  position: absolute;
+  top: 4rpx;
+  left: 4rpx;
+  transition: transform 0.25s ease;
+  box-shadow: 0 2rpx 6rpx rgba(0, 0, 0, 0.15);
+}
+.tg-switch.tg-on .tg-knob {
+  transform: translateX(36rpx);
+}
+
 .page-config {
   min-height: 100vh;
   background: var(--bg-page);
