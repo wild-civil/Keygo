@@ -1,24 +1,18 @@
 <template>
   <view class="page-config" :class="themeClass">
 
-    <!-- ★ 2026-07-16: 基座状态横幅。
-         红（标准基座）= App 原生配对路径(createBond/Keygo-Foreground)不可用；
-         但「无 App 模式」由固件 SMP 加密门控发起系统配对，标准/自定义基座均可弹窗，不受影响。
-         绿（自定义基座）= App 原生 createBond 也可用（仅影响旧版 passkey 路径）。 -->
+    <!-- 基座状态横幅：标准基座不支持 App 原生系统配对，但无App模式由固件发起配对，两者皆可用 -->
     <view
       v-if="!pluginReady"
       style="margin:12rpx 24rpx 4rpx;padding:18rpx 20rpx;border-radius:12rpx;background:#fff7ed;border:1rpx solid #fed7aa;color:#9a3412;font-size:24rpx;line-height:1.5;"
     >
-      🟠 <text style="font-weight:bold;">当前运行在标准基座 — App 原生配对路径不可用（不影响「无 App 模式」）</text>
-      <view style="margin-top:6rpx;color:#9a3412;">说明：标准基座不打包 Keygo-Foreground 原生插件，故旧版「passkey 系统配对」(App 调 createBond) 无法弹窗。但「无 App 模式」由<text style="font-weight:bold;">固件</text>在连接时主动发起系统配对，标准基座同样能弹「输入配对码」窗，无需自定义基座。</view>
-      <view style="margin-top:6rpx;color:#9a3412;">如需使用旧版 App 原生配对路径：HBuilderX → 运行 → 制作自定义调试基座（消耗 1 次云打包）→ 运行设置选「自定义基座」→ 重跑。本横幅变绿即成功。</view>
+      🟠 标准基座：App 原生配对不可用，但「无 App 模式」由设备端发起系统配对，照常可用。
     </view>
     <view
       v-else
       style="margin:12rpx 24rpx 4rpx;padding:18rpx 20rpx;border-radius:12rpx;background:#ecfdf3;border:1rpx solid #a7f3d0;color:#047857;font-size:24rpx;line-height:1.5;"
     >
-      🟢 <text style="font-weight:bold;">原生插件已加载（自定义基座）— 系统配对弹窗可用</text>
-      <view style="margin-top:6rpx;color:#047857;">开启下方「passkey 系统配对」后绑定设备，系统会弹「输入配对码」窗，输 123456 即可配对。</view>
+      🟢 自定义基座：原生插件已加载，系统配对弹窗可用。
     </view>
 
     <!-- ★ v3.23: 智能重连模式选择（全局设置，无需连接） -->

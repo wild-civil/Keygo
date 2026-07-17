@@ -88,7 +88,7 @@
       <!-- ★ 手动 RSSI 模拟 -->
       <view class="rssi-sim-section">
         <view class="rssi-sim-title">📶 手动 RSSI 模拟</view>
-        <view class="rssi-sim-hint">KeyGo 设备无原生 RSSI 时，手动注入信号值测试逻辑</view>
+        <view class="rssi-sim-hint">设备无原生 RSSI 时，可手动注入信号值，验证自动解锁 / 锁车效果</view>
         <view class="rssi-presets">
           <button class="rssi-preset near" @tap="setRSSI(-30)">-30 极近</button>
           <button class="rssi-preset close" @tap="setRSSI(-40)">-40 很近</button>
