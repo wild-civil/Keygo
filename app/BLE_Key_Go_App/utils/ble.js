@@ -25,6 +25,56 @@ export const BATT_SERVICE = {
   levelCharUUID: '00002A19-0000-1000-8000-00805F9B34FB',       // Battery Level (Read/Notify)
 }
 
+// ★ 2026-07-18 P0: property not support(10007) 一次性 App 内引导
+//   重烧/恢复出厂后写 FF03/FF04 报 10007，普通用户看不懂。集中在此识别，
+//   命中后弹一次模态引导（忽略设备→关蓝牙重开→重连）。改用时间戳冷却，
+//   避免「有写成功就重置标志」导致的反复弹窗死循环。
+let _propNotSupportAt = 0                 // 上次弹引导的时间戳(ms)
+const _propNotSupportCooldown = 60000     // 最短间隔 60s，到点前不再弹
+let _propNotSupportCount = 0
+// ★ 2026-07-18: 10007 瞬时窗口重试 + 连接后宽限（无 App 模式加密握手）。
+//   10007=OS 本地拒绝（未真正发往固件），重试永远安全（不会双开锁/双解锁）。
+const _WRITE_10007_RETRIES = 2            // 10007 最多额外重试次数
+const _WRITE_10007_RETRY_DELAY = 400      // 每次重试间隔(ms)
+// ★ 连接后宽限期：无 App 模式(加密门控)下 (重)连后 OS 做加密握手 ~2-3s，
+//   期间 FF03 写被拒(10007)属正常瞬时；宽限期内不弹"忽略设备"引导，
+//   交给底层重试 + 上层(auth 4×1500ms)重试自愈。宽限期外仍弹，兜真缓存损坏。
+let _connectGraceUntil = 0
+const _CONNECT_GUIDE_GRACE = 4000         // 连接成功后 4s 内 10007 不弹窗
+
+function _isPropertyNotSupport(err) {
+  if (!err) return false
+  const code = err.errCode != null ? err.errCode : err.code
+  if (code === 10007) return true
+  const msg = String(err.errMsg || err.message || (typeof err === 'string' ? err : '') || '')
+  return /property not support|not support|10007/i.test(msg)
+}
+
+function _maybeGuidePropertyNotSupport(err) {
+  if (!_isPropertyNotSupport(err)) return false
+  _propNotSupportCount++
+  const now = Date.now()
+  // ★ 2026-07-18: 连接后宽限期（无 App 模式加密握手窗口）内的 10007 属瞬时，
+  //   跳过"忽略设备"引导，交由底层 + 上层重试自愈；宽限期外仍弹，兜真缓存损坏。
+  if (now < _connectGraceUntil) {
+    console.warn('[BLE] 连接后宽限期内 10007，疑似加密握手窗口，暂不弹窗引导（累计', _propNotSupportCount, '）')
+    return true
+  }
+  if (now - _propNotSupportAt < _propNotSupportCooldown) {
+    console.warn('[BLE] property not support(10007) 冷却中，本条不弹窗（累计', _propNotSupportCount, '）')
+    return true
+  }
+  _propNotSupportAt = now
+  console.warn('[BLE] 检测到 property not support(10007)，疑似蓝牙缓存过期，累计', _propNotSupportCount)
+  uni.showModal({
+      title: '蓝牙缓存可能过期',
+      content: '向设备写入被拒绝（property not support / 10007）。\n\n建议按以下步骤恢复：\n1. 系统蓝牙中「忽略此设备」\n2. 关闭再打开手机蓝牙\n3. 回到 App 重新连接\n\n若仍失败，可能是固件版本不兼容，请确认固件 ≥ 3.33.4。',
+      showCancel: false,
+      confirmText: '知道了'
+    })
+  return true
+}
+
 // ==================== 蓝牙适配器 ====================
 
 /**
@@ -643,6 +693,7 @@ export function connectDevice(deviceId) {
         timeout: 10000,
         success: () => {
           console.log('[BLE] 连接成功', deviceId)
+          _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE   // ★ 连接后 10007 宽限期（加密握手窗口）
           setTimeout(() => {
             uni.setBLEMTU({
               deviceId,
@@ -757,25 +808,46 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
   return new Promise((resolve, reject) => {
     // 将字符串转为 ArrayBuffer
     const buffer = stringToArrayBuffer(value)
-    uni.writeBLECharacteristicValue({
-      deviceId,
-      serviceId,
-      characteristicId,
-      value: buffer,
-      success: () => {
-        console.log(`[BLE] 写入成功: ${value}`)
-        resolve()
-      },
-      fail: (err) => {
-        // ★ 2026-07-14 诊断：把特征值 UUID 与值前缀一并打出，定位"property not support"(10007)
-        //   到底打到了哪个特征值（FF01/FF03 都应可写；若打出 FF02/FF04 说明写错通道）。
-        const _uuid = String(characteristicId || '').toUpperCase()
-        const _valPreview = (value && value.length > 24 ? value.slice(0, 24) + '…' : value)
-        console.error('[BLE] 写入失败', err,
-          '| char=', _uuid, '| val=', JSON.stringify(_valPreview), '| len=', value ? value.length : 0)
-        reject(err)
-      }
-    })
+    // ★ 2026-07-18: 抽成 _attempt，使 10007 可重试。10007=OS 本地拒绝(未发往固件)，重试安全。
+    const _attempt = (tryNo) => {
+      uni.writeBLECharacteristicValue({
+        deviceId,
+        serviceId,
+        characteristicId,
+        value: buffer,
+        success: () => {
+          console.log(`[BLE] 写入成功: ${value}`)
+          // ★ 不在成功时重置 _propNotSupportAt，否则「成功一次又失败 10007」会反复弹窗。
+          //   冷却由时间戳控制；恢复后若真再失败也最多 60s 提示一次。
+          resolve()
+        },
+        fail: (err) => {
+          // ★ 2026-07-14 诊断：把特征值 UUID 与值前缀一并打出，定位"property not support"(10007)
+          //   到底打到了哪个特征值（FF01/FF03 都应可写；若打出 FF02/FF04 说明写错通道）。
+          const _uuid = String(characteristicId || '').toUpperCase()
+          const _valPreview = (value && value.length > 24 ? value.slice(0, 24) + '…' : value)
+          // ★ 2026-07-18: 10007=OS 本地拒绝(未真正发往固件)，属瞬时/缓存类，非代码 bug，
+          //   降级为 console.warn，避免 IDE 自动标 [上报Bug]（真写错通道/真失败仍走后续逻辑）。
+          if (_isPropertyNotSupport(err)) {
+            console.warn('[BLE] 写入失败(10007)', err,
+              '| char=', _uuid, '| val=', JSON.stringify(_valPreview), '| len=', value ? value.length : 0)
+          } else {
+            console.error('[BLE] 写入失败', err,
+              '| char=', _uuid, '| val=', JSON.stringify(_valPreview), '| len=', value ? value.length : 0)
+          }
+          // ★ 2026-07-18: 10007 瞬时窗口（GATT 缓存刷新 / 加密握手）→ 先重试自愈，不急于弹引导。
+          if (_isPropertyNotSupport(err) && tryNo < _WRITE_10007_RETRIES) {
+            console.warn('[BLE] 10007 疑似瞬时窗口，' + (tryNo + 1) + '/' + _WRITE_10007_RETRIES
+              + ' 重试（' + _WRITE_10007_RETRY_DELAY + 'ms 后）…')
+            setTimeout(() => _attempt(tryNo + 1), _WRITE_10007_RETRY_DELAY)
+            return
+          }
+          _maybeGuidePropertyNotSupport(err)
+          reject(err)
+        }
+      })
+    }
+    _attempt(0)
   })
 }
 
