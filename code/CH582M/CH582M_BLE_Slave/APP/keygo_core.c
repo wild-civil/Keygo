@@ -1291,7 +1291,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
  *   冷却时间是设备级参数，写入 Flash 确保所有手机共享同一值。
  *   其他参数 (unlock/lock/uc/lc/dlock) 不写 Flash（per-phone 方案）。
  *
- *   使用 DataFlash【偏移 0x7000(物理 0x77000)~0x70FF】区域存储配置 (BLE SNV 在偏移 0x07E00)
+ *   使用 DataFlash【偏移 0x7000(物理 0x77000)~0x70FF】区域存储配置 (BLE SNV 现位于偏移 0x7700, 2026-07-17 由 0x07E00 下移扩容)
  *   ★ 2026-07-12 修复：EEPROM 地址是相对 DataFlash 基地址 0x70000 的【偏移】，非物理地址。
  *   写入前先擦除页 (256 字节对齐)，然后写入 16 字节配置块
  *   格式: [magic:4][unlock:2][lock:2][uc:1][lc:1][dlock:2][checksum:1][cooldown_ms:2][pad:1]

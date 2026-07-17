@@ -36,7 +36,7 @@
 
 /* ── 信任列表存储布局（DataFlash，复用 keygo_core 的 EEPROM_* 原语）──
  *   keygo_core 配置区: 偏移 0x7000 (物理 0x77000, 256B 页)
- *   BLE SNV (LTK):     偏移 0x07E00 (物理 0x77E00, 协议栈自管，勿碰)
+ *   BLE SNV (LTK):     偏移 0x7700 (物理 0x77700, 2026-07-17 由 0x07E00 下移以扩容至 8 绑定; 协议栈自管，勿碰)
  *   本模块信任列表:     偏移 0x7100 (物理 0x77100, 256B 页；8 条≈224B 单页；改 16 条≈448B 需 2 页，见 BOND_PAGES)
  *   当前有效绑定码:     偏移 0x7200 (物理 0x77200, 独立 256B 页，首字节=长度，后续=码明文；与 0x7100 不重叠)
  *   ⚠ 上述地址为【相对 DataFlash 基地址 0x70000 的偏移】，非物理地址；且不得相互重叠。
@@ -48,7 +48,7 @@
 #define KEYGO_BINDCODE_ADDR  0x7200   /* 物理 0x77200, ★ 自定义绑定码持久化页 */
 #endif
 #ifndef KEYGO_SECEP_ADDR
-#define KEYGO_SECEP_ADDR   0x7400   /* 物理 0x77400, ★ Phase 2 安全迁移标记页(升级到 passkey 时代清旧 Just-Works bond); < SNV(0x07E00) 独占 1 页 */
+#define KEYGO_SECEP_ADDR   0x7400   /* 物理 0x77400, ★ Phase 2 安全迁移标记页(升级到 passkey 时代清旧 Just-Works bond); < SNV(偏移 0x7700) 独占 1 页 */
 #endif
 #define KEYGO_SECEP_VALUE 0x01      /* 已迁移到 passkey 时代的标记值 */
 #define BOND_PAGE_SIZE    256
@@ -74,18 +74,18 @@ typedef struct {
  *   - CFG(0x7000) / BOND(0x7100) / BINDCODE(0x7200) 各占独立 256B 页，互不重叠。
  *   - BOND 区域右界不得触及 BINDCODE（当前 BOND_PAGES=1 恰好相邻 0x7200；若扩到 16 条
  *     BOND_PAGES=2 会越界擦到绑定码页 → 这里直接 #error 拦死）。
- *   - BINDCODE 右界不得触及 BLE SNV(偏移 0x07E00)。 */
+ *   - BINDCODE 右界不得触及 BLE SNV(偏移 0x7700)。 */
 #if (KEYGO_CFG_ADDR + BOND_PAGE_SIZE) > KEYGO_BOND_ADDR
 #error "KEYGO_CFG region overlaps BOND region! Adjust offsets in bonding.h / keygo_core.h."
 #endif
 #if (KEYGO_BOND_ADDR + BOND_PAGES * BOND_PAGE_SIZE) > KEYGO_BINDCODE_ADDR
 #error "BOND region overlaps BINDCODE region! Increase KEYGO_BINDCODE_ADDR or reduce BOND_ENTRY_MAX."
 #endif
-#if (KEYGO_BINDCODE_ADDR + BOND_PAGE_SIZE) > 0x07E00
-#error "BINDCODE region overlaps BLE SNV (0x07E00)! Move KEYGO_BINDCODE_ADDR lower."
+#if (KEYGO_BINDCODE_ADDR + BOND_PAGE_SIZE) > 0x7700
+#error "BINDCODE region overlaps BLE SNV (offset 0x7700)! Move KEYGO_BINDCODE_ADDR lower."
 #endif
-#if (KEYGO_SECEP_ADDR + BOND_PAGE_SIZE) > 0x07E00
-#error "SECEP region overlaps BLE SNV (0x07E00)! Move KEYGO_SECEP_ADDR lower."
+#if (KEYGO_SECEP_ADDR + BOND_PAGE_SIZE) > 0x7700
+#error "SECEP region overlaps BLE SNV (offset 0x7700)! Move KEYGO_SECEP_ADDR lower."
 #endif
 
 /* ── 生命周期 ── */

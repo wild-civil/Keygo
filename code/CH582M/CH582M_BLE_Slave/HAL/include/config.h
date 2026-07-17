@@ -91,18 +91,29 @@
 #define BLE_CALIBRATION_PERIOD              120000
 #endif
 
-/* 【SNV】Bonding 持久化 — 使用 DataFlash 最后 512 字节 */
+/* 【SNV】Bonding(LTK) 持久化 — DataFlash 区域重分区（2026-07-17 扩容）
+ *   旧默认 BLE_SNV_ADDR=0x77E00-FLASH_ROM_MAX_SIZE(偏移 0x07E00) 仅留 512B，
+ *   配 BLE_SNV_NUM=1，曾被误判为「最多 2 台绑定的硅上限」——实为默认布局副产物。
+ *   本固件 App 数据区占用 偏移 0x7000~0x7700(CFG/BOND/BINDCODE/MODE/SECEP/ENCRYPT/PASSCODE)，
+ *   其后 0x7700~0x07E00 为一段空闲 DataFlash。将 SNV 起点下移到偏移 0x7700、
+ *   BLE_SNV_NUM=8(每块 256B → 2KB)，即可真实存 8 个 OS 绑定，覆盖全部 8 个 owner。
+ *   末端 0x07F00~0x08000 保留 256B 余量，避免触及 bootloader(phys 0x78000)。
+ *   ★ Mesh 说明：本工程链接 CH58xBLE_ROM(非 MESH 变体)，未启用 Mesh，故不存在
+ *     Mesh NV 与本 SNV 区冲突；若日后启用 Mesh，其 NV 走独立区域，与本配置无关。
+ *   ★ 破坏性：改 SNV 地址=一次性重分区，旧 bond(LTK) 全部失效，需各手机重新配对一次。
+ *   MCU.c 守卫：BLE_SNV_ADDR + BLE_SNV_BLOCK*BLE_SNV_NUM ≤ (0x78000-FLASH_ROM_MAX_SIZE=0x8000)。
+ *   校验：0x7700 + 256*8 = 0x7F00 < 0x8000 ? */
 #ifndef BLE_SNV
 #define BLE_SNV                             TRUE
 #endif
 #ifndef BLE_SNV_ADDR
-#define BLE_SNV_ADDR                        0x77E00-FLASH_ROM_MAX_SIZE
+#define BLE_SNV_ADDR                        0x77700-FLASH_ROM_MAX_SIZE  /* 偏移 0x7700 = phys 0x77700 */
 #endif
 #ifndef BLE_SNV_BLOCK
 #define BLE_SNV_BLOCK                       256
 #endif
 #ifndef BLE_SNV_NUM
-#define BLE_SNV_NUM                         1
+#define BLE_SNV_NUM                         8   /* 8 个 OS 绑定，匹配信任列表 BOND_ENTRY_MAX=8 */
 #endif
 
 /* 【RTC】内部 32K */
