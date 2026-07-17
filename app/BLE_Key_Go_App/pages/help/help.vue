@@ -4,7 +4,7 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">KeyGo·钥启程</text>
-      <text class="login-subtitle">使用帮助 · v3.32.3</text>
+      <text class="login-subtitle">使用帮助 · v3.36.0</text>
     </view>
 
     <!-- ★ v3.32.2-fix: 快速上手 + 首次绑定向导 合并为一张卡 -->
@@ -48,7 +48,7 @@
           <text class="step-num">5</text>
           <view class="step-content">
             <text class="step-title">当钥匙用</text>
-            <text class="step-desc">返回「控制」页解锁 / 锁车；自动/极速模式手机靠近自动连接，手动模式纯手动控制，打开均可 App 即自动连。</text>
+            <text class="step-desc">返回「控制」页解锁 / 锁车。重连策略有三档（「我的」→ 重连模式）：舒适（亮屏自动连，默认）/ 极速（GPS+运动感知，通勤无感）/ 手动（纯手动，不自动连）。开启「无App模式」后，即使 App 没运行，手机走近也会由设备自动解锁。</text>
           </view>
         </view>
       </view>
@@ -65,28 +65,32 @@
       </view>
     </view>
 
-    <!-- BLE Bonding 安全（v3.32.2 实际模型） -->
+    <!-- BLE Bonding 安全（v3.36.0 实际模型） -->
     <view class="login-card" style="margin-top: 24rpx;">
-      <text class="card-title">🔒 BLE Bonding 安全（v3.32.3）</text>
+      <text class="card-title">🔒 BLE Bonding 安全（v3.36.0）</text>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
         <text class="tip-text">链路层加密（LESC）：配对后密钥(LTK)存芯片 SNV，重连自动加密，无需记密码</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
-        <text class="tip-text">应用层绑定码 + HMAC-SHA256 挑战应答：控制指令须经会话鉴权，无密钥无法操控</text>
+        <text class="tip-text">per-phone 鉴权（授权体系 v1）：每台手机密钥 = HMAC(gk, phoneId)，各不相同，互不可伪造</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
-        <text class="tip-text">信任列表持久化（DataFlash，最多 8 把钥匙）：绑定关系断电不丢</text>
+        <text class="tip-text">per-phone RSSI 阈值跟随：每台手机的「解锁/锁车阈值」独立保存，各用各的</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">✅</text>
-        <text class="tip-text">序列号=MAC 用于密钥派生：无绑定码无法派生密钥，无泄露风险</text>
+        <text class="tip-text">信任列表持久化（DataFlash，最多 8 把钥匙）：绑定关系断电不丢，互不互踢</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">✅</text>
+        <text class="tip-text">控制指令 C1 签名（per-command HMAC + 会话盐 + 序号）防重放一直开启</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">规划中：多管理员 / 锁定列表、带屏设备 LESC+MITM passkey、远程临时授权</text>
+        <text class="tip-text">规划中：UNBIND 联动删系统配对（收口无App撤销缺口）、多管理员 / 临时授权</text>
       </view>
     </view>
 
@@ -149,6 +153,27 @@
       <view class="info-tip"><text class="tip-icon">💡</text><text class="tip-text">模式存于设备（DataFlash），可在「控制」页底部随时切换；切换后重启仍保持</text></view>
     </view>
 
+    <!-- ★ v3.36: 无App模式 与 三模式 关系 -->
+    <view class="login-card" style="margin-top: 24rpx;">
+      <text class="card-title">📡 无App模式 与 重连三模式</text>
+      <view class="info-tip">
+        <text class="tip-icon">💡</text>
+        <text class="tip-text"><b>三模式（舒适/极速/手动）</b>管的是「App 运行时怎么重连设备」，不控制设备级自动解锁。</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">💡</text>
+        <text class="tip-text"><b>无App模式</b>让手机系统把 KeyGo 当成已配对设备，<b>App 关着也能自动解锁</b>（设备级舒适进入）。开启后走近即解锁，与 App 是否运行无关。</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">⚠️</text>
+        <text class="tip-text"><b>撤销某台手机要两步</b>：① App 内解绑（UNBIND，关控车门）；② 该手机系统蓝牙里「忽略此设备」（删系统配对）。只做①不够——它仍可能触发无App自动解锁。</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">规划中：解绑时由固件自动删系统配对，一步到位。</text>
+      </view>
+    </view>
+
     <!-- ★ Phase 2: 常见错误排查 -->
     <view class="login-card" style="margin-top: 24rpx;">
       <text class="card-title">🛠 常见错误排查</text>
@@ -162,34 +187,34 @@
       </view>
     </view>
 
-    <!-- ★ v3.32.2: 规划中 / 待核对功能 -->
+    <!-- ★ v3.36: 规划中 / 待核对功能 -->
     <view class="login-card" style="margin-top: 24rpx;">
       <text class="card-title">📋 规划中功能（待核对）</text>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">多管理员 / 锁定列表（多 owner 管理）</text>
+        <text class="tip-text">多管理员 / 锁定列表（多 owner 精细管理）</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">极速模式 GPS 围栏（已搭框架，待真机落地）</text>
+        <text class="tip-text">UNBIND 联动删系统配对（收口无App模式撤销缺口，当前需手动忽略设备）</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">配置(uc/lc)断电持久化一致性（当前重启会回退，见排查项）</text>
+        <text class="tip-text">极速模式 GPS 围栏真机落地（框架已搭，无 GMS 设备自动降级舒适模式）</text>
+      </view>
+      <view class="info-tip">
+        <text class="tip-icon">🔲</text>
+        <text class="tip-text">配置(uc/lc/阈值)断电持久化一致性（当前仅 cooldown 变化才落盘，重启可能回退）</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
         <text class="tip-text">带屏设备 LESC+MITM passkey、远程临时授权</text>
       </view>
-      <view class="info-tip">
-        <text class="tip-icon">🔲</text>
-        <text class="tip-text">后台重连三模式（舒适/极速/省电）真机验证</text>
-      </view>
     </view>
 
     <!-- 底部 -->
     <view class="login-footer">
-      <text class="footer-text">BLE KeyGo v3.32.3 · 纯本地 · 安全可靠</text>
+      <text class="footer-text">BLE KeyGo v3.36.0 · 纯本地 · 安全可靠</text>
       <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>
