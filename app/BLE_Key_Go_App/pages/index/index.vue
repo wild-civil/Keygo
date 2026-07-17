@@ -160,6 +160,7 @@
           <view class="device-info">
             <text class="device-name">{{ device.name }}</text>
             <text class="device-id">{{ device.deviceId }}</text>
+            <text v-if="device.nameIsFallback" class="device-occupied-tag">⚠ 设备占用中</text>
           </view>
           <view class="device-rssi">
             <text class="device-rssi-val">{{ device.RSSI }}</text>
@@ -937,6 +938,18 @@ async function handleSetName() {
   color: var(--text-muted);
   margin-top: 4rpx;
   display: block;
+}
+
+/* ★ v3.35: 异名设备(可能已被占用)的警示徽标 */
+.device-occupied-tag {
+  display: inline-block;
+  margin-top: 8rpx;
+  padding: 2rpx 12rpx;
+  font-size: 20rpx;
+  line-height: 1.4;
+  color: #fff;
+  background: #e6a23c;
+  border-radius: 8rpx;
 }
 
 .device-rssi { text-align: center; margin-right: 16rpx; }
