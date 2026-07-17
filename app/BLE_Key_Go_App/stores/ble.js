@@ -3776,6 +3776,12 @@ export const useBleStore = defineStore('ble', {
         B._bindKey = null
         if (this.serialNumber) this._clearBindKey(this.serialNumber)
         this.bindHint = '已解绑'
+        // ★ 解绑/恢复出厂 联动关闭「无 App 模式」：设备端加密配对上下文会被清除，
+        //   本地期望态一并归零并尽力下发 ENCRYPT:0（未连接/链路被删配对打断时，
+        //   由 status.pair 对账在下次连接自愈）。按钮即随之关闭。
+        console.log('[UNBIND] 联动关闭无 App 模式 setNoAppMode(false)，当前 noAppMode=' + this.noAppMode)
+        this.setNoAppMode(false)
+        console.log('[UNBIND] 关闭后 noAppMode=' + this.noAppMode)
         // ★ UNBIND 联动删 SMP 配对：固件已清设备侧 SNV LTK（Bonding_ClearSnvBonds），
         //   这里再让手机端删系统蓝牙配对（OS 层 SMP），两端合力彻底撤销，使其即便无App模式也无法自动解锁。
         //   标准基座无原生插件时静默跳过，仅靠固件清 LTK 兜底（安全不受影响，仅系统蓝牙列表仍残留）。

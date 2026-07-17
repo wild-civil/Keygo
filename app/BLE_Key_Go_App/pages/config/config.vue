@@ -240,7 +240,10 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">启用无 App 模式</text>
-          <switch :checked="noAppMode" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
+          <!-- ★ uni-app 原生 switch 不响应 :checked/:key 程序化变更，改用纯 CSS toggle，由 Vue :class 驱动，100% 响应式 -->
+          <view class="toggle-track" :class="{ 'toggle-on': noAppMode }" @tap="onTapNoAppMode">
+            <view class="toggle-knob" :class="{ 'toggle-knob-on': noAppMode }"></view>
+          </view>
         </view>
         <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
         <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
@@ -256,6 +259,8 @@
             maxlength="6"
             v-model="sysPasscode"
             placeholder="123456"
+            @blur="onPasscodeBlur"
+            @confirm="onPasscodeBlur"
             style="width:200rpx;text-align:right;font-size:26rpx;border:1rpx solid #d1d5db;border-radius:8rpx;padding:6rpx 12rpx;" />
         </view>
         <view class="config-desc">仅用于无 App 模式的系统层配对（确认是你的手机），<text style="font-weight:bold;">与绑定码完全独立</text>。开启无 App 模式时下发，之后断重连系统弹窗请输入此码。首次配对即生效；已配对后想改码，需先在手机系统蓝牙里「忽略此设备」再重连才会重新弹窗。</view>
@@ -338,6 +343,33 @@ async function onToggleNoAppMode(e) {
     uni.showToast({ title: '系统配对码已设为 ' + code + '，断开重连后请在系统弹窗输入它', icon: 'none', duration: 3000 })
   }
   bleStore.setNoAppMode(on)
+}
+
+// ★ 自定义 toggle 点击封装（替代原生 switch @change，避免原生组件不响应程序化 :checked 的坑）
+function onTapNoAppMode() {
+  onToggleNoAppMode({ detail: { value: !bleStore.noAppMode } })
+}
+
+// ★ 系统配对码失焦/回车校验：若不是 6 位数字（不足 6 位或含字符），提示并联动关闭无 App 模式
+//   ★ 修复：Android 软键盘「完成」会同时派发 @blur 与 @confirm，导致本函数同帧执行两次
+//     —— 第1次关开关并吐「已关闭」toast，第2次已读到 false 走 else 分支把 toast 覆盖成无后缀版。
+//     加重入守卫（400ms）只在首次触发时处理，避免双触发产生的错误 toast/竞态。
+let _passcodeBlurGuard = 0
+function onPasscodeBlur() {
+  const _now = Date.now()
+  if (_now - _passcodeBlurGuard < 400) return
+  _passcodeBlurGuard = _now
+  const code = (sysPasscode.value || '').trim()
+  try { uni.setStorageSync('keygo_sys_passcode', code) } catch (e) { /* 忽略 */ }
+  if (!/^\d{6}$/.test(code)) {
+    if (bleStore.noAppMode) {
+      console.log('[无App] 配对码非法(' + code + ')，关闭无 App 模式')
+      bleStore.setNoAppMode(false)
+      uni.showToast({ title: '系统配对码需为 6 位数字，已关闭无 App 模式', icon: 'none' })
+    } else {
+      uni.showToast({ title: '系统配对码需为 6 位数字', icon: 'none' })
+    }
+  }
 }
 
 // ★ 设备绑定弹窗（fixed 覆盖层，脱离 swiper/scroll-view 文档流，input 可靠）
@@ -1130,4 +1162,25 @@ const bindStatusClass = computed(() => {
   line-height: 1.5;
 }
 
+
+/* ★ 无 App 模式自定义 toggle（替代原生 switch，纯 View+CSS，响应式可靠） */
+.toggle-track {
+  width: 88rpx; height: 48rpx;
+  background: #d1d5db; border-radius: 24rpx;
+  display: flex; align-items: center;
+  transition: background 0.2s;
+  padding: 4rpx;
+}
+.toggle-track.toggle-on {
+  background: #3b82f6;
+}
+.toggle-knob {
+  width: 40rpx; height: 40rpx;
+  background: #fff; border-radius: 20rpx;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: transform 0.2s ease;
+}
+.toggle-knob-on {
+  transform: translateX(40rpx);
+}
 </style>

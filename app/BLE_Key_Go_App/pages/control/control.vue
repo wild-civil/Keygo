@@ -88,7 +88,7 @@
       <!-- ★ 手动 RSSI 模拟 -->
       <view class="rssi-sim-section">
         <view class="rssi-sim-title">📶 手动 RSSI 模拟</view>
-        <view class="rssi-sim-hint">设备无原生 RSSI 时，可手动注入信号值，验证自动解锁 / 锁车效果</view>
+        <view class="rssi-sim-hint">KeyGo 设备无原生 RSSI 时，手动注入信号值测试逻辑</view>
         <view class="rssi-presets">
           <button class="rssi-preset near" @tap="setRSSI(-30)">-30 极近</button>
           <button class="rssi-preset close" @tap="setRSSI(-40)">-40 很近</button>
@@ -140,7 +140,7 @@
             <text class="mode-desc">解锁 / 锁车 / 骑行（双击）</text>
           </view>
         </view>
-        <view class="config-desc" style="margin-top:10rpx;">模式存于设备，切换后重启仍保持；首次使用建议在「帮助」页了解两种模式差异。</view>
+        <view class="config-desc" style="margin-top:10rpx;">模式存于设备，切换后重启仍保持；首次使用建议在「帮助」页了解二者差异。</view>
       </view>
     </template>
   </view>
@@ -557,9 +557,10 @@ async function handleDeviceModeChange(mode) {
 }
 
 .config-desc {
-  font-size: 22rpx;
+  font-size: 19rpx;
   color: var(--text-muted);
   line-height: 1.5;
+  margin-left: 8rpx;
 }
 
 .mode-cards {
