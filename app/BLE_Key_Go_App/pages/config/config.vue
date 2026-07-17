@@ -240,9 +240,10 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">启用无 App 模式</text>
-                    <!-- ★ v-if/v-else 强制重建原生 switch：值翻转时销毁旧实例创建新实例，初始 checked 正确，绕开原生组件不跟 :checked 的坑 -->
-          <switch v-if="!noAppMode" :checked="false" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
-          <switch v-else :checked="true" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
+          <!-- ★ CSS toggle 替代原生 switch：纯 Vue :class 驱动，零原生组件坑。toggleVisual 独立管理视觉态，支持解开即弹回。 -->
+          <view class="noapp-toggle-track" :class="{ 'noapp-toggle-on': toggleVisual }" @tap.stop="onTapNoAppMode">
+            <view class="noapp-toggle-knob" :class="{ 'noapp-toggle-knob-on': toggleVisual }"></view>
+          </view>
         </view>
         <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
         <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
@@ -321,6 +322,37 @@ const themeClass = computed(() => themeStore.themeClass)
 
 // ★ 2026-07-16: 无 App 模式开关（固件 ENCRYPT 门控，基座无关）
 const noAppMode = computed(() => bleStore.noAppMode)
+const toggleVisual = ref(false)
+watch(noAppMode, (v) => { toggleVisual.value = v }, { immediate: true })
+
+// ★ CSS toggle tap handler: 独立管理视觉态 + 弹回动画
+async function onTapNoAppMode() {
+  const next = !noAppMode.value
+  toggleVisual.value = next  // 乐观：先让 toggle 滑过去
+  
+  if (next) {
+    // 校验配对码
+    const code = (sysPasscode.value || '').trim()
+    if (!/^\d{6}$/.test(code)) {
+      // 弹回效果：短暂展示 ON 态后滑回 OFF
+      await new Promise(r => setTimeout(r, 350))
+      toggleVisual.value = false
+      uni.showToast({ title: '系统配对码需为 6 位数字', icon: 'none' })
+      return
+    }
+    // 先下发配对码，再开启模式
+    const ok = await bleStore.setSysPasscode(code)
+    if (!ok) {
+      toggleVisual.value = false
+      uni.showToast({ title: '系统配对码下发失败', icon: 'none' })
+      return
+    }
+    uni.showToast({ title: '系统配对码已设为 ' + code + '，断开重连后请在系统弹窗输入它', icon: 'none', duration: 3000 })
+  }
+  
+  bleStore.setNoAppMode(next)
+}
+
 const sysPasscode = ref(uni.getStorageSync('keygo_sys_passcode') || '123456')
 const pluginReady = ref(false)
 async function onToggleNoAppMode(e) {
@@ -1158,4 +1190,31 @@ const bindStatusClass = computed(() => {
 }
 
 
+
+/* ★★ 无 App 模式 CSS Toggle（替代原生 switch，纯 Vue :class 驱动） */
+.noapp-toggle-track {
+  width: 48rpx;
+  height: 26rpx;
+  background-color: #d1d5db;
+  border-radius: 13rpx;
+  display: flex;
+  align-items: center;
+  padding: 2rpx;
+  transition: background-color 0.2s ease;
+  flex-shrink: 0;
+}
+.noapp-toggle-track.noapp-toggle-on {
+  background-color: #3b82f6;
+}
+.noapp-toggle-knob {
+  width: 22rpx;
+  height: 22rpx;
+  background-color: #ffffff;
+  border-radius: 11rpx;
+  transition: transform 0.2s ease;
+  box-shadow: 0 1rpx 3rpx rgba(0,0,0,0.2);
+}
+.noapp-toggle-knob-on {
+  transform: translateX(22rpx);
+}
 </style>
