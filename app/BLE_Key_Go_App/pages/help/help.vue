@@ -65,63 +65,6 @@
       </view>
     </view>
 
-    <!-- BLE Bonding 安全（v3.36.0 实际模型） -->
-    <view class="login-card" style="margin-top: 24rpx;">
-      <text class="card-title">🔒 BLE Bonding 安全（v3.36.0）</text>
-      <view class="info-tip">
-        <text class="tip-icon">✅</text>
-        <text class="tip-text">链路层加密（LESC）：配对后密钥(LTK)存芯片 SNV，重连自动加密，无需记密码</text>
-      </view>
-      <view class="info-tip">
-        <text class="tip-icon">✅</text>
-        <text class="tip-text">per-phone 鉴权（授权体系 v1）：每台手机密钥 = HMAC(gk, phoneId)，各不相同，互不可伪造</text>
-      </view>
-      <view class="info-tip">
-        <text class="tip-icon">✅</text>
-        <text class="tip-text">per-phone RSSI 阈值跟随：每台手机的「解锁/锁车阈值」独立保存，各用各的</text>
-      </view>
-      <view class="info-tip">
-        <text class="tip-icon">✅</text>
-        <text class="tip-text">信任列表持久化（DataFlash，最多 8 把钥匙）：绑定关系断电不丢，互不互踢</text>
-      </view>
-      <view class="info-tip">
-        <text class="tip-icon">✅</text>
-        <text class="tip-text">控制指令 C1 签名（per-command HMAC + 会话盐 + 序号）防重放一直开启</text>
-      </view>
-      <view class="info-tip">
-        <text class="tip-icon">🔲</text>
-        <text class="tip-text">规划中：UNBIND 联动删系统配对（收口无App撤销缺口）、多管理员 / 临时授权</text>
-      </view>
-    </view>
-
-    <!-- ★ v3.21: 电池优化豁免 -->
-    <view class="login-card battery-card" style="margin-top: 24rpx;" @tap="handleBatteryOpt">
-      <view class="battery-row">
-        <text class="card-title">🔋 电池优化豁免</text>
-        <view class="battery-badge" :class="{ ok: batteryOptimized }">
-          <text>{{ batteryOptimized ? '✅ 已豁免' : '⚠️ 未豁免' }}</text>
-        </view>
-      </view>
-      <view class="battery-desc">
-        将 KeyGo 加入电池优化白名单，防止系统休眠后中断蓝牙连接。点击此处可<text class="highlight">随时修改</text>设置。
-      </view>
-      <!-- 操作步骤 -->
-      <view class="battery-steps" v-if="!batteryOptimized">
-        <view class="battery-step-item">
-          <text class="battery-step-num">1</text>
-          <text class="battery-step-text">点击卡片，打开「应用信息」页</text>
-        </view>
-        <view class="battery-step-item">
-          <text class="battery-step-num">2</text>
-          <text class="battery-step-text">找到「耗电详情」或「应用启动管理」</text>
-        </view>
-        <view class="battery-step-item">
-          <text class="battery-step-num">3</text>
-          <text class="battery-step-text">选择「手动管理」→ 开启「允许后台运行」</text>
-        </view>
-      </view>
-      <view class="battery-arrow">→</view>
-    </view>
 
     <!-- 主题切换 -->
     <view class="login-card theme-card" style="margin-top: 24rpx;">
@@ -142,6 +85,35 @@
         <text v-if="themeStore.mode === 'auto'">（跟随系统）</text>
       </text>
     </view>
+	
+	<!-- ★ v3.21: 电池优化豁免 -->
+	<view class="login-card battery-card" style="margin-top: 24rpx;" @tap="handleBatteryOpt">
+	  <view class="battery-row">
+	    <text class="card-title">🔋 电池优化豁免</text>
+	    <view class="battery-badge" :class="{ ok: batteryOptimized }">
+	      <text>{{ batteryOptimized ? '✅ 已豁免' : '⚠️ 未豁免' }}</text>
+	    </view>
+	  </view>
+	  <view class="battery-desc">
+	    将 KeyGo 加入电池优化白名单，防止系统休眠后中断蓝牙连接。点击此处可<text class="highlight">随时修改</text>设置。
+	  </view>
+	  <!-- 操作步骤 -->
+	  <view class="battery-steps" v-if="!batteryOptimized">
+	    <view class="battery-step-item">
+	      <text class="battery-step-num">1</text>
+	      <text class="battery-step-text">点击卡片，打开「应用信息」页</text>
+	    </view>
+	    <view class="battery-step-item">
+	      <text class="battery-step-num">2</text>
+	      <text class="battery-step-text">找到「耗电详情」或「应用启动管理」</text>
+	    </view>
+	    <view class="battery-step-item">
+	      <text class="battery-step-num">3</text>
+	      <text class="battery-step-text">选择「手动管理」→ 开启「允许后台运行」</text>
+	    </view>
+	  </view>
+	  <view class="battery-arrow">→</view>
+	</view>
 
     <!-- ★ Phase 2: 设备模式说明 -->
     <view class="login-card" style="margin-top: 24rpx;">
@@ -166,11 +138,11 @@
       </view>
       <view class="info-tip">
         <text class="tip-icon">⚠️</text>
-        <text class="tip-text"><b>撤销某台手机要两步</b>：① App 内解绑（UNBIND，关控车门）；② 该手机系统蓝牙里「忽略此设备」（删系统配对）。只做①不够——它仍可能触发无App自动解锁。</text>
+        <text class="tip-text"><b>撤销某台手机</b>：在<b>自定义基座</b>下，App 内解绑会<b>自动删掉系统蓝牙配对</b>（UNBIND 联动删 SMP 配对），一步到位；<b>标准基座</b>因无原生插件能力，仍需手动在系统蓝牙「忽略此设备」。</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">规划中：解绑时由固件自动删系统配对，一步到位。</text>
+        <text class="tip-text">✅ 已实现（自定义基座）：解绑时自动删系统配对，一步到位（设备侧清 LTK + 手机侧删 OS 配对）。</text>
       </view>
     </view>
 
@@ -186,6 +158,35 @@
         <view class="info-row"><text class="info-label">模式不支持</text><text class="info-val">当前设备模式不支持该操作（如汽车模式点「骑行」）</text></view>
       </view>
     </view>
+	
+	<!-- BLE Bonding 安全（v3.36.0 实际模型） -->
+	<view class="login-card" style="margin-top: 24rpx;">
+	  <text class="card-title">🔒 BLE Bonding 安全（v3.36.0）</text>
+	  <view class="info-tip">
+	    <text class="tip-icon">✅</text>
+	    <text class="tip-text">链路层加密（LESC）：配对后密钥(LTK)存芯片 SNV，重连自动加密，无需记密码</text>
+	  </view>
+	  <view class="info-tip">
+	    <text class="tip-icon">✅</text>
+	    <text class="tip-text">per-phone 鉴权（授权体系 v1）：每台手机密钥 = HMAC(gk, phoneId)，各不相同，互不可伪造</text>
+	  </view>
+	  <view class="info-tip">
+	    <text class="tip-icon">✅</text>
+	    <text class="tip-text">per-phone RSSI 阈值跟随：每台手机的「解锁/锁车阈值」独立保存，各用各的</text>
+	  </view>
+	  <view class="info-tip">
+	    <text class="tip-icon">✅</text>
+	    <text class="tip-text">信任列表持久化（DataFlash，最多 8 把钥匙）：绑定关系断电不丢，互不互踢</text>
+	  </view>
+	  <view class="info-tip">
+	    <text class="tip-icon">✅</text>
+	    <text class="tip-text">控制指令 C1 签名（per-command HMAC + 会话盐 + 序号）防重放一直开启</text>
+	  </view>
+	  <view class="info-tip">
+	    <text class="tip-icon">🔲</text>
+	    <text class="tip-text">✅ UNBIND 联动删系统配对（收口无App撤销缺口，自定义基座已落地）；🔲 多管理员 / 临时授权</text>
+	  </view>
+	</view>
 
     <!-- ★ v3.36: 规划中 / 待核对功能 -->
     <view class="login-card" style="margin-top: 24rpx;">
@@ -196,7 +197,7 @@
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">UNBIND 联动删系统配对（收口无App模式撤销缺口，当前需手动忽略设备）</text>
+        <text class="tip-text">✅ UNBIND 联动删系统配对（收口无App撤销缺口，自定义基座下解绑自动删 OS 配对，已落地）。</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>

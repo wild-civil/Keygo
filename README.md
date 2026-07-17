@@ -172,10 +172,10 @@ connectDevice() → 成功后停扫描
 - 真实残余风险（窄化）：已配对（bonded）过的攻击者手机，OS 自动重连 → `LINK_ENCRYPTED` → 满足 RSSI 闸门 → 走近解锁。配对与绑定码相互独立，30s 超时只防占槽，挡不住已配对者。
 - **App 被杀后 RSSI 解锁实测不生效**：解锁需活跃连接，连接靠前台服务维持；App 死 → 无连接 → 不解锁。故该漏洞门槛 = 「运行 KeyGo App + 曾用工具配对的蓄意者」，非路人。
 - 控制命令 `UNLOCK/LOCK` 的 **C1 签名（per-command HMAC + 会话盐 + 自增序号）防重放一直开着**，非「HMAC 被注释」。
-- **SMP 配对码（g_sysPasscode）保持全局**：per-phone SMP 配对码收益边际（AUTH 已 per-phone 把控车门），且 SMP 在 AUTH 前发生、固件尚不知对端 `phoneId`，时序上不划算；撤销控制靠 `UNBIND` + 删 SMP 配对（规划中，见下）。
+- **SMP 配对码（g_sysPasscode）保持全局**：per-phone SMP 配对码收益边际（AUTH 已 per-phone 把控车门），且 SMP 在 AUTH 前发生、固件尚不知对端 `phoneId`，时序上不划算；撤销控制靠 `UNBIND` + 删 SMP 配对（已落地：自定义基座下 App 解绑自动删 OS 配对）。
 
 ### `[待完成]` 安全增强
-- **UNBIND 联动删 SMP 配对**（收口无App模式撤销缺口）：撤销某台手机时由固件调用 `GAPBondMgr_DeleteBonding` 销毁其 OS 配对，使其即便无App模式也无法再自动解锁。
+- **UNBIND 联动删 SMP 配对（已落地，自定义基座）**（收口无App模式撤销缺口）：App 解绑时联动原生 `removeBond` 删除手机端系统蓝牙配对，配合固件侧 `Bonding_ClearSnvBonds` 清设备 SNV LTK，两端合力使被撤销手机即便无App模式也无法自动解锁。标准基座无原生插件能力，仍需手动忽略设备。
 - **AUTH 失败限流**、**绑定码强制改**、**多管理员 / 临时授权**。
 - **Phase 4：GATT 加密门控重做**（修复 v3.32.1 的订阅时序问题）。
 - **认证配对 Passkey = 绑定码**（可选收口「已配对者 RSSI 解锁」缺口）：需先验证 CH582 SMP 支持「无头设备 + 固定 passcode + mitm=1 不回退 Just Works」。
@@ -378,7 +378,7 @@ v3.36.0 授权体系 v1：per-phone 身份(phoneKey=HMAC(gk,phoneId)) + per-phon
 
 ### Phase 4：GATT 加密门控（重做） `[待完成]`
 - 重做 v3.32.1 被回退的 FF01/FF02-CCCD/FF03 加密门控，修复「配对后补订 FF02 订阅时序」问题
-- **UNBIND 联动删 SMP 配对**（收口无App模式撤销缺口）：撤销某台手机时由固件调用 `GAPBondMgr_DeleteBonding` 销毁其 OS 配对
+- **UNBIND 联动删 SMP 配对（已落地，自定义基座）**（收口无App模式撤销缺口）：App 解绑时联动原生 `removeBond` 删除手机端系统蓝牙配对，配合固件侧 `Bonding_ClearSnvBonds` 清设备 SNV LTK，两端合力使被撤销手机即便无App模式也无法自动解锁
 - 认证配对 Passkey = 绑定码（可选收口「已配对者 RSSI 解锁」缺口）：需先验证 CH582 SMP 支持「无头设备 + 固定 passcode + mitm=1 不回退 Just Works」
 
 ### 其他待办 `[待完成]`

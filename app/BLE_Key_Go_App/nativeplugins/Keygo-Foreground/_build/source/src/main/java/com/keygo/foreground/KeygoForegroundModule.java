@@ -272,6 +272,78 @@ public class KeygoForegroundModule extends UniModule {
         return createBondAndWait(device, mac, ctx, timeoutSec);
     }
 
+    /**
+     * UNBIND 联动删 SMP 配对（2026-07-17）：删除本机系统蓝牙里与 KeyGo 的 OS 配对（SMP bond）。
+     *
+     * JS 在 unbindDevice 收到 UNBIND:OK 后调用（设备侧 SNV LTK 已由固件清掉，这里补手机侧）：
+     *   removeBond({ mac: deviceId }, (res) => {...})
+     *
+     * 回调返回 { ok: true/false, message: "..." }。
+     * 实现：反射调用 BluetoothDevice.removeBond() 删除系统配对记录（只删不复配！与 createBond 的
+     * forceRebond 路径不同——那里删完会重配，本方法删完即止）。删除成功后 OS 会主动断开 ACL 链路，
+     * JS 侧据此抑制自动重连。
+     */
+    @UniJSMethod(uiThread = false)
+    public void removeBond(JSONObject options, UniJSCallback callback) {
+        String mac = (options != null) ? options.optString("mac", "") : "";
+        Log.i(TAG, "removeBond mac=" + mac);
+        if (mac.isEmpty()) { invokeOnce(callback, false, "MAC 为空"); return; }
+
+        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter == null || !adapter.isEnabled()) {
+            invokeOnce(callback, false, "蓝牙未开启"); return;
+        }
+        BluetoothDevice device;
+        try {
+            device = adapter.getRemoteDevice(mac);
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, "getRemoteDevice 失败, mac=" + mac, e);
+            invokeOnce(callback, false, "MAC 格式无效"); return;
+        }
+        Context ctx = getAppContext();
+        if (ctx == null) {
+            invokeOnce(callback, false, "获取 Context 失败"); return;
+        }
+        // 本就未系统配对 -> 直接成功（无配对可删）
+        if (device.getBondState() == BluetoothDevice.BOND_NONE) {
+            invokeOnce(callback, true, "本就未系统配对"); return;
+        }
+        android.util.Pair<Boolean, String> result = removeBondOnly(device, mac, ctx, 15);
+        invokeOnce(callback, result.first, result.second);
+    }
+
+    /** 删除系统蓝牙配对（不复配）。同步等待 BOND_NONE（最多 timeoutSec 秒）。必须在后台线程调用（uiThread=false）。 */
+    private android.util.Pair<Boolean, String> removeBondOnly(BluetoothDevice device, String mac, Context ctx, int timeoutSec) {
+        final java.util.concurrent.CountDownLatch removed = new java.util.concurrent.CountDownLatch(1);
+        final boolean[] ok = { false };
+        final String[] reason = { "超时未完成删除" };
+        BroadcastReceiver rem = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(i.getAction())) return;
+                BluetoothDevice dev = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (dev == null || !mac.equals(dev.getAddress())) return;
+                int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+                if (st == BluetoothDevice.BOND_NONE) {
+                    ok[0] = true; reason[0] = "已删除系统配对";
+                    try { c.unregisterReceiver(this); } catch (Exception ignore) {}
+                    removed.countDown();
+                }
+            }
+        };
+        ctx.registerReceiver(rem, new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED));
+        try {
+            java.lang.reflect.Method m = device.getClass().getMethod("removeBond");
+            m.invoke(device);
+            Log.i(TAG, "removeBond 调用成功 mac=" + mac);
+        } catch (Exception e) {
+            try { ctx.unregisterReceiver(rem); } catch (Exception ignore) {}
+            Log.e(TAG, "removeBond 失败 mac=" + mac, e);
+            return new android.util.Pair<>(false, "删除系统配对失败(" + e.getMessage() + ")");
+        }
+        try { removed.await(timeoutSec, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignore) {}
+        return new android.util.Pair<>(ok[0], reason[0]);
+    }
+
     /** 单次最终回调（不再依赖 keepAlive）。 */
     private void invokeOnce(UniJSCallback callback, boolean ok, String message) {
         if (callback == null) return;

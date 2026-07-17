@@ -3440,6 +3440,42 @@ export const useBleStore = defineStore('ble', {
     },
 
     /** 从本地存储恢复 bindKey；存在则置 isBound=true */
+    /**
+     * UNBIND 联动删 SMP 配对：删除本机系统蓝牙里与 KeyGo 的 OS 配对（SMP bond）。
+     * 由原生插件 Keygo-Foreground.removeBond 经反射调用 Android BluetoothDevice.removeBond() 实现。
+     * - 设备侧 LTK 已由固件 Bonding_ClearSnvBonds 清掉；本方法补手机侧，使两端都不再认对方。
+     * - 仅自定义基座 + 原生插件可用；标准基座 fg.removeBond 不存在 -> 静默跳过（仅靠固件清 LTK 兜底）。
+     * - removeBond 会让 OS 主动断开 ACL 链路，故调用期间置 _bondingInProgress 抑制 store 自动重连，
+     *   结束后延迟复位（等待 OS 断连事件被抑制），避免解绑后立刻被重连打断体验。
+     * @returns {Promise<{ok:boolean,message:string}>}
+     */
+    async _removeOsBond() {
+      if (!this.deviceId) return { ok: false, message: '无 deviceId' }
+      const fg = uni.requireNativePlugin('Keygo-Foreground')
+      if (!fg || typeof fg.removeBond !== 'function') {
+        console.log('[UNBIND] 原生 removeBond 不可用（标准基座），跳过手机端删配对')
+        return { ok: false, message: '原生插件不可用（标准基座）' }
+      }
+      this._bondingInProgress = true
+      try {
+        const res = await new Promise((resolve) => {
+          let done = false
+          const finish = (rr) => { if (!done) { done = true; resolve(rr || { ok: false, message: '无回传' }) } }
+          const timer = setTimeout(() => finish({ ok: false, message: '删除系统配对超时(>15s)' }), 15000)
+          fg.removeBond({ mac: this.deviceId }, (rr) => {
+            console.log('[UNBIND] 原生 removeBond 返回:', JSON.stringify(rr))
+            clearTimeout(timer)
+            finish(rr)
+          })
+        })
+        console.log('[UNBIND] 手机端删系统配对结果:', JSON.stringify(res))
+        return res
+      } finally {
+        // 延迟复位，确保 removeBond 触发的 OS 断连被 store 抑制（不立即重连）
+        setTimeout(() => { this._bondingInProgress = false }, 1500)
+      }
+    },
+
     _restoreBindKey(sn) {
       if (!sn) return
       try {
@@ -3740,6 +3776,12 @@ export const useBleStore = defineStore('ble', {
         B._bindKey = null
         if (this.serialNumber) this._clearBindKey(this.serialNumber)
         this.bindHint = '已解绑'
+        // ★ UNBIND 联动删 SMP 配对：固件已清设备侧 SNV LTK（Bonding_ClearSnvBonds），
+        //   这里再让手机端删系统蓝牙配对（OS 层 SMP），两端合力彻底撤销，使其即便无App模式也无法自动解锁。
+        //   标准基座无原生插件时静默跳过，仅靠固件清 LTK 兜底（安全不受影响，仅系统蓝牙列表仍残留）。
+        await this._removeOsBond().catch((e) => {
+          console.warn('[UNBIND] 手机端删系统配对未成功（设备侧已清 LTK，安全不受影响）', e)
+        })
         return true
       }
       // UNBIND 失败：若本就没鉴权成功，说明设备已绑但验证失败（key 不匹配/需重绑）
