@@ -240,9 +240,10 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">启用无 App 模式</text>
-                    <!-- ★ v-if/v-else 强制重建原生 switch：值翻转时销毁旧实例创建新实例，初始 checked 正确，绕开原生组件不跟 :checked 的坑 -->
-          <switch v-if="!noAppMode" :checked="false" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
-          <switch v-else :checked="true" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
+          <!-- ★ 纯 CSS 自定义开关：单个 view，零 remount，transform 滑动过渡丝滑；回弹仅动本地 ref，不写 BLE -->
+          <view class="noapp-switch" :class="{ 'is-on': noAppVisual }" @tap="onToggleNoAppMode">
+            <view class="noapp-knob"></view>
+          </view>
         </view>
         <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
         <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
@@ -320,22 +321,27 @@ const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 
 // ★ 2026-07-16: 无 App 模式开关（固件 ENCRYPT 门控，基座无关）
-const noAppMode = computed(() => bleStore.noAppMode)
+const noAppVisual = ref(bleStore.noAppMode)
+watch(() => bleStore.noAppMode, (v) => { noAppVisual.value = v })
 const sysPasscode = ref(uni.getStorageSync('keygo_sys_passcode') || '123456')
 const pluginReady = ref(false)
-async function onToggleNoAppMode(e) {
-  const on = e.detail.value
+// ★ 纯 CSS 开关处理函数：@tap 触发，点一下 = 翻转一次。noAppVisual 立即变化走 CSS 过渡（丝滑）。
+//   回弹仅动本地 ref，不写 BLE（避免 ENCRYPT 下发失败被对账 pair:1 拉回 ON）。
+async function onToggleNoAppMode() {
+  const on = !noAppVisual.value
+  noAppVisual.value = on   // 视觉立即翻转（CSS transition）
   if (on) {
     const code = (sysPasscode.value || '').trim()
     if (!/^\d{6}$/.test(code)) {
       uni.showToast({ title: '系统配对码需为 6 位数字', icon: 'none' })
-      bleStore.setNoAppMode(false)   // 回退开关
+      setTimeout(() => { noAppVisual.value = false }, 260)  // 等滑到 ON 再滑回 OFF
       return
     }
     // 先下发系统配对码（与绑定码独立），再开启无 App 模式
     const ok = await bleStore.setSysPasscode(code)
     if (!ok) {
       uni.showToast({ title: '系统配对码下发失败', icon: 'none' })
+      noAppVisual.value = false
       bleStore.setNoAppMode(false)
       return
     }
@@ -1155,6 +1161,34 @@ const bindStatusClass = computed(() => {
   padding: 14rpx 18rpx;
   margin-top: 16rpx;
   line-height: 1.5;
+}
+
+/* ===== 无 App 模式纯 CSS 开关（替换原生 switch，零 remount，丝滑滑动） ===== */
+.noapp-switch {
+  position: relative;
+  width: 92rpx;
+  height: 52rpx;
+  border-radius: 26rpx;
+  background: #cbd5e1;
+  transition: background-color 0.22s ease;
+  flex-shrink: 0;
+}
+.noapp-switch.is-on {
+  background: var(--accent, #3b82f6);
+}
+.noapp-knob {
+  position: absolute;
+  top: 4rpx;
+  left: 4rpx;
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2rpx 6rpx rgba(0, 0, 0, 0.25);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.0, 0.2, 1);
+}
+.noapp-switch.is-on .noapp-knob {
+  transform: translateX(40rpx);
 }
 
 
