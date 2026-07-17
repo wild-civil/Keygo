@@ -240,10 +240,9 @@
       <view class="config-item">
         <view class="config-header">
           <text class="config-label">启用无 App 模式</text>
-          <!-- ★ uni-app 原生 switch 不响应 :checked/:key 程序化变更，改用纯 CSS toggle，由 Vue :class 驱动，100% 响应式 -->
-          <view class="toggle-track" :class="{ 'toggle-on': noAppMode }" @tap="onTapNoAppMode">
-            <view class="toggle-knob" :class="{ 'toggle-knob-on': noAppMode }"></view>
-          </view>
+                    <!-- ★ v-if/v-else 强制重建原生 switch：值翻转时销毁旧实例创建新实例，初始 checked 正确，绕开原生组件不跟 :checked 的坑 -->
+          <switch v-if="!noAppMode" :checked="false" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
+          <switch v-else :checked="true" @change="onToggleNoAppMode" color="#3b82f6" style="transform: scale(0.7);" />
         </view>
         <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
         <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
@@ -345,10 +344,6 @@ async function onToggleNoAppMode(e) {
   bleStore.setNoAppMode(on)
 }
 
-// ★ 自定义 toggle 点击封装（替代原生 switch @change，避免原生组件不响应程序化 :checked 的坑）
-function onTapNoAppMode() {
-  onToggleNoAppMode({ detail: { value: !bleStore.noAppMode } })
-}
 
 // ★ 系统配对码失焦/回车校验：若不是 6 位数字（不足 6 位或含字符），提示并联动关闭无 App 模式
 //   ★ 修复：Android 软键盘「完成」会同时派发 @blur 与 @confirm，导致本函数同帧执行两次
@@ -1163,24 +1158,4 @@ const bindStatusClass = computed(() => {
 }
 
 
-/* ★ 无 App 模式自定义 toggle（替代原生 switch，纯 View+CSS，响应式可靠） */
-.toggle-track {
-  width: 88rpx; height: 48rpx;
-  background: #d1d5db; border-radius: 24rpx;
-  display: flex; align-items: center;
-  transition: background 0.2s;
-  padding: 4rpx;
-}
-.toggle-track.toggle-on {
-  background: #3b82f6;
-}
-.toggle-knob {
-  width: 40rpx; height: 40rpx;
-  background: #fff; border-radius: 20rpx;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  transition: transform 0.2s ease;
-}
-.toggle-knob-on {
-  transform: translateX(40rpx);
-}
 </style>
