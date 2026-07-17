@@ -347,10 +347,7 @@ async function onToggleNoAppMode(e) {
 
 // ★ 自定义 toggle 点击封装（替代原生 switch @change，避免原生组件不响应程序化 :checked 的坑）
 function onTapNoAppMode() {
-  const next = !bleStore.noAppMode
-  // ★ 乐观更新：先让 toggle 滑过去，校验不通过再由 onToggleNoAppMode 拉回来（弹回效果）
-  if (next) bleStore.setNoAppMode(true)
-  onToggleNoAppMode({ detail: { value: next } })
+  onToggleNoAppMode({ detail: { value: !bleStore.noAppMode } })
 }
 
 // ★ 系统配对码失焦/回车校验：若不是 6 位数字（不足 6 位或含字符），提示并联动关闭无 App 模式
