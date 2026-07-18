@@ -40,25 +40,6 @@
 
 
 
-      <!-- ★ v3.36.1: 内部芯片温度遥测 — 独立温度卡片（固件 TSENSE 采样，旧固件 deviceTempC=null 自动隐藏） -->
-      <view class="temp-card" v-if="bleStore.deviceTempC !== null" :class="tempClass">
-        <view class="temp-head">
-          <text class="temp-icon">🌡️</text>
-          <text class="temp-label">芯片温度</text>
-          <text class="temp-tag">{{ tempTag }}</text>
-        </view>
-        <view class="temp-body">
-          <text class="temp-value">{{ bleStore.deviceTempC }}<text class="temp-unit">°C</text></text>
-        </view>
-        <view class="temp-bar">
-          <view class="temp-bar-fill" :style="{ width: tempPercent + '%' }"></view>
-        </view>
-        <!-- ★ 刻度数字 = 真实温度(°C)，窗口 -10~90°C 等距 5 点(-10/15/40/65/90)，由 space-between 等距排列，各自落在 0%/25%/50%/75%/100% 处，与 fill 位置严格对应 -->
-        <view class="temp-bar-marks">
-          <text>-10</text><text>15</text><text>40</text><text>65</text><text>90</text>
-        </view>
-      </view>
-
       <!-- ★ RSSI 实时信息 -->
       <view class="info-grid">
         <view class="info-item">
@@ -231,35 +212,6 @@ function handleThird() {
 
 // ★ Phase 2: 顶部大卡图标随模式切换
 const carIcon = computed(() => bleStore.deviceMode === 'ebike' ? '🛵' : '🚗')
-
-// ★ v3.36.1: 内部芯片温度遥测 — 温度等级配色 / 标签 / 刻度条百分比
-//   工作区间参考（CH582M 内部温度传感器）：室温约 30~45°C，运行升温可达 50~60°C
-const tempClass = computed(() => {
-  const t = bleStore.deviceTempC
-  if (t === null) return ''
-  if (t < 20) return 'temp-cold'
-  if (t <= 45) return 'temp-normal'
-  if (t <= 65) return 'temp-warm'
-  return 'temp-hot'
-})
-const tempTag = computed(() => {
-  const c = tempClass.value
-  return c === 'temp-cold' ? '偏低' :
-         c === 'temp-hot' ? '过热' :
-         c === 'temp-warm' ? '偏高' : '正常'
-})
-// ★ 刻度条映射窗口：TEMP_BAR_MIN = -10°C ~ TEMP_BAR_MAX = 90°C（跨度 100°C）
-//   fill 百分比 = (温度 - MIN) / 跨度 × 100 = (t + 10)，clamp 到 0~100
-//   刻度数字 = 真实温度(°C)，按窗口等距取 5 点：-10 / 15 / 40 / 65 / 90，
-//   分别落在 0%/25%/50%/75%/100% 处（由 space-between 等距保证），数字与位置严格对应
-const TEMP_BAR_MIN = -10
-const TEMP_BAR_MAX = 90
-const tempPercent = computed(() => {
-  const t = bleStore.deviceTempC
-  if (t === null) return 0
-  const p = (t - TEMP_BAR_MIN) / (TEMP_BAR_MAX - TEMP_BAR_MIN) * 100
-  return p < 0 ? 0 : p > 100 ? 100 : p
-})
 
 async function handleStatus() {
   try {
@@ -472,78 +424,6 @@ async function handleDeviceModeChange(mode) {
   font-weight: 600;
   color: var(--accent);
 }
-
-/* ===== 芯片温度卡片（v3.36.1） ===== */
-.temp-card {
-  background: var(--bg-card);
-  border: 2rpx solid var(--border);
-  border-radius: 20rpx;
-  padding: 28rpx 30rpx;
-  margin-bottom: 24rpx;
-  transition: all 0.3s;
-}
-.temp-head {
-  display: flex;
-  align-items: center;
-  gap: 12rpx;
-  margin-bottom: 14rpx;
-}
-.temp-icon { font-size: 32rpx; }
-.temp-label { font-size: 26rpx; color: var(--text-muted); }
-.temp-tag {
-  margin-left: auto;
-  font-size: 22rpx;
-  padding: 4rpx 16rpx;
-  border-radius: 20rpx;
-  font-weight: 600;
-}
-.temp-body { text-align: center; margin: 6rpx 0 18rpx; }
-.temp-value {
-  font-size: 50rpx; /*温度字体大小*/
-  font-weight: 800;
-  line-height: 1;
-  color: var(--text-primary);
-}
-.temp-unit { font-size: 32rpx; font-weight: 600; margin-left: 6rpx; color: var(--text-tertiary); }
-.temp-bar {
-  position: relative;
-  height: 14rpx;
-  border-radius: 10rpx;
-  background: var(--bg-track, #e5e5ea);
-  overflow: hidden;
-}
-.temp-bar-fill {
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  border-radius: 10rpx;
-  transition: width 0.5s ease, background-color 0.3s;
-}
-.temp-bar-marks {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 10rpx;
-  font-size: 22rpx;
-  font-weight: 500;
-  color: var(--text-tertiary);
-  letter-spacing: 0.5rpx;
-}
-
-/* ★ 温度等级配色（与电池 batt-* 同思路：具体色值，明暗主题通用） */
-.temp-card.temp-cold .temp-bar-fill { background: #30b0c7; }
-.temp-card.temp-cold .temp-tag { background: rgba(48,176,199,0.18); color: #30b0c7; }
-.temp-card.temp-cold .temp-value { color: #30b0c7; }
-
-.temp-card.temp-normal .temp-bar-fill { background: var(--accent-green); }
-.temp-card.temp-normal .temp-tag { background: rgba(52,199,89,0.18); color: var(--accent-green); }
-
-.temp-card.temp-warm .temp-bar-fill { background: var(--accent-yellow); }
-.temp-card.temp-warm .temp-tag { background: rgba(255,169,0,0.18); color: var(--accent-yellow); }
-.temp-card.temp-warm .temp-value { color: var(--accent-yellow); }
-
-.temp-card.temp-hot .temp-bar-fill { background: var(--accent-red); }
-.temp-card.temp-hot .temp-tag { background: rgba(255,69,58,0.18); color: var(--accent-red); }
-.temp-card.temp-hot .temp-value { color: var(--accent-red); }
-.temp-card.temp-hot { border-color: rgba(255,69,58,0.33); }
 
 /* ===== 主要控制按钮 ===== */
 .main-actions {

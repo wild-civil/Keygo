@@ -1108,6 +1108,7 @@ export const useBleStore = defineStore('ble', {
       //   自愈，_parseSingleStatus 会重设 connected/filteredRssi 并取消本定时器（见下方）。
       this.statusStale = true
       this.batteryLevel = -1        // ★ v3.14: 断连重置电量
+      this.deviceTempC = null       // ★ v3.36.1: 断连重置芯片温度，避免连接页残留旧值
       // ★ v3.31.0 / 2026-07-13: 清掉 RSSI 看门狗并重置显示态（避免残留 stale 显示）
       this._clearRssiStaleWatchdog()
       this.displayRssi = -999

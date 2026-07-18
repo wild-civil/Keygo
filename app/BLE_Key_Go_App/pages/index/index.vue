@@ -39,6 +39,11 @@
         <text class="rssi-value">{{ bleStore.displayRssi > -999 ? bleStore.displayRssi : '---' }}</text>
         <text class="rssi-unit">dBm</text>
       </view>
+      <!-- ★ v3.36.1: 电池电量 — 缩小整行，置于「已连接」框(🔗)内底部；断开后 batteryLevel 重置为 -1 自动隐藏 -->
+      <view class="card-batt" v-if="bleStore.batteryLevel >= 0" :class="bleStore.batteryColor">
+        <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
+        <text class="batt-text">{{ bleStore.batteryText }}</text>
+      </view>
     </view>
 
     <!-- ★ 信号强度条 -->
@@ -55,6 +60,26 @@
       <view class="signal-thresholds">
         <text>锁车 {{ bleStore.lockThreshold }} dBm</text>
         <text>解锁 {{ bleStore.unlockThreshold }} dBm</text>
+      </view>
+    </view>
+
+    <!-- ★ v3.36.1: 连接页补充 — 芯片温度（信号强度下方，与控制页同源）；电池已移至「已连接」框下方 -->
+    <view class="conn-extra" v-if="bleStore.deviceTempC !== null">
+      <view class="temp-card" v-if="bleStore.deviceTempC !== null" :class="tempClass">
+        <view class="temp-head">
+          <text class="temp-icon">🌡️</text>
+          <text class="temp-label">芯片温度</text>
+          <text class="temp-tag">{{ tempTag }}</text>
+        </view>
+        <view class="temp-body">
+          <text class="temp-value">{{ bleStore.deviceTempC }}<text class="temp-unit">°C</text></text>
+        </view>
+        <view class="temp-bar">
+          <view class="temp-bar-fill" :style="{ width: tempPercent + '%' }"></view>
+        </view>
+        <view class="temp-bar-marks">
+          <text>-10</text><text>15</text><text>40</text><text>65</text><text>90</text>
+        </view>
       </view>
     </view>
 
@@ -594,6 +619,30 @@ async function handleRide() {
 }
 
 // ★ Phase 2: 连接页第三键按设备模式驱动（car=后备箱 / ebike=骑行）
+// ★ v3.36.1: 连接页芯片温度卡片 — 温度等级配色/标签/刻度条百分比（与控制页同源）
+const TEMP_BAR_MIN = -10
+const TEMP_BAR_MAX = 90
+const tempClass = computed(() => {
+  const t = bleStore.deviceTempC
+  if (t === null) return ''
+  if (t < 20) return 'temp-cold'
+  if (t <= 45) return 'temp-normal'
+  if (t <= 65) return 'temp-warm'
+  return 'temp-hot'
+})
+const tempTag = computed(() => {
+  const c = tempClass.value
+  return c === 'temp-cold' ? '偏低' :
+         c === 'temp-hot' ? '过热' :
+         c === 'temp-warm' ? '偏高' : '正常'
+})
+const tempPercent = computed(() => {
+  const t = bleStore.deviceTempC
+  if (t === null) return 0
+  const p = (t - TEMP_BAR_MIN) / (TEMP_BAR_MAX - TEMP_BAR_MIN) * 100
+  return p < 0 ? 0 : p > 100 ? 100 : p
+})
+
 const thirdAction = computed(() => {
   if (bleStore.deviceMode === 'ebike') {
     return { icon: '🛵', text: '骑行', handler: handleRide, cls: 'ride-btn' }
@@ -718,6 +767,7 @@ async function handleSetName() {
   padding: 40rpx;
   display: flex;
   align-items: center;
+  position: relative;
   margin-bottom: 30rpx;
   border: 2rpx solid var(--border);
   transition: all 0.3s;
@@ -806,6 +856,100 @@ async function handleSetName() {
   font-size: 22rpx;
   color: var(--text-muted);
 }
+
+/* ===== 连接页补充：电池 + 芯片温度（v3.36.1，与控制页同源） ===== */
+.conn-extra { margin-bottom: 30rpx; }
+/* 连接页电量胶囊：缩在「已连接」框(🔗)内左下角的小标签
+   - position:absolute  → 脱离正常布局流，不占高度，所以整个框的高度不会因为它而变化
+   - left   → 距「卡片左边框」的水平距离（单位 rpx）。想更靠左就调小；想靠右就调大。
+              🔗 图标本身在内容区最左边（卡片 padding=40rpx 处），这里设 30rpx 比图标再往左贴一点。
+              注意别小于 ~20rpx，否则会戳到卡片圆角外。
+   - bottom → 距「卡片底边」的距离。越大越往上、越小越往下贴边。
+   - 因为和 🔗 同属最左一列，视觉上就是「🔗 正下方的小电量标」
+   - 其它（padding/border-radius/font-size）只控制这个小胶囊自身的胖瘦和字号，不影响框布局 */
+.card-batt {
+  position: absolute;
+  left: 12rpx;            /* ★ 想更靠左就调小这个值（如 8rpx） */
+  bottom: 14rpx;
+  display: inline-flex;
+  align-items: center;
+  gap: 4rpx;
+  padding: 2rpx 10rpx;
+  border-radius: 10rpx;
+  font-size: 20rpx;
+  line-height: 1.2;
+}
+.card-batt .batt-icon { font-size: 22rpx; }
+.card-batt .batt-text { font-weight: 600; }
+.card-batt.batt-high   { background: rgba(52, 199, 89, 0.15); color: var(--accent-green); }
+.card-batt.batt-mid    { background: rgba(255, 169, 0, 0.15);  color: var(--accent-yellow); }
+.card-batt.batt-low    { background: rgba(255, 69, 58, 0.15);  color: var(--accent-red); }
+.card-batt.batt-unknown { background: rgba(142, 142, 147, 0.15); color: var(--text-muted); }
+
+.temp-card {
+  background: var(--bg-card);
+  border: 2rpx solid var(--border);
+  border-radius: 20rpx;
+  padding: 28rpx 30rpx;
+  transition: all 0.3s;
+}
+.temp-head {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 14rpx;
+}
+.temp-icon { font-size: 32rpx; }
+.temp-label { font-size: 26rpx; color: var(--text-muted); }
+.temp-tag {
+  margin-left: auto;
+  font-size: 22rpx;
+  padding: 4rpx 16rpx;
+  border-radius: 20rpx;
+  font-weight: 600;
+}
+.temp-body { text-align: center; margin: 6rpx 0 18rpx; }
+.temp-value {
+  font-size: 50rpx;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text-primary);
+}
+.temp-unit { font-size: 32rpx; font-weight: 600; margin-left: 6rpx; color: var(--text-tertiary); }
+.temp-bar {
+  position: relative;
+  height: 14rpx;
+  border-radius: 10rpx;
+  background: var(--bg-track, #e5e5ea);
+  overflow: hidden;
+}
+.temp-bar-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  border-radius: 10rpx;
+  transition: width 0.5s ease, background-color 0.3s;
+}
+.temp-bar-marks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.5rpx;
+}
+.temp-card.temp-cold .temp-bar-fill { background: #30b0c7; }
+.temp-card.temp-cold .temp-tag { background: rgba(48,176,199,0.18); color: #30b0c7; }
+.temp-card.temp-cold .temp-value { color: #30b0c7; }
+.temp-card.temp-normal .temp-bar-fill { background: var(--accent-green); }
+.temp-card.temp-normal .temp-tag { background: rgba(52,199,89,0.18); color: var(--accent-green); }
+.temp-card.temp-warm .temp-bar-fill { background: var(--accent-yellow); }
+.temp-card.temp-warm .temp-tag { background: rgba(255,169,0,0.18); color: var(--accent-yellow); }
+.temp-card.temp-warm .temp-value { color: var(--accent-yellow); }
+.temp-card.temp-hot .temp-bar-fill { background: var(--accent-red); }
+.temp-card.temp-hot .temp-tag { background: rgba(255,69,58,0.18); color: var(--accent-red); }
+.temp-card.temp-hot .temp-value { color: var(--accent-red); }
+.temp-card.temp-hot { border-color: rgba(255,69,58,0.33); }
 
 /* ===== v3.31 方案B: 确认进度卡片 ===== */
 .progress-card {
