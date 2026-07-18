@@ -2834,7 +2834,14 @@ export const useBleStore = defineStore('ble', {
 
       // ★ Phase 2: 设备模式 m (0=car / 1=ebike)，权威覆盖本地缓存
       if (data.m !== undefined) {
-        this.deviceMode = data.m ? 'ebike' : 'car'
+        const resolvedMode = data.m ? 'ebike' : 'car'
+        this.deviceMode = resolvedMode
+        // ★ 回写权威值到本地缓存：防止此前「乐观更新写缓存但设备未真正切换」造成缓存脏，
+        //   导致下次启动经历 设备真实值 ↔ 缓存值 来回跳变（2026-07-18 用户反馈的重启闪烁）。
+        //   设备主动下发的 m 即真实状态，以它为准固化缓存，保证下次启动与设备一致。
+        if (this.serialNumber) {
+          try { uni.setStorageSync('keygo_mode_' + this.serialNumber, resolvedMode) } catch (e) {}
+        }
       }
 
       // ★ v3.7 / v3.12: 冷却时间 ms (cd = cooldown duration)
