@@ -51,6 +51,7 @@ import {
   notifyBLECharacteristicValueChange,
   arrayBufferToString,
   tryParseJSON,
+  extendConnectGrace,
   readSerialNumber,               // ★ v3.3: 读取设备序列号
   readBatteryLevel,               // ★ v3.14: 读取电池电量 (GATT Read)
   sendCommand as rawSendCommand,  // ★ ②: 底层写指令（store 内 sendCommand action 包一层会话鉴权）
@@ -515,7 +516,7 @@ export const useBleStore = defineStore('ble', {
           //   SETCODE:OK / SETCODE:FAIL:* 会被当"未知包"→当 JSON 解析失败丢弃→
           //   _handleBindingNotify 永远收不到 SETCODE → 改码 waiter 6s 超时。
           //   这才是"改码一直失败、回包显示陈旧 AUTH:OK/BIND:OK"的真正根因。
-          const _SHORT_PREFIX = ['BIND:', 'NONCE:', 'AUTH:', 'UNBIND:', 'DENY:', 'SETCODE:', 'CMD:']
+          const _SHORT_PREFIX = ['BIND:', 'NONCE:', 'AUTH:', 'UNBIND:', 'DENY:', 'SETCODE:', 'CMD:', 'SETPASS:', 'ENCRYPT:']
           const _isShort = _SHORT_PREFIX.some(p => _buf.startsWith(p))
           if (_isShort) {
             const _brace = _buf.indexOf('{')
@@ -1646,7 +1647,10 @@ export const useBleStore = defineStore('ble', {
                 this.serialNumber = sn
                 this._resolveDeviceName(sn)
                 this._loadConfigForDevice(sn)
-                this._syncConfigToDevice()
+                this._restoreBindKey(sn)   // ★ 2026-07-18: 提前恢复本机密钥，用于下方门控
+                if (!this.isBound) {
+                  this._syncConfigToDevice()
+                }
               }).catch(() => {})
               setTimeout(async () => {
                 if (this.deviceId !== targetId || !this.connected) return
@@ -1790,7 +1794,12 @@ export const useBleStore = defineStore('ble', {
         this.serialNumber = sn
         this._resolveDeviceName(sn)
         this._loadConfigForDevice(sn)
-        this._syncConfigToDevice()
+        this._restoreBindKey(sn)   // ★ 2026-07-18: 提前恢复本机密钥，用于下方门控
+        // ★ 2026-07-18: 已绑定设备由 AUTH:OK 可靠补发配置(见 3250)；此处抢跑会在「连接后加密握手窗口」
+        //   被 OS 拒(10007)产生无效写与噪声。仅未绑定(访客/首连)设备立即下发。
+        if (!this.isBound) {
+          this._syncConfigToDevice()
+        }
         // ★ ②: 恢复本机已存的 bindKey（isBound 复原）。若本机曾绑定，则在 FF02 Notify
         //   订阅就绪后自动重做 AUTH 握手恢复会话（见 _maybeAutoAuth）。
         //   ★ 2026-07-12 修复（bug ①）：此前「阶段1 明文绑定」临时注释掉了连接时的自动 AUTH，
@@ -1942,15 +1951,22 @@ export const useBleStore = defineStore('ble', {
      */
     async _fetchBatteryLevel(deviceId) {
       if (!deviceId) return
+      // ★ 2026-07-18: 固件 Battery Service(0x180F) 的 0x2A19 同时带 READ+NOTIFY（见 Profile/battery_service.c），
+      //   且 peripheral.c 广播里带电池 Service Data —— 故系统蓝牙列表能直接显示 100%（走系统 Battery Service
+      //   路径，与 App 无关）。App 侧 readBLECharacteristicValue 偶发 property not support，疑似手机 GATT 缓存
+      //   对该特征缺 READ 位（同「缓存过期」类），故改为「仅当 Notify/广播未送达电量时」才兜底读取。
+      //   ★ 注意：电量并不在 FF02 status JSON 里（该 JSON 无电池字段），不要误以为来自 FF02 Notify。
+      await new Promise(r => setTimeout(r, 2500)) // 先等状态 Notify 把电量送上来
+      if (this.deviceId !== deviceId || !this.connected) return
+      if (this.batteryLevel >= 0) return // Notify/广播已覆盖，跳过冗余读
       try {
-        await new Promise(r => setTimeout(r, 1200)) // 等待 GATT 数据库就绪
         const level = await readBatteryLevel(deviceId, 5000)
         if (level >= 0 && level <= 100) {
           this.batteryLevel = level
-          console.log('[Store] GATT 电池电量:', level + '%')
+          console.log('[Store] GATT 电池电量(兜底):', level + '%')
         }
       } catch (e) {
-        console.log('[Store] GATT 读取电池电量失败（设备可能未注册 Battery Service）:', e.message)
+        console.log('[Store] GATT 电池电量兜底读取失败（已依赖 Notify）:', e.message)
       }
     },
 
@@ -2427,7 +2443,11 @@ export const useBleStore = defineStore('ble', {
           this._resolveDeviceName(sn)
           // ★ v3.12: SN 就绪 → 加载设备专属配置 + 下发到固件（per-phone 个性化）
           this._loadConfigForDevice(sn)
-          this._syncConfigToDevice()
+          this._restoreBindKey(sn)   // ★ 2026-07-18: 提前恢复本机密钥，用于下方门控
+          // ★ 2026-07-18: 已绑定设备由 AUTH:OK 补发配置(见 3250)，仅未绑定设备立即写。
+          if (!this.isBound) {
+            this._syncConfigToDevice()
+          }
           // ★ v3.32.2-fix①: 手动连接路径补上「恢复绑定 + 自动 AUTH」。
           //   此前此分支（connect() 手动连接）漏掉了 _finalizeConnection（自动重连路径）已有的
           //   _restoreBindKey + _maybeAutoAuth，导致：手动模式重启 APP 后，用户手动连上设备，
@@ -2776,7 +2796,12 @@ export const useBleStore = defineStore('ble', {
      *   c=connected  st=state  r=rssi  f=filteredRssi  d2=customDeviceName
      */
     _parseSingleStatus(jsonStr) {
-      const data = tryParseJSON(jsonStr)
+      // ★ 2026-07-18: 固件把命令回执前缀(SETPASS:OK / ENCRYPT:OK / ENCRYPT:OFF)拼在同一 Notify 的
+      //   status JSON 前；若 _charHandler 未识别(白名单漏配)而整串透传下来，这里兜底再截一次首 '{'。
+      let _ps = jsonStr
+      const _pb = _ps.indexOf('{')
+      if (_pb > 0) _ps = _ps.slice(_pb)
+      const data = tryParseJSON(_ps)
       if (!data) {
         console.warn('[Store] 状态解析失败:', jsonStr)
         return
@@ -3236,6 +3261,8 @@ export const useBleStore = defineStore('ble', {
         _resolveWaiter('NONCE', text.slice(6))
       } else if (text === 'AUTH:OK') {
         this.sessionAuthed = true
+        extendConnectGrace()   // ★ 2026-07-18: 加密握手刚完成，其后 FF03 写(RSSISET 等)仍在瞬时窗口，
+                               //   延伸宽限期避免被误判"蓝牙缓存过期"弹窗
         this._autoAuthState = 'idle'   // ★ 2026-07-12: 会话已建立，自动 AUTH 状态机归位
         this.bindHint = ''
         // ★ 2026-07-14 修复：AUTH 握手成功即证明本机是该设备的 owner

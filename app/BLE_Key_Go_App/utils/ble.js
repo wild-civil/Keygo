@@ -42,6 +42,12 @@ const _WRITE_10007_RETRY_DELAY = 400      // 每次重试间隔(ms)
 let _connectGraceUntil = 0
 const _CONNECT_GUIDE_GRACE = 4000         // 连接成功后 4s 内 10007 不弹窗
 
+// ★ 2026-07-18: AUTH:OK 即加密握手真正完成，其后 ~数百 ms FF03 写(如 RSSISET)仍处瞬时窗口，
+//   属正常。把宽限期延伸到 AUTH:OK，避免这些 best-effort 写被误判"蓝牙缓存过期"弹窗。
+export function extendConnectGrace() {
+  _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE
+}
+
 function _isPropertyNotSupport(err) {
   if (!err) return false
   const code = err.errCode != null ? err.errCode : err.code
