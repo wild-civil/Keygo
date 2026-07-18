@@ -53,9 +53,9 @@
         <view class="temp-bar">
           <view class="temp-bar-fill" :style="{ width: tempPercent + '%' }"></view>
         </view>
-        <!-- ★ 刻度数字 = 真实温度(°C)，与窗口 0~100°C 一一对应；等距排列由 space-between 保证，故 0/25/50/75/100 各自落在 0%/25%/50%/75%/100% 处 -->
+        <!-- ★ 刻度数字 = 真实温度(°C)，窗口 -10~90°C 等距 5 点(-10/15/40/65/90)，由 space-between 等距排列，各自落在 0%/25%/50%/75%/100% 处，与 fill 位置严格对应 -->
         <view class="temp-bar-marks">
-          <text>0</text><text>25</text><text>50</text><text>75</text><text>100</text>
+          <text>-10</text><text>15</text><text>40</text><text>65</text><text>90</text>
         </view>
       </view>
 
@@ -248,13 +248,17 @@ const tempTag = computed(() => {
          c === 'temp-hot' ? '过热' :
          c === 'temp-warm' ? '偏高' : '正常'
 })
-// 刻度条映射窗口：0 ~ 100°C（跨度 100°C），与下方刻度数字 0/25/50/75/100 严格一一对应
-//   fill 百分比 = 温度值本身（% 即 °C），clamp 到 0~100（<0°C 或 >100°C 裁到两端）
-//   → 刻度 0%=0°C、25%=25°C、50%=50°C、75%=75°C、100%=100°C，位置精确、无错位（旧版用 -10~90 窗口会导致数字与位置对不上）
+// ★ 刻度条映射窗口：TEMP_BAR_MIN = -10°C ~ TEMP_BAR_MAX = 90°C（跨度 100°C）
+//   fill 百分比 = (温度 - MIN) / 跨度 × 100 = (t + 10)，clamp 到 0~100
+//   刻度数字 = 真实温度(°C)，按窗口等距取 5 点：-10 / 15 / 40 / 65 / 90，
+//   分别落在 0%/25%/50%/75%/100% 处（由 space-between 等距保证），数字与位置严格对应
+const TEMP_BAR_MIN = -10
+const TEMP_BAR_MAX = 90
 const tempPercent = computed(() => {
   const t = bleStore.deviceTempC
   if (t === null) return 0
-  return t < 0 ? 0 : t > 100 ? 100 : t
+  const p = (t - TEMP_BAR_MIN) / (TEMP_BAR_MAX - TEMP_BAR_MIN) * 100
+  return p < 0 ? 0 : p > 100 ? 100 : p
 })
 
 async function handleStatus() {
