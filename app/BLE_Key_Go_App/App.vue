@@ -361,6 +361,14 @@ button::after {
   --gradient-accent:    linear-gradient(135deg, #00d4ff 0%, #0088cc 100%);
   --gradient-warn-card: linear-gradient(135deg, #332200, #2a1a00);
 
+  /* ---- Beta 实验特性（无App模式）主题色，配合 config.vue 的 --beta 主色 ----
+     ⚠️ 兼容性提醒：若将来想用 CSS color-mix() 让下面这 3 个值自动从 --beta 派生（省去手动配套），
+     请注意旧版 Android WebView（约 Chrome 110 / 2023 年之前的系统）不支持 color-mix，
+     会整块颜色失效；当前特意用显式值以确保老机型也正常。 */
+  --beta-soft:   rgba(124, 58, 237, 0.14);   /* 暗色：半透明紫叠深底，不抢眼 */
+  --beta-border: rgba(124, 58, 237, 0.45);   /* 暗色：紫色描边 */
+  --beta-text:   #a78bfa;                    /* 暗色：亮紫文字，深底可读 */
+
   /* ---- Login 页专用 ---- */
   --login-bg:           linear-gradient(180deg, #0a0a1a 0%, #1a1a2e 50%, #12122a 100%);
   --login-card-bg:      rgba(22, 33, 62, 0.8);
@@ -457,6 +465,14 @@ button::after {
   --gradient-lock:      linear-gradient(135deg, #fce6e4 0%, #f5ddd8 100%);
   --gradient-accent:    linear-gradient(135deg, #0077cc 0%, #005fa3 100%);
   --gradient-warn-card: linear-gradient(135deg, #fff3e0, #ffeacc);
+
+  /* ---- Beta 实验特性（无App模式）主题色，配合 config.vue 的 --beta 主色 ----
+     ⚠️ 兼容性提醒：若将来想用 CSS color-mix() 让下面这 3 个值自动从 --beta 派生（省去手动配套），
+     请注意旧版 Android WebView（约 Chrome 110 / 2023 年之前的系统）不支持 color-mix，
+     会整块颜色失效；当前特意用显式值以确保老机型也正常。 */
+  --beta-soft:   #f5f3ff;                    /* 亮色：浅紫底 */
+  --beta-border: #ddd6fe;                    /* 亮色：浅紫描边 */
+  --beta-text:   #7c3aed;                    /* 亮色：紫文字 */
 
   /* ---- Login 页专用 ---- */
   --login-bg:           linear-gradient(180deg, #dce4f0 0%, #e8edf5 50%, #f0f4fa 100%);

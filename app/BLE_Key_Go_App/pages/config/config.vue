@@ -236,34 +236,38 @@
         </view>
       </view>
 
-      <!-- ★ 2026-07-16: 无 App 模式（固件 SMP 加密门控，基座无关，推荐） -->
-      <view class="section-title">🔓 无 App 模式（舒适进入）</view>
-      <view class="config-item">
-        <view class="config-header">
-          <text class="config-label">启用无 App 模式</text>
-          <view class="tg-switch" :class="{ 'tg-on': noAppVisual }" @click="onToggleNoAppMode">
-            <view class="tg-knob"></view>
+      <!-- ★ 2026-07-18: 无 App 模式标记为 Beta 实验特性（市面少见，标紫区分）。
+           整块包进 .beta-block（浅紫底+紫色左边框），开关开启用 .tg-beta 紫色，
+           与常规蓝色开关 #3b82f6 一眼可辨。样式见下方 .beta-block/.tg-beta/.beta 段。 -->
+      <view class="beta-block">
+        <view class="section-title beta"><text class="beta-badge">BETA</text> 无 App 模式（超级舒适进入）</view>
+        <view class="config-item beta">
+          <view class="config-header">
+            <text class="config-label">启用无 App 模式</text>
+            <view class="tg-switch tg-beta" :class="{ 'tg-on': noAppVisual }" @click="onToggleNoAppMode">
+              <view class="tg-knob"></view>
+            </view>
           </view>
+          <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
+          <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
+          <view class="config-desc config-disabled-hint" v-if="!bleStore.connected">⚠️ 需先连接设备才能切换（开关状态由设备实时回灌）。</view>
+          <view class="config-desc config-disabled-hint" v-else-if="bleStore.fwSec < 1">⚠️ 当前固件较旧，可能不支持无 App 模式（需固件 ≥ 3.33.4）。</view>
         </view>
-        <view class="config-desc">开启后，固件在（重）连时主动发起系统配对，手机弹「输入配对码」窗，输入下方<text style="font-weight:bold;">系统配对码</text> → 系统级加密重连。配对成功后无需打开 App、揣兜里即可自动解锁（耳机体验），标准/自定义基座均可。</view>
-        <view class="config-desc">关闭（默认）则回到明文 BIND+AUTH，任何手机/基座可用，但需 App 在前台或后台维持连接才能解锁。</view>
-        <view class="config-desc config-disabled-hint" v-if="!bleStore.connected">⚠️ 需先连接设备才能切换（开关状态由设备实时回灌）。</view>
-        <view class="config-desc config-disabled-hint" v-else-if="bleStore.fwSec < 1">⚠️ 当前固件较旧，可能不支持无 App 模式（需固件 ≥ 3.33.4）。</view>
-      </view>
-      <view class="config-item">
-        <view class="config-header">
-          <text class="config-label">系统配对码（6 位数字）</text>
-          <input
-            class="passcode-input"
-            type="number"
-            maxlength="6"
-            v-model="sysPasscode"
-            placeholder="123456"
-            @blur="onPasscodeBlur"
-            @confirm="onPasscodeBlur"
-            style="width:200rpx;text-align:right;font-size:26rpx;border:1rpx solid #d1d5db;border-radius:8rpx;padding:6rpx 12rpx;" />
+        <view class="config-item beta">
+          <view class="config-header">
+            <text class="config-label">系统配对码（6 位数字）</text>
+            <input
+              class="passcode-input"
+              type="number"
+              maxlength="6"
+              v-model="sysPasscode"
+              placeholder="123456"
+              @blur="onPasscodeBlur"
+              @confirm="onPasscodeBlur"
+              style="width:200rpx;text-align:right;font-size:26rpx;border:1rpx solid #d1d5db;border-radius:8rpx;padding:6rpx 12rpx;" />
+          </view>
+          <view class="config-desc">仅用于无 App 模式的系统层配对（确认是你的手机），<text style="font-weight:bold;">与绑定码完全独立</text>。开启无 App 模式时下发，之后断重连系统弹窗请输入此码。首次配对即生效；已配对后想改码，需先在手机系统蓝牙里「忽略此设备」再重连才会重新弹窗。</view>
         </view>
-        <view class="config-desc">仅用于无 App 模式的系统层配对（确认是你的手机），<text style="font-weight:bold;">与绑定码完全独立</text>。开启无 App 模式时下发，之后断重连系统弹窗请输入此码。首次配对即生效；已配对后想改码，需先在手机系统蓝牙里「忽略此设备」再重连才会重新弹窗。</view>
       </view>
 
       <!-- ★ 设备绑定：抽出为独立 BindModal 弹窗（fixed 覆盖层，脱离 swiper/scroll-view
@@ -674,7 +678,65 @@ const bindStatusClass = computed(() => {
   transform: translateX(36rpx);
 }
 
+/* ★ 2026-07-18: 无 App 模式 = Beta 实验特性（市面少见），整块用主题色与普通功能区分。
+   ⚠️ 换 Beta 主色只改 .page-config 里的「--beta」变量；卡片底/描边/文字色由 App.vue
+   两套主题（.theme-dark / .theme-light）里的 --beta-soft / --beta-border / --beta-text
+   控制，暗色下自动转半透明紫叠深底、亮色下为浅紫，需配套微调这 3 个值。 */
+/* Beta 开关开启态：主题色，区别于常规蓝 #3b82f6 */
+.tg-switch.tg-beta.tg-on {
+  background: var(--beta);
+}
+/* Beta 特性容器：浅色底（亮色）/半透明紫（暗色）+ 主题色左边框，视觉上像「实验特性卡」。
+   背景与描边走主题变量，暗色下自动变为深紫叠加，与深色背景协调。 */
+.beta-block {
+  background: var(--beta-soft);
+  border: 1rpx solid var(--beta-border);
+  border-left: 6rpx solid var(--beta);
+  border-radius: 16rpx;
+  padding: 20rpx 20rpx 4rpx;
+  margin-bottom: 30rpx;
+}
+/* Beta 标题：主题文字色（亮色深紫 / 暗色亮紫），保证深底可读 */
+.section-title.beta {
+  color: var(--beta-text);
+}
+/* BETA 小徽章 */
+.beta-badge {
+  display: inline-block;
+  background: var(--beta);
+  color: #fff;
+  font-size: 20rpx;
+  font-weight: 700;
+  padding: 2rpx 12rpx;
+  border-radius: 8rpx;
+  margin-right: 12rpx;
+  letter-spacing: 1rpx;
+}
+/* Beta 卡内的子项：去白底/去边框，避免与浅紫容器叠两层 */
+.config-item.beta {
+  background: transparent;
+  border: none;
+  padding: 16rpx 4rpx;
+  margin-bottom: 12rpx;
+}
+
 .page-config {
+  /* ★ 无 App 模式「Beta 主题色」：换 Beta 块（开关/边框/标题/徽章）的颜色，只改这一行即可。
+     下面 .tg-beta / .beta-block / .section-title.beta / .beta-badge 全部引用这个变量。
+     ⚠️ 换主色时，App.vue 两套主题里的 --beta-soft/--beta-border/--beta-text 也要配套微调（见下方速查）。
+     ┌──────────────┬───────────┬────────────────────────────────────┬────────────────────────────────────┐
+     │  方案        │ 主色--beta│ .theme-dark（--beta-soft/-border/-text）│ .theme-light（--beta-soft/-border/-text）│
+     ├──────────────┼───────────┼────────────────────────────────────┼────────────────────────────────────┤
+     │ 紫（当前默认）│ #7c3aed   │ rgba(124,58,237,.14)/.45 / #a78bfa  │ #f5f3ff / #ddd6fe / #7c3aed        │
+     │ 橙 amber     │ #f59e0b   │ rgba(245,158,11,.14)/.45 / #fbbf24  │ #fffbeb / #fde68a / #b45309        │
+     │ 青 sky       │ #0ea5e9   │ rgba(14,165,233,.14)/.45 / #38bdf8  │ #ecfeff / #bae6fd / #0369a1        │
+     │ 靛蓝 indigo  │ #4f46e5   │ rgba(79,70,229,.16)/.50 / #a5b4fc   │ #eef2ff / #c7d2fe / #4338ca        │
+     └──────────────┴───────────┴────────────────────────────────────┴────────────────────────────────────┘
+     ⚠️ 若想改成 color-mix() 自动派生省去手动配套，注意旧安卓 WebView（约 Chrome 110 前）不支持，会整块失效；
+        当前用显式值保兼容（详见 App.vue Beta 主题注释）。
+     套路：--beta 用"主色实色"；-soft 用主色的极浅色调（亮色实色 / 暗色半透明）；-border 比 -soft 略深；
+     -text 亮色用主色深一档保证浅底可读、暗色用主色亮一档保证深底可读。配好 4 处即整块换色。 */
+  --beta: #7c3aed;
   min-height: 100vh;
   background: var(--bg-page);
   color: var(--text-primary);
