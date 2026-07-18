@@ -859,18 +859,21 @@ async function handleSetName() {
 
 /* ===== 连接页补充：电池 + 芯片温度（v3.36.1，与控制页同源） ===== */
 .conn-extra { margin-bottom: 30rpx; }
-/* 连接页电量胶囊：缩在「已连接」框(🔗)内左下角的小标签
+/* 连接页电量胶囊：缩在「已连接」框(🔗)内、最左一列的小标签
    - position:absolute  → 脱离正常布局流，不占高度，所以整个框的高度不会因为它而变化
    - left   → 距「卡片左边框」的水平距离（单位 rpx）。想更靠左就调小；想靠右就调大。
-              🔗 图标本身在内容区最左边（卡片 padding=40rpx 处），这里设 30rpx 比图标再往左贴一点。
-              注意别小于 ~20rpx，否则会戳到卡片圆角外。
-   - bottom → 距「卡片底边」的距离。越大越往上、越小越往下贴边。
-   - 因为和 🔗 同属最左一列，视觉上就是「🔗 正下方的小电量标」
+              🔗 图标本身在内容区最左边（卡片 padding=40rpx 处），这里设 12rpx 比图标再往左贴一点。
+              注意别小于 ~8rpx，否则会戳到卡片圆角外。
+   - top / bottom → 决定胶囊在「🔗 上方」还是「🔗 下方」（二选一，别同时写）：
+              ★ 想放在 🔗 上方 → 用 top（如 top:14rpx，距卡片顶边 14rpx；🔗 在卡片里竖居中，故视觉上在它之上）
+              ★ 想放回 🔗 下方 → 把下面这行 top 改成 bottom:14rpx（距卡片底边 14rpx）即可
+              数值越大离边越远、越小越贴边。
+   - 因为和 🔗 同属最左一列，视觉上就是「🔗 正上/正下方的小电量标」
    - 其它（padding/border-radius/font-size）只控制这个小胶囊自身的胖瘦和字号，不影响框布局 */
 .card-batt {
   position: absolute;
   left: 12rpx;            /* ★ 想更靠左就调小这个值（如 8rpx） */
-  bottom: 14rpx;
+  top: 14rpx;             /* ★ 放在 🔗 上方：用 top；想放下方就改回 bottom:14rpx */
   display: inline-flex;
   align-items: center;
   gap: 4rpx;

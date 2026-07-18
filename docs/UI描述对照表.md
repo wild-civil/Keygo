@@ -102,8 +102,14 @@
 - **电量胶囊贴在 🔗 下方、且不撑高框**
   ```css
   .status-card { position: relative; }              /* 父框做定位锚点 */
-  .card-batt   { position: absolute; left: 30rpx; bottom: 14rpx; } /* 绝对定位，脱离布局流 */
+  .card-batt   { position: absolute; left: 12rpx; bottom: 14rpx; } /* 绝对定位，脱离布局流 */
   ```
+  - **想放到 🔗 上方？** 只把 `bottom` 换成 `top` 即可（`top`/`bottom` 二选一，别同时写）：
+    ```css
+    .card-batt { position: absolute; left: 12rpx; top: 14rpx; } /* top=贴卡片顶边 → 在竖居中的 🔗 之上 */
+    ```
+    > 原理：🔗 图标在卡片里竖直居中，`top:14rpx` 把胶囊钉在卡片顶边，所以视觉上落在图标「上方」；改回 `bottom` 则落到「下方」。数值越大离边越远。
+
 - **温度卡片单独一块、无数据自动隐藏**
   ```html
   <view class="conn-extra" v-if="bleStore.deviceTempC !== null"> ... </view>
