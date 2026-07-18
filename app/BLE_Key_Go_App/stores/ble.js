@@ -102,8 +102,10 @@ import {
 export const APP_VERSION = 'v3.33.4'
 console.log('[KeyGo] App version', APP_VERSION)
 
-// ★ 临时止血（2026-07-09）：配对设备后触发原生前台服务导致进程崩溃。
-//   先禁用原生分支，走纯 JS 兜底；定位原生根因后改回 false。
+// ★ 原生前台服务 kill-switch（长期安全开关，非临时止血）：
+//   false（默认）= 启用原生 Keygo-Foreground 前台服务（后台重连主路径，见 _ensureForegroundService :812）；
+//   true  = 强制回退纯 JS 前台服务，用于某 ROM 上原生插件崩溃时的兜底/调试。
+//   历史：2026-07-09 曾因配对后原生服务崩溃临时置 true 止血，根因修复后恢复 false，并保留为常驻开关。
 const __DISABLE_NATIVE_FG = false
 
 // ★ v3.23 Phase 3: 地理围栏工具
@@ -822,7 +824,7 @@ export const useBleStore = defineStore('ble', {
           return
         }
       } else {
-        addDebugLog(`_ensureForegroundService: 原生分支${__DISABLE_NATIVE_FG ? '已禁用(止血)' : 'knownId为空'} → 走纯JS前台服务`, 'warning')
+        addDebugLog(`_ensureForegroundService: 原生分支${__DISABLE_NATIVE_FG ? '已禁用(回退JS)' : 'knownId为空'} → 走纯JS前台服务`, 'warning')
       }
 
       // ★ 回退：纯 JS（无已知设备 或 插件不可用）
