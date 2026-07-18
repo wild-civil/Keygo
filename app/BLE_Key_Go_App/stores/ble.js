@@ -760,6 +760,7 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.25-fix: 取消可能残留的"假断连"延迟清零定时器（蓝牙真关闭立即清零）
       if (this._disconnectRssiClearTimer) { clearTimeout(this._disconnectRssiClearTimer); this._disconnectRssiClearTimer = null }
       this.connected = false
+      this._connFinalizedFor = null   // ★ 方案A (2026-07-18): 断连重置初始化幂等守卫，允许重连重新初始化一次
       this.deviceState = 'LOCKED'
       this.rssi = -999
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 断连重置签名会话态
@@ -1096,6 +1097,7 @@ export const useBleStore = defineStore('ble', {
       }
       this._notifyBuffer = ''
       this.connected = false
+      this._connFinalizedFor = null   // ★ 方案A (2026-07-18): 断连重置初始化幂等守卫，允许重连重新初始化一次
       this.deviceState = 'LOCKED'
       // ★ v3.25-fix: 不再立即清零 RSSI。锁屏/Doze 下 Android 可能发送虚假断连事件，
       //   但 GATT 实际未断（固件 LED 仍按 RSSI 工作、解锁 WRITE 仍成功）。立即清零会让
@@ -1768,6 +1770,14 @@ export const useBleStore = defineStore('ble', {
      *   提取为公共方法，避免 connect() / _doReconnect / 全局监听器补位 三处重复。
      */
     _finalizeConnection(deviceId) {
+      // ★ 方案A 幂等守卫 (2026-07-18): connect() 手动路径与全局监听器补位路径可能都触发本方法，
+      //   同一连接只初始化一次，避免重复「服务发现 + FF04 序列号读取 + 配置下发」的双份 GATT 流量与噪声日志。
+      //   守卫在 _handleDisconnect（断连）与 connect() 起点重置为 null，故重连/重新手动连接不受影响。
+      if (this._connFinalizedFor === deviceId) {
+        console.log('[Store] _finalizeConnection: 本连接已初始化，跳过重复调用（幂等守卫）')
+        return
+      }
+      this._connFinalizedFor = deviceId
       this.connected = true
       this._connectedAtMs = Date.now()   // ★ 2026-07-17 诊断埋点：记录会话起点，供 _handleDisconnect 算存活时长
       this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
@@ -2356,6 +2366,9 @@ export const useBleStore = defineStore('ble', {
         } catch (e) { /* ignore */ }
         await new Promise(r => setTimeout(r, 300))
 
+        // ★ 方案A (2026-07-18): 重置本连接初始化幂等守卫，允许本次连接由 _finalizeConnection 初始化一次。
+        this._connFinalizedFor = null
+
         await this._connectWithResetFallback(deviceId)
         this.deviceId = deviceId
         this.deviceName = deviceName || 'KeyGo'
@@ -2411,64 +2424,12 @@ export const useBleStore = defineStore('ble', {
           return false
         }
 
-        // ★ 启用 Status 特征值的 Notify（每次连接时需重新启用）
-        try {
-          await notifyBLECharacteristicValueChange(
-            deviceId,
-            BLE_CONFIG.serviceUUID,
-            BLE_CONFIG.statusCharUUID,
-            true
-          )
-          console.log('[Store] ★ FF02 Notify 启用成功（CCCD 写入完成，设备应开始推送状态）')
-        } catch (e) {
-          console.error('[Store] ✗ FF02 Notify 启用失败（CCCD 写入失败，所有 FF02 通知将收不到）:', e?.message || e)
-          console.error('[Store] ✗ 这就是为什么 BIND 没回包的根本原因！请截图此错误！')
-        }
-
-        // ★ v3.14: 启用电池电量 Notify + 非阻塞读取初始电量
-        notifyBLECharacteristicValueChange(
-          deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true
-        ).catch(() => {})
-        this._fetchBatteryLevel(deviceId).catch(() => {})
-
-        // ★ v3.3: 后台非阻塞读取设备序列号（不阻塞连接流程）
-        readSerialNumber(deviceId, 5000).then(sn => {
-          this.serialNumber = sn
-          console.log('[Store] 设备序列号（FF04）:', sn)
-          // 验证：与广播包指纹比对
-          if (this.fingerprint && sn.slice(-6).toUpperCase() !== this.fingerprint.toUpperCase()) {
-            console.warn('[Store] ⚠ 序列号指纹不匹配！广播:', this.fingerprint, '序列号:', sn.slice(-6))
-          }
-          // ★ v3.8: SN 就绪 → 从本地恢复设备自定义名称
-          this._resolveDeviceName(sn)
-          // ★ v3.12: SN 就绪 → 加载设备专属配置 + 下发到固件（per-phone 个性化）
-          this._loadConfigForDevice(sn)
-          this._restoreBindKey(sn)   // ★ 2026-07-18: 提前恢复本机密钥，用于下方门控
-          // ★ 2026-07-18: 已绑定设备由 AUTH:OK 补发配置(见 3250)，仅未绑定设备立即写。
-          if (!this.isBound) {
-            this._syncConfigToDevice()
-          }
-          // ★ v3.32.2-fix①: 手动连接路径补上「恢复绑定 + 自动 AUTH」。
-          //   此前此分支（connect() 手动连接）漏掉了 _finalizeConnection（自动重连路径）已有的
-          //   _restoreBindKey + _maybeAutoAuth，导致：手动模式重启 APP 后，用户手动连上设备，
-          //   isBound/sessionAuthed 永远 false → UI 恒显「连接待验证」、控车被挡成「请先绑定」，
-          //   逼用户每次手动重绑。固件每连接清零会话态，故重连/手动连都必须重 AUTH——自动补上。
-          this._restoreBindKey(sn)
-          this._maybeAutoAuth()
-        }).catch(err => {
-          const msg = err?.message || String(err)
-          // ★ 根据错误类型分类处理
-          if (/not support|no characteristic|FF04 not in/i.test(msg)) {
-            console.log('[Store] 固件不支持 FF04 序列号（需升级 v3.3）:', msg)
-          } else if (/timeout/i.test(msg)) {
-            console.log('[Store] 序列号读取超时:', msg)
-          } else {
-            console.warn('[Store] 序列号读取失败:', msg)
-          }
-        })
-
-        // ★ v3.13: 手机端 RSSI 转发已移除，固件 GAP 读取为主通道
-        //   RSSI 显示数据来自固件 FF02 Notify (r/f 字段)
+        // ★ 方案A (2026-07-18): GATT 初始化（FF02/电池 Notify、FF04 序列号读取、per-SN 配置下发、
+        //   自动 AUTH）统一交给 _finalizeConnection，消除「connect() 手动路径」与「全局监听器补位
+        //   路径」各跑一遍「服务发现 + 序列号读取」的双份 GATT 流量与噪声日志。connectDevice await
+        //   期间全局监听器（!this.connected 补位）可能已触发它；此处兜底显式再调一次，由其内部
+        //   幂等守卫（_connFinalizedFor）保证同一连接只初始化一遍。
+        this._finalizeConnection(deviceId)
 
         return true
       } catch (err) {
