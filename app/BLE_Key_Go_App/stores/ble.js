@@ -183,6 +183,9 @@ export const useBleStore = defineStore('ble', {
     //   用于验证 per-phone 阈值跟随：不同手机鉴权后 ou/ol 应反映各自 RSSISET 设的值。-999=未同步
     deviceOu: -999,               // 设备当前生效的解锁 RSSI 阈值
     deviceOl: -999,               // 设备当前生效的锁车 RSSI 阈值
+    // ★ v3.36.1: 内部芯片温度（摄氏度整数），固件 TSENSE 采样经 FF02 status "t" 字段上报；
+    //   null = 尚未收到（旧固件无此字段），UI 据此决定是否显示温度。
+    deviceTempC: null,
     unlockProgress: 0,            // 当前解锁进度计数（连续几次滤波 RSSI 在解锁区）
     lockProgress: 0,              // 当前锁车进度计数
     thresholdZone: 0,             // 当前区间：0 中性 / 1 解锁区 / 2 锁车区
@@ -2934,6 +2937,10 @@ export const useBleStore = defineStore('ble', {
       if (data.ucnt !== undefined) this.unlockProgress = Number(data.ucnt)
       if (data.lcnt !== undefined) this.lockProgress = Number(data.lcnt)
       if (data.th !== undefined) this.thresholdZone = Number(data.th)
+
+      // ★ v3.36.1: 内部芯片温度遥测（t 字段，摄氏度整数，固件 TSENSE 采样，5s 节流）。
+      //   固件 v3.36.1 起上报；旧固件无此字段 → deviceTempC 保持 null，UI 不显示温度。
+      if (data.t !== undefined) this.deviceTempC = Number(data.t)
 
       // ★ v3.15-#13: 每次收到有效 Status 后重置看门狗
       this._resetStatusStaleTimer()

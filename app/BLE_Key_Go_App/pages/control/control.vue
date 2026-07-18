@@ -58,6 +58,11 @@
           <text class="info-label">锁车阈值</text>
           <text class="info-value">{{ bleStore.lockThreshold }} dBm</text>
         </view>
+        <!-- ★ v3.36.1: 内部芯片温度遥测（固件 TSENSE 采样，经 FF02 "t" 上报；旧固件为 null 不显示） -->
+        <view class="info-item" v-if="bleStore.deviceTempC !== null">
+          <text class="info-label">芯片温度</text>
+          <text class="info-value">{{ bleStore.deviceTempC }} °C</text>
+        </view>
       </view>
 
       <!-- ★ 主要控制按钮 -->

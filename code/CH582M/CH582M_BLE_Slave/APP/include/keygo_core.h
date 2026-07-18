@@ -1,7 +1,7 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : keygo_core.h
- * Author             : KeyGo v3.36.0 (CH582M)
- * Date               : 2026/07/16
+ * Author             : KeyGo v3.36.1 (CH582M)
+ * Date               : 2026/07/18
  * Description        : GPIO + Kalman + RSSI + 状态机 + 通知 + 命令
  *********************************************************************************/
 
@@ -30,8 +30,13 @@
  *     - BIND/AUTH 协议破坏性升级（fwsec 1→2）：BIND 增 <phoneId>，AUTH 增 <phoneId> 段；旧 App 走 gk 兼容分支。
  *     - 协议能力字段 fwsec = 2（App 据此外部分流走新/旧路径；详见 keygo_core.c KEYGO_FWSEC）。
  *   ★ 同一轮调试增强（2026-07-16）：新增串口 DEBUG 命令——输入 `scan` 切换 / `scan on` / `scan off`
- *     控制 "Scan req from" 日志打印（默认开）；另支持 `help`。详见 peripheral.c KeyGo_UartCmdPoll()。 */
-#define KEYGO_FW_VERSION   "3.36.0"
+ *     控制 "Scan req from" 日志打印（默认开）；另支持 `help`。详见 peripheral.c KeyGo_UartCmdPoll()。 
+ *   ★ v3.36.1（2026-07-18）TSENSE 内部温度遥测：FF02 status JSON 新增 "t" 字段（摄氏度整数）。
+ *     由 HAL_GetInterTempValue() 采样内部温度传感器 + adc_to_temperature_celsius() 按 ROM 出厂校准换算，
+ *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
+ *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
+ */
+#define KEYGO_FW_VERSION   "3.36.1"
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
