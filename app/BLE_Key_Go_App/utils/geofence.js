@@ -19,8 +19,6 @@
  * @module geofence
  */
 
-// #ifdef APP-PLUS
-
 const TAG = '[Geofence]'
 
 /** 围栏半径（米），可配置 */
@@ -262,6 +260,7 @@ let _lastKnownPosition = null
  * @param {Function} onPosition 位置更新回调 ({distance, latitude, longitude, accuracy, parking}) => void（可选）
  * @returns {boolean} 是否成功启动
  */
+// #ifdef APP-PLUS
 export function startGeofenceMonitor(onEnter, onLeave, onPosition) {
   const parking = getParkingLocation()
   if (!parking) {
@@ -397,6 +396,14 @@ export function stopGeofenceMonitor() {
   _onPositionCallback = null
   _lastKnownPosition = null    // ★ v3.25: 清理缓存坐标
 }
+// #endif
+
+// #ifndef APP-PLUS
+// 非 App 平台（小程序/H5）无 plus.geolocation，提供空实现占位，避免导入端报 not exported。
+// 这些平台不会真正启用围栏监控，调用方（stores/ble.js）会按返回值 false 走降级逻辑。
+export function startGeofenceMonitor() { return false }
+export function stopGeofenceMonitor() {}
+// #endif
 
 /**
  * 查询监控是否正在运行
@@ -476,5 +483,3 @@ export function getDistanceToParking() {
     age: -1,
   }
 }
-
-// #endif

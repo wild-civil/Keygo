@@ -911,14 +911,50 @@ export function notifyBLECharacteristicValueChange(deviceId, serviceId, characte
  * @param {Function} callback (res) => void
  * @returns {Function} 返回内部 handler 引用，供 uni.offBLECharacteristicValueChange 精准移除
  */
-export function onBLECharacteristicValueChange(callback) {
-  const handler = (res) => {
-    if (typeof callback === 'function') {
-      callback(res)
+// ★ 单一全局 notify handler + waiter 表。
+//   微信小程序 BLE 通知为「全局单通道」：多次 uni.on/offBLECharacteristicValueChange 会互相覆盖，
+//   旧实现里 readSerialNumber/readBatteryLevel 的 off 曾误删 FF02 主 handler（固件无响应/RSSI 不显示）。
+//   现统一为：只注册一个全局 handler，内部按 characteristicId 分发到对应 waiter 集合。
+let _globalNotifyHandler = null
+const _notifyWaiters = new Map() // characteristicId(大写) -> Set<callback>
+
+export function ensureGlobalNotifyHandler() {
+  if (_globalNotifyHandler) return
+  _globalNotifyHandler = (res) => {
+    const cid = (res.characteristicId || '').toUpperCase()
+    const set = _notifyWaiters.get(cid)
+    if (set && set.size) {
+      for (const cb of set) {
+        try { cb(res) } catch (e) { console.error('[BLE] notify waiter error:', e) }
+      }
+    }
+    const wild = _notifyWaiters.get('*')
+    if (wild && wild.size) {
+      for (const cb of wild) {
+        try { cb(res) } catch (e) { console.error('[BLE] notify waiter(wild) error:', e) }
+      }
     }
   }
-  uni.onBLECharacteristicValueChange(handler)
-  return handler
+  uni.onBLECharacteristicValueChange(_globalNotifyHandler)
+}
+
+export function registerNotifyWaiter(charUUID, callback) {
+  ensureGlobalNotifyHandler()
+  const cid = (charUUID || '').toUpperCase()
+  if (!_notifyWaiters.has(cid)) _notifyWaiters.set(cid, new Set())
+  _notifyWaiters.get(cid).add(callback)
+  let done = false
+  return () => {
+    if (done) return
+    done = true
+    const set = _notifyWaiters.get(cid)
+    if (set) set.delete(callback)
+  }
+}
+
+// 兼容旧调用（store 里曾用 onBLECharacteristicValueChange）：注册到通配 waiter '*'
+export function onBLECharacteristicValueChange(callback) {
+  return registerNotifyWaiter('*', callback)
 }
 
 // ==================== 业务功能 ====================
@@ -994,24 +1030,25 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true
-        try { uni.offBLECharacteristicValueChange(handler) } catch {}
+        unregister()
         reject(new Error('Read serial number timeout'))
       }
     }, timeoutMs)
 
-    const handler = (res) => {
+    // ★ 改用全局 waiter，避免 uni.on/offBLECharacteristicValueChange 互相覆盖 FF02 主 handler
+    const unregister = registerNotifyWaiter(BLE_CONFIG.serialCharUUID, (res) => {
       if (resolved) return
       if (res.deviceId !== deviceId) return
       if ((res.characteristicId || '').toUpperCase() !== BLE_CONFIG.serialCharUUID.toUpperCase()) return
 
       resolved = true
       clearTimeout(timer)
-      try { uni.offBLECharacteristicValueChange(handler) } catch {}
+      unregister()
 
       const sn = arrayBufferToString(res.value)
       console.log('[BLE] 设备序列号:', sn)
       resolve(sn)
-    }
+    })
 
     /**
      * ★ 读取前先显式做一次 GATT 特征发现，并打印设备实际暴露的特征列表。
@@ -1023,14 +1060,13 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
           if (!resolved) {
             resolved = true
             clearTimeout(timer)
-            try { uni.offBLECharacteristicValueChange(handler) } catch {}
+            unregister()
             reject(new Error(err?.errMsg || err?.message || '读序列号失败'))
           }
         })
     }
 
-    uni.onBLECharacteristicValueChange(handler)
-
+    // ★ 已通过 registerNotifyWaiter 注册，无需再调 uni.onBLECharacteristicValueChange
     // ★ 先获取设备特征列表，诊断性打印
     getBLEDeviceServices(deviceId).then(services => {
       console.log('[Serial] 服务发现完成:', services.length, '个服务')
@@ -1045,10 +1081,10 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
         // ★ 小幅延迟 150ms 再读取，让 GATT 数据库缓存就绪，防止 property not support
         setTimeout(() => doRead(), 150)
       } else {
-        // ★ FF04 不在特征列表中 → 固件确实没暴露，或版本不对
+        // ★ FF04 不在特征列表中 -> 固件确实没暴露，或版本不对
         resolved = true
         clearTimeout(timer)
-        try { uni.offBLECharacteristicValueChange(handler) } catch {}
+        unregister()
         reject(new Error(`FF04 not in characteristic list. Found: [${uuidList}]`))
       }
     }).catch(err => {
@@ -1058,51 +1094,37 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
     })
   })
 }
-
-/**
- * ★ v3.14: 读取电池电量（Battery Service 0x180F / 0x2A19）
- *
- * 连接后通过 GATT Read 读取电池电量，不依赖扫描缓存。
- * 返回的 Promise resolve 为电池百分比 0~100。
- *
- * @param {string} deviceId - 已连接的设备 ID
- * @param {number} timeoutMs - 超时（毫秒），默认 3000
- * @returns {Promise<number>} 电池电量 0~100
- */
 export function readBatteryLevel(deviceId, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     let resolved = false
-
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true
-        try { uni.offBLECharacteristicValueChange(handler) } catch {}
-        reject(new Error('Read battery level timeout'))
-      }
-    }, timeoutMs)
-
-    const handler = (res) => {
+    const unregister = registerNotifyWaiter(BATT_SERVICE.levelCharUUID, (res) => {
       if (resolved) return
       if (res.deviceId !== deviceId) return
       if ((res.characteristicId || '').toUpperCase() !== BATT_SERVICE.levelCharUUID.toUpperCase()) return
 
       resolved = true
       clearTimeout(timer)
-      try { uni.offBLECharacteristicValueChange(handler) } catch {}
+      unregister()
 
       const level = new Uint8Array(res.value)[0]
       console.log('[BLE] 电池电量 (GATT Read):', level + '%')
       resolve(level)
-    }
+    })
 
-    uni.onBLECharacteristicValueChange(handler)
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true
+        unregister()
+        reject(new Error('Read battery level timeout'))
+      }
+    }, timeoutMs)
 
     readBLECharacteristicValue(deviceId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID)
       .catch((err) => {
         if (!resolved) {
           resolved = true
           clearTimeout(timer)
-          try { uni.offBLECharacteristicValueChange(handler) } catch {}
+          unregister()
           reject(new Error(err?.errMsg || err?.message || '读电池电量失败'))
         }
       })

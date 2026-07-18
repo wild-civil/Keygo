@@ -47,7 +47,7 @@ import {
   sendConfig,
   sendCommand,
   onBLEConnectionStateChange,
-  onBLECharacteristicValueChange,
+  registerNotifyWaiter,
   notifyBLECharacteristicValueChange,
   arrayBufferToString,
   tryParseJSON,
@@ -127,7 +127,7 @@ import { enqueueWrite, isGattConflict } from '@/utils/command-queue.js'
 // ★ 用户可读错误文案集中管理（提取到 utils/readable-errors.js）
 import { throwError, ERROR_MSGS } from '@/utils/readable-errors.js'
 // ★ ②: 绑定层模块级状态（提取到 stores/ble-binding.js，通过 B 命名空间对象访问）
-import { B, _waitFor, _resolveWaiter, _acquireBindLock, _acquireAuthLock, _waitBind } from './ble-binding.js'
+import { B, _waitFor, _resolveWaiter, _acquireBindLock, _acquireAuthLock, _waitBind, BIND_DISCONNECTED, _flushBindWaiters } from './ble-binding.js'
 
 export const useBleStore = defineStore('ble', {
   state: () => ({
@@ -258,7 +258,7 @@ export const useBleStore = defineStore('ble', {
     _listenersInited: false,
     _nativeBtMonitorActive: false,   // ★ v3.11: 原生广播是否已注册
     _connHandler: null,
-    _charHandler: null,
+    _charUnregister: null,         // ★ 2026-07-19: FF02 状态 waiter 的取消注册函数（不再直接 uni.offBLECharacteristicValueChange）
     _btAdapterHandler: null,       // ★ v3.11: Uni-APP 适配器监听（iOS 主驱 / Android 降级）
     _notifyBuffer: '',
     _notifyTimer: null,
@@ -482,9 +482,10 @@ export const useBleStore = defineStore('ble', {
         }
       })
 
-      // 特征值数据监听（全局唯一）
+      // ★ 2026-07-19: 改用单一全局 notify handler + waiter 分发（见 utils/ble.js），
+      //   不再直接 uni.on/offBLECharacteristicValueChange，避免微信小程序里误删 FF02 主 handler。
       // Notify 分包拼接缓冲区
-      this._charHandler = onBLECharacteristicValueChange((res) => {
+      this._charUnregister = registerNotifyWaiter(BLE_CONFIG.statusCharUUID, (res) => {
         if (res.deviceId === this.deviceId &&
             (res.characteristicId || '').toUpperCase() === BLE_CONFIG.statusCharUUID.toUpperCase()) {
           const chunk = arrayBufferToString(res.value)
@@ -619,9 +620,9 @@ export const useBleStore = defineStore('ble', {
         try { uni.offBLEConnectionStateChange(this._connHandler) } catch {}
         this._connHandler = null
       }
-      if (this._charHandler) {
-        try { uni.offBLECharacteristicValueChange(this._charHandler) } catch {}
-        this._charHandler = null
+      if (this._charUnregister) {
+        try { this._charUnregister() } catch {}
+        this._charUnregister = null
       }
       if (this._btAdapterHandler) {
         try { uni.offBluetoothAdapterStateChange(this._btAdapterHandler) } catch {}
@@ -1100,6 +1101,9 @@ export const useBleStore = defineStore('ble', {
       }
       this._notifyBuffer = ''
       this.connected = false
+      // ★ 2026-07-19: 断连时立即 flush 所有 binding waiter（BIND/NONCE/AUTH 等），
+      //   让 bindDevice 秒级失败，不再卡在 2500ms + 4000ms 等超时。
+      _flushBindWaiters(false)
       this._connFinalizedFor = null   // ★ 方案A (2026-07-18): 断连重置初始化幂等守卫，允许重连重新初始化一次
       this.deviceState = 'LOCKED'
       // ★ v3.25-fix: 不再立即清零 RSSI。锁屏/Doze 下 Android 可能发送虚假断连事件，
@@ -3223,6 +3227,8 @@ export const useBleStore = defineStore('ble', {
       const hex = await p
       done = true
       clearTimeout(timer)
+      // ★ 2026-07-19: BIND_DISCONNECTED 表示断连——_flushBindWaiters 在 _handleDisconnect 中 resolve 了 waiter
+      if (hex === BIND_DISCONNECTED) return null
       B._lastNonce = hex || null   // ★ P0-2: 记录本次 NONCE，AUTH:OK 时作为会话盐来源
       return hex || null
     },
@@ -3629,6 +3635,17 @@ export const useBleStore = defineStore('ble', {
       console.log('[BIND] === 开始绑定 === fwVersion=', JSON.stringify(this.fwVersion),
                   ' sn=', sn, ' 已持有本地key=', !!B._bindKey, ' isBound=', this.isBound)
 
+      // ★ 2026-07-19: 绑定前诊断——连接已断或 fwVersion 为空则提前退出。
+      //   fwVersion 为空说明 FF02 状态通知从未到达，设备端 Notify 可能不通——继续走绑定大概率也收不到 BIND:OK。
+      if (!this.connected) {
+        B._bindInProgress = false
+        this.bindHint = '设备未连接，请先连接设备后再绑定'
+        return false
+      }
+      if (!this.fwVersion) {
+        console.warn('[BIND] ⚠ fwVersion 为空——FF02 状态通知可能未到达。绑定将继续进行，但若收不到 BIND:OK 可能是 Notify 通道不通。')
+      }
+
       // ★ 2026-07-15: usePasskey 偏好门控——仅当用户开启「passkey 配对(舒适进入)」才发起系统配对。
       //   关闭(默认,最大兼容)：跳过配对，绑定码以明文 BIND+AUTH 传输，全平台/标准基座可用，
       //     但无 OS 级加密重连、需 App 在前台/后台维持连接才解锁。
@@ -3663,6 +3680,13 @@ export const useBleStore = defineStore('ble', {
 
       // 2) 等待 BIND:OK（waiter 已在步骤0注册，回包早于此处也不会错过）
       const bindOk = await bindWaitPromise
+      // ★ 2026-07-19: BIND_DISCONNECTED 表示设备在 BIND 写入后断连
+      if (bindOk === BIND_DISCONNECTED) {
+        B._bindConfirmByStatus = false
+        B._bindInProgress = false
+        this.bindHint = '设备连接已断开，请重新连接后重试绑定'
+        return false
+      }
       // ★ 2026-07-11 修复：BIND 等待结束后清掉兜底开关，避免后续状态包误用本次 BIND 的跃迁标志
       B._bindConfirmByStatus = false
 
@@ -3699,9 +3723,12 @@ export const useBleStore = defineStore('ble', {
           this.sessionAuthed = true
           this.bindHint = '绑定码错误，绑定关系保持不变'
         } else {
-          this.bindHint = B._lastBindRaw
-            ? ('绑定失败，固件回包: ' + B._lastBindRaw)
-            : '绑定失败：BIND 写入后固件无回应（BIND:OK 与 AUTH 握手均未确认）'
+          // ★ 2026-07-19: 优先检查设备是否已断连——若连接已断，提示重连而非"固件无回应"
+          this.bindHint = this.connected
+            ? (B._lastBindRaw
+              ? ('绑定失败，固件回包: ' + B._lastBindRaw)
+              : '绑定失败：BIND 写入后固件无回应（BIND:OK 与 AUTH 握手均未确认）')
+            : '设备连接已断开，请重新连接后重试绑定'
         }
       }
       return bound

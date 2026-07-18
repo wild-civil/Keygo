@@ -64,8 +64,10 @@
     </view>
 
     <!-- ★ v3.36.1: 连接页补充 — 芯片温度（信号强度下方，与控制页同源）；电池已移至「已连接」框下方 -->
-    <view class="conn-extra" v-if="bleStore.deviceTempC !== null">
-      <view class="temp-card" v-if="bleStore.deviceTempC !== null" :class="tempClass">
+    <!-- ★ 2026-07-19: 温度遥测本就是连接态数据，必须 connected 才显示；断连后即便 deviceTempC
+         因时序残留旧值也不应再显示，故加 bleStore.connected 守卫（与断连置 null 双保险）。 -->
+    <view class="conn-extra" v-if="bleStore.connected && bleStore.deviceTempC !== null">
+      <view class="temp-card" v-if="bleStore.connected && bleStore.deviceTempC !== null" :class="tempClass">
         <view class="temp-head">
           <text class="temp-icon">🌡️</text>
           <text class="temp-label">芯片温度</text>

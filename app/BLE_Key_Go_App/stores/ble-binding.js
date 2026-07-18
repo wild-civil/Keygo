@@ -90,6 +90,32 @@ export function _acquireAuthLock() {
   return _prev.then(() => _rel)
 }
 
+/** ★ 2026-07-19: 断连标记——waiter 被 resolve 为此值即表示连接已断开 */
+export const BIND_DISCONNECTED = Symbol('BIND_DISCONNECTED')
+
+/**
+ * ★ 2026-07-19: 断连时 flush 所有绑定义务 waiter，让 bindDevice/_authWithKey 快速失败。
+ *   否则 _handleDisconnect 不会 resolve 任何 waiter，导致 bindDevice 里的 _waitBind(2500)
+ *   和 _requestNonce(4000) 都要硬等到超时，合计浪费 ~6.5s 才报错。
+ *
+ *   @param {boolean} connected 当前连接状态（false=断连，调用方传入 this.connected）
+ */
+export function _flushBindWaiters(connected) {
+  const sentinel = connected ? undefined : BIND_DISCONNECTED
+  // 所有注册过的绑定 waiter 类型
+  for (const type of ['NONCE', 'AUTH', 'BIND', 'UNBIND', 'SETCODE']) {
+    const r = B._bindWaiters[type]
+    if (r) {
+      if (!connected) {
+        // 断开：resolve 为 BIND_DISCONNECTED 标记
+        r(BIND_DISCONNECTED)
+      }
+      // ★ connected=true 时不 resolve（由上层自行处理），仅清空
+      B._bindWaiters[type] = null
+    }
+  }
+}
+
 /** 等待 BIND:OK，超时(ms)返回 false 但不阻塞后续兜底 */
 export function _waitBind(ms) {
   return new Promise((resolve) => {

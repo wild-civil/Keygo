@@ -18,12 +18,30 @@ const STORAGE_KEY = 'app_theme_mode'
 function getSystemTheme() {
   try {
     // 1. 微信小程序原生 API（最可靠）
+    // ★ 注意：wx.getSystemInfoSync().theme 仅在 app.json 配 darkmode:true 且有值时返回，
+    //   否则为 undefined（需用户微信「设置-通用-外观-跟随系统」开启才会回报）。
     // #ifdef MP-WEIXIN
-    if (typeof wx !== 'undefined' && wx.getSystemInfoSync) {
-      const wxInfo = wx.getSystemInfoSync()
-      if (wxInfo.theme) {
-        console.log('[Theme] wx.getSystemInfoSync 检测:', wxInfo.theme)
-        return wxInfo.theme
+    if (typeof wx !== 'undefined') {
+      // 1a. 兼容旧基础库：getSystemInfoSync().theme
+      if (wx.getSystemInfoSync) {
+        const wxInfo = wx.getSystemInfoSync()
+        if (wxInfo.theme) {
+          console.log('[Theme] wx.getSystemInfoSync 检测:', wxInfo.theme)
+          return wxInfo.theme
+        }
+      }
+      // 1b. 新基础库推荐 API（getWindowInfo / getAppBaseInfo 也可能携带 theme），提高获取率
+      for (const fn of [typeof wx.getWindowInfo === 'function' ? wx.getWindowInfo : null,
+                        typeof wx.getAppBaseInfo === 'function' ? wx.getAppBaseInfo : null]) {
+        try {
+          if (fn) {
+            const r = fn()
+            if (r && r.theme) {
+              console.log('[Theme]', (fn.name || 'wx API'), '检测:', r.theme)
+              return r.theme
+            }
+          }
+        } catch {}
       }
     }
     // #endif
@@ -44,7 +62,11 @@ function getSystemTheme() {
     if (t) return t
 
     // 全部不可用
+    // ★ 小程序下 theme 常为空（开发者工具默认 light、真机未开深色模式），
+    //   降级 light 属正常预期，故不告警避免控制台噪音；独立 App 下才 warn（可能是 API 异常）。
+    // #ifndef MP-WEIXIN
     console.warn('[Theme] ⚠️ 所有途径无法检测系统主题，降级为 light')
+    // #endif
     return 'light'
   } catch (e) {
     console.error('[Theme] getSystemInfoSync 异常:', e)
