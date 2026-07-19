@@ -808,7 +808,9 @@ void KeyGo_ProcessStateMachine(void)
     int16_t _unlockTh = g_cfgUnlockThreshold;
     int16_t _lockTh   = g_cfgLockThreshold;
     if (Bonding_GetActiveOwnerRssi(&_unlockTh, &_lockTh)) {
-        PRINT("[RSSI] using owner threshold unlock=%d lock=%d\n", (int)_unlockTh, (int)_lockTh);
+        if (g_rssiLogEnabled) {
+            PRINT("[RSSI] using owner threshold unlock=%d lock=%d\n", (int)_unlockTh, (int)_lockTh);
+        }
     }
 
     // ★ v3.5: 使用可运行时配置的阈值变量 (非 #define 硬编码)；v3.36 起阈值取 _unlockTh/_lockTh（owner 或全局）

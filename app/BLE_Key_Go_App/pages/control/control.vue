@@ -159,7 +159,7 @@
               <text class="mode-icon">🔓</text>
               <text class="mode-name">仅解锁</text>
             </view>
-            <text class="mode-desc">靠近只解锁，骑行需手动点</text>
+            <text class="mode-desc">靠近只解锁，骑行需手动</text>
           </view>
           <view class="mode-card"
             :class="{ active: proxRideVisual === 1 }"

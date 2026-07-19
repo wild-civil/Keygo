@@ -29,6 +29,8 @@
 
 // ★ 2026-07-16 调试增强: "Scan req from" 日志开关（串口命令可切换，默认开）
 uint8_t g_scanLogEnabled = 1;
+// ★ v3.36.2-debug (2026-07-19): "[RSSI] using owner threshold" 阈值日志开关（串口 `rssi`[on|off] 切换，默认开）
+uint8_t g_rssiLogEnabled = 1;
 
 // 扫描响应（v3.13: 运行时动态构建，名称含 MAC 后 3 字节）
 #define SCAN_RSP_MAX_LEN  31
@@ -307,7 +309,7 @@ void Peripheral_Init(void)
 
     PRINT("==== KEYGO %s (CH582M) ====\n", KEYGO_FW_VERSION);
 #ifdef DEBUG
-    PRINT("[UART] debug cmds: 'scan' toggle / 'scan on' / 'scan off' / 'help'\n");
+    PRINT("[UART] debug cmds: 'scan'[on|off] / 'rssi'[on|off] / 'help'\n");
 #endif
 }
 
@@ -326,6 +328,9 @@ void Peripheral_Init(void)
  *   scan          切换 "Scan req from" 日志开关
  *   scan on       打开该日志
  *   scan off      关闭该日志
+ *   rssi          切换 "[RSSI] using owner threshold" 阈值日志开关
+ *   rssi on       打开该日志
+ *   rssi off      关闭该日志
  *   help          打印帮助
  *
  * [非 DEBUG 构建] 函数体为空，避免在无 UART1 的工程里链接 UART1_RecvString。
@@ -366,8 +371,20 @@ static void KeyGo_UartCmdExec(char *line)
             return;
         }
         PRINT("[UART] scan log %s\n", g_scanLogEnabled ? "ON" : "OFF");
+    } else if (strcmp(tok, "rssi") == 0) {
+        if (*arg == '\0') {
+            g_rssiLogEnabled = g_rssiLogEnabled ? 0 : 1;   // 无参数 → 切换
+        } else if (strcmp(arg, "off") == 0) {
+            g_rssiLogEnabled = 0;
+        } else if (strcmp(arg, "on") == 0) {
+            g_rssiLogEnabled = 1;
+        } else {
+            PRINT("[UART] bad arg '%s' (use: rssi | rssi on | rssi off)\n", arg);
+            return;
+        }
+        PRINT("[UART] rssi log %s\n", g_rssiLogEnabled ? "ON" : "OFF");
     } else if (strcmp(tok, "help") == 0) {
-        PRINT("[UART] cmds: scan | scan on | scan off | help\n");
+        PRINT("[UART] cmds: scan[on|off] | rssi[on|off] | 'help'\n");
     } else {
         PRINT("[UART] unknown: %s (type 'help')\n", tok);
     }
@@ -728,6 +745,48 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
  * ────────────────────── 连接断开 ──────────────────────────────────
  *********************************************************************/
 
+/* ★ v3.36.2-debug (2026-07-19): 断连原因 → 人类可读分类。
+ *   linkTerminate.reason 遵循 BLE HCI/LL 断开原因规范（见 core spec Vol 2 Part D），
+ *   uni-app 的 onBLEConnectionStateChange 不暴露原因，因此只能看固件串口。
+ *   返回静态字符串，直接拼进 PRINT。
+ *
+ *   对照表（排查「App 偶发断连」时一眼定性锅在谁身上）：
+ *     ┌─────────┬──────────────────────────────────┬────────────────────────────────┐
+ *     │ reason  │ 含义                              │ 指向                           │
+ *     ├─────────┼──────────────────────────────────┼────────────────────────────────┤
+ *     │ 0x05    │ Authentication Failure           │ 鉴权失败（配对/加密握手问题） │
+ *     │ 0x08    │ Connection Timeout (监督超时)     │ 链路层失步→RMT_TIMEOUT：信号弱/干扰/手机栈不稳/设备 RF │
+ *     │ 0x13    │ Remote User Terminated           │ RMT_USER：手机/App 主动关（含 Android 电池优化回收 BT、系统 BT 重启） │
+ *     │ 0x14    │ Unsupported Remote Feature        │ RMT_UNSUPP：对端不支持某特性   │
+ *     │ 0x15    │ Remote Device Power Off          │ PWR_OFF：对端断电              │
+ *     │ 0x16    │ Local Host Terminated            │ LOCAL：固件自己调 terminate（若已鉴权空闲连接出现此值=固件 bug） │
+ *     │ 0x1A    │ Unsupported LMP Parameter Value   │ RMT_LMP：对端参数不支持        │
+ *     │ 0x1F    │ Unspecified Error                │ RMT_UNSPEC：对端未指定错误     │
+ *     │ 0x3B    │ Instant Passed                    │ INSTANT_PASS：锚点时刻已过     │
+ *     │ 0x3C    │ MIC Failure                       │ MIC_FAIL：加密 MIC 失败        │
+ *     │ 0x3E    │ LL Response Timeout              │ LL_TIMEOUT：链路层响应超时     │
+ *     └─────────┴──────────────────────────────────┴────────────────────────────────┘
+ *   注：0x08 在 BLE 规范里是「链路监督超时」，即本端在 supervision timeout 内没收到对端任何包→判定链路丢。
+ *       实际体验 = 手机/设备走远、信号被屏蔽、或手机 BLE 栈在 Doze/锁屏下未及时调度→链路失步。
+ *       本函数把 0x08 归类为 RMT_TIMEOUT（对端无响应导致的超时），与用户记忆中的「信号/干扰/手机栈」指向一致。 */
+static const char *KeyGo_DiscReasonStr(uint8_t r)
+{
+    switch (r) {
+        case 0x05: return "AUTH_FAIL";
+        case 0x08: return "RMT_TIMEOUT";   // 链路监督超时（对端无响应）
+        case 0x13: return "RMT_USER";      // 对端（手机）主动关闭
+        case 0x14: return "RMT_UNSUPP";
+        case 0x15: return "PWR_OFF";       // 对端断电
+        case 0x16: return "LOCAL";         // 本端（固件）主动关闭
+        case 0x1A: return "RMT_LMP";
+        case 0x1F: return "RMT_UNSPEC";
+        case 0x3B: return "INSTANT_PASS";
+        case 0x3C: return "MIC_FAIL";
+        case 0x3E: return "LL_TIMEOUT";
+        default:   return "OTHER";
+    }
+}
+
 static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
 {
     gapTerminateLinkEvent_t *event = (gapTerminateLinkEvent_t *)pEvent;
@@ -798,8 +857,12 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         // ★ v3.13: 200ms 后检查 advertising 状态，未恢复则触发重试机制
         tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
 
-        PRINT("Disconnected.. Reason:%x\n", pEvent->linkTerminate.reason);
-        PRINT("[OBS] DISCONNECTED reason=%x\n", pEvent->linkTerminate.reason);
+        PRINT("Disconnected.. Reason:0x%02x (%s)\n",
+              (unsigned)pEvent->linkTerminate.reason,
+              KeyGo_DiscReasonStr(pEvent->linkTerminate.reason));
+        PRINT("[OBS] DISCONNECTED reason=0x%02x (%s)\n",
+              (unsigned)pEvent->linkTerminate.reason,
+              KeyGo_DiscReasonStr(pEvent->linkTerminate.reason));
     }
 }
 
