@@ -4,7 +4,7 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">KeyGo·钥启程</text>
-      <text class="login-subtitle">使用帮助 · v3.36.0</text>
+      <text class="login-subtitle">使用帮助 · v3.36.2</text>
     </view>
 
     <!-- ★ v3.32.2-fix: 快速上手 + 首次绑定向导 合并为一张卡 -->
@@ -121,6 +121,7 @@
       <view class="info-rows">
         <view class="info-row"><text class="info-label">汽车</text><text class="info-val">解锁 / 锁车 / 后备箱——适合汽车遥控场景</text></view>
         <view class="info-row"><text class="info-label">电瓶车</text><text class="info-val">解锁 / 锁车 / 骑行（双击）——「骑行」会向车辆输出快速双击脉冲，模拟原遥控双击启动</text></view>
+        <view class="info-row"><text class="info-label">靠近进入模式</text><text class="info-val">电瓶车专属：靠近时选择「仅解锁」或「直接骑行」。该偏好存于设备，切到汽车模式时不生效（开关自动隐藏），切回电瓶车后自动恢复</text></view>
       </view>
       <view class="info-tip"><text class="tip-icon">💡</text><text class="tip-text">模式存于设备（DataFlash），可在「控制」页底部随时切换；切换后重启仍保持</text></view>
     </view>
@@ -215,7 +216,7 @@
 
     <!-- 底部 -->
     <view class="login-footer">
-      <text class="footer-text">BLE KeyGo v3.36.0 · 纯本地 · 安全可靠</text>
+      <text class="footer-text">BLE KeyGo v3.36.2 · 纯本地 · 安全可靠</text>
       <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>

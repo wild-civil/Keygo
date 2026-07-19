@@ -169,6 +169,9 @@ static uint32_t g_lastCommandMs     = 0;
 // 命令处理
 static char     g_customName[21]    = {0};
 static uint8_t  g_deviceMode       = 0;     // ★ Phase 2: 设备模式 0=car(默认) / 1=ebike
+// ★ 2026-07-19: 电瓶车「靠近直接进入骑行模式」偏好。0=仅解锁(默认,=现状) / 1=靠近直接骑行。
+//   必须存固件 DataFlash: 靠近解锁由固件 RSSI 状态机驱动(无App模式也能触发), 故偏好不能只放 App 本地。
+static uint8_t  g_ebikeProxMode    = 0;     // ★ 0=仅解锁(默认) / 1=靠近直接骑行(仅 ebike 模式生效)
 
 /* [LED_BEGIN] ──────── 后备箱 LED 闪烁状态机 ────────
  *   g_ledBlinkLocked=1 时 KeyGo_Unlock/Lock 不会改变 LED 状态
@@ -678,6 +681,21 @@ static void KeyGo_ObsBlinkTrigger(void)
     g_obsBlinkNextMs = Peripheral_GetSystemMs();
 }
 
+// ★ 2026-07-19: 进近解锁动作封装 — 电瓶车且开启「靠近骑行」偏好时进入骑行, 否则普通解锁。
+//   关键: 骑行路径必须显式置 g_keyState=KSTATE_UNLOCKED, 否则状态机仍认为 LOCKED →
+//   离场不触发锁车、LED 状态错乱、下次进近又重复解锁。注意 KeyGo_Ride() 本身【不】置 keyState。
+static void KeyGo_ProximityAct(void)
+{
+    if (g_deviceMode == 1 && g_ebikeProxMode == 1) {
+        g_keyState = KSTATE_UNLOCKED;   // ★ 骑行视为已解锁
+        KeyGo_Ride();
+        PRINT("[STATE] proximity → RIDE (ebike + proxMode=1)\n");
+    } else {
+        g_keyState = KSTATE_UNLOCKED;
+        KeyGo_Unlock();
+    }
+}
+
 void KeyGo_ProcessStateMachine(void)
 {
     /* ── [OBS_BEGIN] 观测性（①）：加密链路上升沿 + LED 提示驱动 + RSSI 节流打印 ──
@@ -790,7 +808,9 @@ void KeyGo_ProcessStateMachine(void)
     int16_t _unlockTh = g_cfgUnlockThreshold;
     int16_t _lockTh   = g_cfgLockThreshold;
     if (Bonding_GetActiveOwnerRssi(&_unlockTh, &_lockTh)) {
-        PRINT("[RSSI] using owner threshold unlock=%d lock=%d\n", (int)_unlockTh, (int)_lockTh);
+        if (g_rssiLogEnabled) {
+            PRINT("[RSSI] using owner threshold unlock=%d lock=%d\n", (int)_unlockTh, (int)_lockTh);
+        }
     }
 
     // ★ v3.5: 使用可运行时配置的阈值变量 (非 #define 硬编码)；v3.36 起阈值取 _unlockTh/_lockTh（owner 或全局）
@@ -802,11 +822,10 @@ void KeyGo_ProcessStateMachine(void)
         g_unlockCounter++; // ★ v3.31 方案B: 直接 ++（计数溢出由 App 端 Math.min 钳制显示，固件保持原样避免锁车阈值响应延迟）
         g_lockCounter = 0;
         if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED) {
-            g_keyState = KSTATE_UNLOCKED;
             g_unlockCounter = 0;
             PRINT("[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
                   (int)g_filteredRSSI, (int)_unlockTh, g_cfgUnlockCount);
-            KeyGo_Unlock();
+            KeyGo_ProximityAct();   // ★ 2026-07-19: 解锁 / (ebike+骑行偏好)骑行
         }
     } else if (g_filteredRSSI < _lockTh) {
         // ★ v3.31 方案B: 同上，锁车计数器钳制在配置值，定格 N/N
@@ -907,7 +926,7 @@ void KeyGo_NotifyStatus(void)
     int16_t tC = KeyGo_ReadTemperatureC();
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"ou\":%d,\"ol\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d,\"conn\":%d,\"enc\":%d,\"t\":%d}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"ou\":%d,\"ol\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d,\"conn\":%d,\"enc\":%d,\"t\":%d,\"er\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
         (int)g_latestRSSI,
@@ -929,7 +948,8 @@ void KeyGo_NotifyStatus(void)
         (int)KEYGO_FWSEC,            // ★ v3.33: 安全协议能力版本（授权体系升级总闸门）
         (int)g_deviceConnected,      // ★ 观测性(①): 连接状态
         (int)encNow,                 // ★ 观测性(①): 加密链路(OS bonded 重连)状态
-        (int)tC);                    // ★ v3.36.1: TSENSE 内部芯片温度（摄氏度整数）
+        (int)tC,                    // ★ v3.36.1: TSENSE 内部芯片温度（摄氏度整数）
+        (int)g_ebikeProxMode);      // ★ 2026-07-19: 电瓶车靠近骑行偏好 0=仅解锁 / 1=骑行
 
 
     if (n > 0 && n < (int)sizeof(json)) {
@@ -1156,6 +1176,24 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
         return;
     }
 
+    // ★ 2026-07-19: EPRX:0 / EPRX:1 — 电瓶车「靠近进入骑行模式」偏好(固件侧持久化)。
+    //   仅 ebike 模式有效; car 模式或非 0/1 值 → DENY 拒绝(防篡改)。与 MODE 同级安全姿态。
+    if (len > 5 && upper[0] == 'E' && upper[1] == 'P' && upper[2] == 'R' && upper[3] == 'X' && upper[4] == ':') {
+        const char *val = cmd + 5;
+        if (g_deviceMode != 1) {
+            KeyGo_SendRawNotify("DENY:NOT_SUPPORTED");
+            PRINT("[EPRX] denied: not ebike mode\n");
+            return;
+        }
+        uint8_t ep;
+        if      (KEYGO_STREQ(val, "0", 1)) ep = 0;
+        else if (KEYGO_STREQ(val, "1", 1)) ep = 1;
+        else { PRINT("[EPRX] unknown value: %s\n", val); return; }
+        KeyGo_SaveEbikeProx(ep);
+        KeyGo_NotifyStatus();
+        return;
+    }
+
     // ★ Phase 2: RIDE (精确匹配 4 字节，电瓶车骑行)
     if (len == 4 && upper[0] == 'R' && upper[1] == 'I' && upper[2] == 'D' && upper[3] == 'E') {
         if (g_deviceMode == 1) {
@@ -1357,19 +1395,42 @@ void KeyGo_LoadMode(void)
     } else {
         g_deviceMode = 0;  // 默认 car
     }
-    PRINT("[MODE] loaded mode=%d (raw=%d)\n", g_deviceMode, val);
+    // ★ 2026-07-19: 同页偏移 1 读取电瓶车靠近骑行偏好(旧固件未写该字节 → 0xFF → 默认仅解锁)
+    uint8_t ep = 0xFF;
+    if (EEPROM_READ(KEYGO_MODE_ADDR + 1, &ep, 1) == 0 && ep != 0xFF) {
+        g_ebikeProxMode = (ep == 1) ? 1 : 0;
+    } else {
+        g_ebikeProxMode = 0;  // 默认仅解锁
+    }
+    PRINT("[MODE] loaded mode=%d ebikeProx=%d (raw=%d/%d)\n", g_deviceMode, g_ebikeProxMode, val, ep);
+}
+
+// ★ 2026-07-19: MODE 页布局 [0]=设备模式(car/ebike) [1]=电瓶车靠近骑行偏好(仅 ebike 生效)。
+//   旧固件只写 [0]; 新固件读 [1]=0xFF → 默认仅解锁, 向后兼容。
+static void KeyGo_PersistModePage(void)
+{
+    uint8_t buf[2];
+    buf[0] = (g_deviceMode ? 1 : 0);
+    buf[1] = (g_ebikeProxMode ? 1 : 0);
+    EEPROM_ERASE(KEYGO_MODE_ADDR, 256);   // 擦本页（MODE 独占 0x7300 页）
+    if (EEPROM_WRITE(KEYGO_MODE_ADDR, buf, 2) != 0) {
+        PRINT("[MODE] save FAILED\n");
+    } else {
+        PRINT("[MODE] saved mode=%d ebikeProx=%d\n", buf[0], buf[1]);
+    }
 }
 
 void KeyGo_SaveMode(uint8_t mode)
 {
-    uint8_t val = (mode ? 1 : 0);
-    EEPROM_ERASE(KEYGO_MODE_ADDR, 256);   // 擦本页（MODE 独占 0x7300 页）
-    if (EEPROM_WRITE(KEYGO_MODE_ADDR, &val, 1) != 0) {
-        PRINT("[MODE] save FAILED\n");
-    } else {
-        g_deviceMode = val;
-        PRINT("[MODE] saved mode=%d\n", val);
-    }
+    g_deviceMode = (mode ? 1 : 0);
+    KeyGo_PersistModePage();
+}
+
+// ★ 2026-07-19: 持久化电瓶车「靠近骑行」偏好(仅 ebike 模式由 App 经 EPRX 命令设置)。
+void KeyGo_SaveEbikeProx(uint8_t v)
+{
+    g_ebikeProxMode = (v ? 1 : 0);
+    KeyGo_PersistModePage();
 }
 
 /* ─────────────────────────────────────────────────────────────────
