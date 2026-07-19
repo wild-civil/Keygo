@@ -4,7 +4,7 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">KeyGo·钥启程</text>
-      <text class="login-subtitle">使用帮助 · v3.36.0</text>
+      <text class="login-subtitle">使用帮助 · v3.36.2</text>
     </view>
 
     <!-- ★ v3.32.2-fix: 快速上手 + 首次绑定向导 合并为一张卡 -->
@@ -216,7 +216,7 @@
 
     <!-- 底部 -->
     <view class="login-footer">
-      <text class="footer-text">BLE KeyGo v3.36.0 · 纯本地 · 安全可靠</text>
+      <text class="footer-text">BLE KeyGo v3.36.2 · 纯本地 · 安全可靠</text>
       <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>

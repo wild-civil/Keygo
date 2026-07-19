@@ -1179,7 +1179,7 @@ async function handleSetName() {
 .unlock-btn { border-color: var(--alpha-27); }
 .lock-btn { border-color: var(--orange-alpha-27); }
 .trunk-btn { border-color: var(--green-alpha-27); }
-.ride-btn { border-color: var(--accent); }
+.ride-btn { border-color: var(--alpha-27); } /* 之前用的 var(--accent)  有点太深了*/
 
 /* ===== 断开连接 ===== */
 .disconnect-section {
