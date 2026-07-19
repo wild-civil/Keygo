@@ -167,6 +167,7 @@ void KeyGo_SaveConfig(void);    // 配置变更后持久化到 DataFlash
  * ───────────────────────────────────────────────────────────────── */
 void KeyGo_LoadMode(void);                 // 上电时从 DataFlash 恢复模式
 void KeyGo_SaveMode(uint8_t mode);         // 持久化模式到 DataFlash
+void KeyGo_SaveEbikeProx(uint8_t v);       // ★ 2026-07-19: 持久化电瓶车靠近骑行偏好
 void KeyGo_Ride(void);                      // ebike: 输出「快速双击」脉冲
 void KeyGo_RidePulseHandler(void);          // SBP_GPIO_RIDE_EVT 双脉冲序列回调
 

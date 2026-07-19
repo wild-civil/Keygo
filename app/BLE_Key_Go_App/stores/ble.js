@@ -206,6 +206,12 @@ export const useBleStore = defineStore('ble', {
     noAppMode: false,
     _noAppModeDirty: false,
 
+    // ★ 2026-07-19: 电瓶车「靠近直接进入骑行模式」偏好（固件 g_ebikeProxMode 镜像）
+    //   ebikeProxMode = 用户期望态/设备实时态(0=仅解锁[默认] / 1=骑行)；_ebikeProxDirty = 自上次切换后设备是否已应用(对账自愈用)。
+    //   仅为控制面板：真正执行「靠近解锁/骑行」的是固件 RSSI 状态机，故偏好须下发并持久化到固件。
+    ebikeProxMode: 0,
+    _ebikeProxDirty: false,
+
     // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
     _lastCmdAt: 0,               // 上次命令发起时间戳(ms)，用于最小间隔节流
@@ -2902,6 +2908,28 @@ export const useBleStore = defineStore('ble', {
         }
       }
 
+      // ★ 2026-07-19: 电瓶车靠近骑行偏好 (er 字段) — 固件 g_ebikeProxMode 实时镜像。
+      //   仅 ebike 模式有意义; 对账逻辑同 noAppMode: 脏标记时若设备未对齐则重发 EPRX 自愈。
+      if (data.er !== undefined) {
+        const ep = (Number(data.er) === 1) ? 1 : 0
+        if (this._ebikeProxDirty) {
+          if (ep !== this.ebikeProxMode) {
+            console.warn('[Store] 电瓶车靠近骑行设备未对齐(er=' + ep + ',期望=' + this.ebikeProxMode + ')，重发 EPRX:' + (this.ebikeProxMode ? '1' : '0'))
+            if (this.connected && this.deviceId) {
+              // ★ 修正 2026-07-19: 对账重发也必须带 C1 签名(同 setEbikeProxMode)，否则固件 NO_SIG 拒绝 → 死循环重发。
+              this.sendCommand(this.ebikeProxMode ? 'EPRX:1' : 'EPRX:0')
+                .catch((e) => console.error('[Store] 重发 EPRX 失败:', e))
+            }
+          } else {
+            this._ebikeProxDirty = false
+            console.log('[Store] 电瓶车靠近骑行已落盘 er =', ep)
+          }
+        } else if (this.ebikeProxMode !== ep) {
+          this.ebikeProxMode = ep
+          console.log('[Store] 电瓶车靠近骑行同步设备 er =', ep, '(fwVersion=' + this.fwVersion + ')')
+        }
+      }
+
       // ★ 2026-07-10: 已绑定标志（bn 字段）—— 双保险确认绑定成功。
       //   固件 BIND 后连续发 BIND:OK + 状态包，浅通知队列下 BIND:OK 可能丢弃；
       //   但 status（含 bn，可靠送达）能确证绑定成功。仅在等待 BIND 回应时生效。
@@ -2923,6 +2951,9 @@ export const useBleStore = defineStore('ble', {
           // ★ 2026-07-16: 设备复位会清掉 g_encRequired/系统配对码，本地期望态一并归零，避免对账时误把无 App 模式重新打开
           this.noAppMode = false
           this._noAppModeDirty = false
+          // ★ 2026-07-19: 设备复位同样清掉 g_ebikeProxMode → 本地期望态一并归零，避免对账误重开骑行偏好
+          this.ebikeProxMode = 0
+          this._ebikeProxDirty = false
           // ★ 2026-07-14 修复：设备已复位(bn=0)，_finalizeConnection 的配置推送可能抢跑失败。
           //   重置去重标志，使后续重绑成功(BIND:OK/AUTH:OK)时 _syncConfigToDevice 能重新推送，
           //   避免 _configPushedThisConn 永久为 true 导致"确认次数不一致"（uc/lc 不匹配）。
@@ -4150,6 +4181,26 @@ export const useBleStore = defineStore('ble', {
       enqueueWrite(() => rawSendCommand(this.deviceId, on ? 'ENCRYPT:1' : 'ENCRYPT:0'))
         .then(() => console.log('[Store] 无 App 模式已下发 ENCRYPT:' + (on ? '1' : '0')))
         .catch((e) => console.error('[Store] 下发 ENCRYPT 失败:', e))
+    },
+
+    // ★ 2026-07-19: 设置电瓶车「靠近直接进入骑行模式」(固件侧持久化, 仅 ebike 模式有效)。
+    //   开启: 经写队列串行化下发 EPRX:1 → 固件 g_ebikeProxMode=1 → 靠近时状态机调 KeyGo_Ride()。
+    //   关闭: 下发 EPRX:0 → 回到仅解锁(=现状=安全默认)。
+    //   置 _ebikeProxDirty 标记, 连接对账自愈(仿 noAppMode); car 模式 UI 隐藏且下发会被固件 DENY 兜底。
+    setEbikeProxMode(v) {
+      const on = !!v
+      this.ebikeProxMode = on ? 1 : 0
+      this._ebikeProxDirty = true
+      if (!this.connected || !this.deviceId) {
+        console.warn('[Store] setEbikeProxMode: 未连接，仅记录期望态，连上后由 status.er 对账下发')
+        return
+      }
+      // ★ 修正 2026-07-19: EPRX 走 KeyGo_HandleCommand(签名校验之后)，必须带 C1 签名，
+      //   故走 sendCommand(自动 _signCommand) 而非 rawSendCommand(裸发会被固件 CMD:FAIL:NO_SIG 拒绝)。
+      //   与 setDeviceMode('MODE:ebike') 同源；未鉴权会 throw NOT_BOUND，由 .catch 兜底、对账自愈。
+      this.sendCommand(on ? 'EPRX:1' : 'EPRX:0')
+        .then(() => console.log('[Store] 电瓶车靠近骑行已下发 EPRX:' + (on ? '1' : '0')))
+        .catch((e) => console.error('[Store] 下发 EPRX 失败:', e))
     },
 
     // ★ 方案1 扩展: 设置系统配对码(OS SMP passkey)，与绑定码独立，仅服务于无 App 模式。
