@@ -209,8 +209,13 @@ export const useBleStore = defineStore('ble', {
     // ★ 2026-07-19: 电瓶车「靠近直接进入骑行模式」偏好（固件 g_ebikeProxMode 镜像）
     //   ebikeProxMode = 用户期望态/设备实时态(0=仅解锁[默认] / 1=骑行)；_ebikeProxDirty = 自上次切换后设备是否已应用(对账自愈用)。
     //   仅为控制面板：真正执行「靠近解锁/骑行」的是固件 RSSI 状态机，故偏好须下发并持久化到固件。
-    ebikeProxMode: 0,
-    _ebikeProxDirty: false,
+      ebikeProxMode: 0,
+      _ebikeProxDirty: false,
+      // ★ 2026-07-19 P1: RSSISET 去重缓存——记录上次成功下发的 per-phone 阈值(unlock/lock)。
+      //   阈值已持久化于设备 Flash，未变化时跳过重复写（省一次 GATT 写 + 消除 AUTH 宽限期内 10007 瞬时窗口日志）。
+      //   仅在设备复位(_forgetDeviceKey / bn=0)时清零，强制重绑后首推；重连不重置(per-phone 存 Flash 不丢)。
+      _lastPushedUnlock: null,
+      _lastPushedLock: null,
 
     // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
@@ -3381,6 +3386,12 @@ export const useBleStore = defineStore('ble', {
         }
         // ★ 本次控制命令未执行（会话失效触发重认证握手）→ 让 sendCommand reject 为 AUTH_REQ，提示稍候重试
         if (B._cmdWaiter) { const w = B._cmdWaiter; B._cmdWaiter = null; w({ code: 'AUTH_REQ', msg: ERROR_MSGS.AUTH_REQ }) }
+      } else if (text.startsWith('DENY:')) {
+        // ★ 2026-07-19 P2: 通用 DENY 兜底(如 EPRX 在 car 模式回 DENY:NOT_SUPPORTED)。
+        //   此前无此分支 → DENY 被静默吞掉、B._cmdWaiter 不触发 → sendCommand 走超时误判成功。
+        //   现让本次控制命令 reject，使调用方(如 setEbikeProxMode)能感知 DENY 并停止重发/回退 UI。
+        const reason = (text.slice('DENY:'.length).replace(/[^A-Z0-9_]/g, '') || 'DENIED')
+        if (B._cmdWaiter) { const w = B._cmdWaiter; B._cmdWaiter = null; w({ code: reason, msg: ERROR_MSGS[reason] || ('命令被拒绝: ' + reason) }) }
       } else if (text.startsWith('RESET:ARM')) {
         // ★ 长按恢复出厂（隐藏按键 PB22/BOOT）：开始按住累计 5s 倒计时
         uni.showToast({ title: '保持按住以恢复出厂…', icon: 'none', duration: 2000 })
@@ -3581,8 +3592,17 @@ export const useBleStore = defineStore('ble', {
      */
     _pushRssiThresholds() {
       if (this.fwSec < 2 || !this.deviceId || !this.connected) return
-      const cmd = 'RSSISET:' + this.unlockThreshold + ':' + this.lockThreshold
-      enqueueWrite(() => rawSendCommand(this.deviceId, cmd)).catch(() => {})
+      const u = this.unlockThreshold, l = this.lockThreshold
+      // ★ 2026-07-19 P1: 去重——与上次成功下发的 per-phone 阈值相同则跳过。
+      //   阈值已持久化于设备 Flash，无需重复写；既省一次 GATT 写，也消除 AUTH 宽限期内 10007 瞬时窗口噪声。
+      if (this._lastPushedUnlock === u && this._lastPushedLock === l) {
+        console.log('[Store] RSSISET 跳过(阈值未变): ' + u + ':' + l)
+        return
+      }
+      const cmd = 'RSSISET:' + u + ':' + l
+      enqueueWrite(() => rawSendCommand(this.deviceId, cmd))
+        .then(() => { this._lastPushedUnlock = u; this._lastPushedLock = l })
+        .catch(() => {})
     },
 
     /**
@@ -3598,6 +3618,8 @@ export const useBleStore = defineStore('ble', {
       B._bindKey = null
       this.isBound = false
       this.sessionAuthed = false
+      this._lastPushedUnlock = null   // ★ 2026-07-19 P1: 设备已复位，per-phone 阈值失效，下次 AUTH:OK 强制重推 RSSISET
+      this._lastPushedLock = null
       this.deviceBound = false
       B._sessionSalt = null; B._cmdSeq = 0
       if (this.serialNumber) this._clearBindKey(this.serialNumber)
@@ -4200,7 +4222,16 @@ export const useBleStore = defineStore('ble', {
       //   与 setDeviceMode('MODE:ebike') 同源；未鉴权会 throw NOT_BOUND，由 .catch 兜底、对账自愈。
       this.sendCommand(on ? 'EPRX:1' : 'EPRX:0')
         .then(() => console.log('[Store] 电瓶车靠近骑行已下发 EPRX:' + (on ? '1' : '0')))
-        .catch((e) => console.error('[Store] 下发 EPRX 失败:', e))
+        .catch((e) => {
+          // ★ 2026-07-19 P2: 固件 DENY(如 car 模式回 NOT_SUPPORTED) → 命令未执行。
+          //   清 _ebikeProxDirty 终止对账重发；随后 status.er 对账的 else-if 分支会把 UI 回退到设备真实态。
+          if (e && e.code && (e.code === 'NOT_SUPPORTED' || String(e.code).indexOf('NOT_SUPPORT') >= 0)) {
+            this._ebikeProxDirty = false
+            console.warn('[Store] 电瓶车靠近骑行被固件 DENY(不支持)，停止重发并回退 UI 到设备真实状态')
+          } else {
+            console.error('[Store] 下发 EPRX 失败:', e)
+          }
+        })
     },
 
     // ★ 方案1 扩展: 设置系统配对码(OS SMP passkey)，与绑定码独立，仅服务于无 App 模式。
