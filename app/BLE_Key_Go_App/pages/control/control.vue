@@ -143,13 +143,15 @@
         <view class="config-desc" style="margin-top:10rpx;">模式存于设备，切换后重启仍保持；首次使用建议在「帮助」页了解二者差异。</view>
       </view>
 
-      <!-- ★ 2026-07-19: 电瓶车「靠近直接进入骑行模式」偏好（仅电瓶车模式可见）。
+      <!-- ★ 2026-07-19 / v3.36.2: 电瓶车「靠近直接进入骑行模式」偏好（仅电瓶车模式可见）。
            固件 RSSI 状态机驱动「靠近自动解锁」；开启后靠近即通电骑行(而非仅解锁)。
-           偏好存固件 DataFlash(经 EPRX 命令下发)，无App模式(手机 App 不在场)也生效。详见设计文档。 -->
+           偏好存固件 DataFlash(经 EPRX 命令下发)，无App模式(手机 App 不在场)也生效。详见设计文档。
+           v3.36.2 起下方「仅解锁 / 直接骑行」双选项由纵向改为横向并排（更贴合电瓶车双档直觉）。 -->
       <view class="prox-ride-section" v-if="bleStore.deviceMode === 'ebike'" style="margin-top:30rpx;">
         <view class="section-title">🛵 靠近进入模式（电瓶车专属）</view>
         <view class="config-desc">靠近解锁由设备按信号强度自动触发。选择靠近时设备的行为：</view>
-        <view class="mode-cards">
+        <!-- ★ v3.36.2: 横向排布容器（mode-cards--row）；设备模式切换卡保持纵向不受影响 -->
+        <view class="mode-cards mode-cards--row">
           <view class="mode-card"
             :class="{ active: proxRideVisual === 0 }"
             @tap="onToggleProxRide(0)">
@@ -606,6 +608,15 @@ async function onToggleProxRide(v) {
   display: flex;
   flex-direction: column;
   gap: 16rpx;
+}
+
+/* ★ v3.36.2 (2026-07-19): 电瓶车「靠近进入模式」双选项横向并排（各占 50%）；
+   设备模式切换卡(mode-section 内 .mode-cards)仍保持纵向，故单独加修饰类而非改全局 .mode-cards。 */
+.mode-cards--row {
+  flex-direction: row;
+}
+.mode-cards--row .mode-card {
+  flex: 1;
 }
 
 .mode-card {

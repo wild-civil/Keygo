@@ -19,8 +19,8 @@
 - **开发分支**：
   - `workbuddy`（当前所在）：基于 `main`，承载本期「优化逻辑 + 美化 UI」增量（手动模式重启自动验证绑定 / 禁用断连自动锁 UI / 绑定页版本文案 / 主按钮禁用态美化 / 双模式切换入口迁移到控制页）。
   - `codex`：基于 `main`，承载 v3.32.x 安全加固（先配对后 BIND、HMAC 挑战应答恢复）与 Codex 接手探索。
-- 固件 `KEYGO_FW_VERSION`：`3.36.1`（与 App 版本号一致，无需重烧）。
-- App 版本标注：`v3.36.1`（与固件一致；见 `stores/ble.js` 的 `APP_VERSION` 常量）。
+- 固件 `KEYGO_FW_VERSION`：`3.36.2`（与 App 版本号一致，无需重烧）。
+- App 版本标注：`v3.36.2`（与固件一致；见 `stores/ble.js` 的 `APP_VERSION` 常量）。
 - 协议能力：`fwsec=2`（授权体系 v1：per-phone 身份 + RSSI 阈值跟随）。
 - 本版状态：**【v3.36 授权体系 v1 落地：per-phone 密钥 + RSSI 阈值跟随 + 无App模式(设备级舒适进入)】**
 - 下阶段准备优化：**Phase 4: GATT 加密门控（重做）；UNBIND 联动删 SMP 配对；多管理员 / 临时授权**
@@ -191,7 +191,7 @@ connectDevice() → 成功后停扫描
 |------|------|------|------|----------|
 | `0000FF00-...` | Service | — | KeyGo 主服务 | — |
 | `0000FF01-...` | Write | App→设备 | 配置下发 | `unlock=-45 lock=-65 uc=3 lc=5 interval=500 kf_r=15.0 autolock=1 mode=car`（`autolock=0` 关闭固件 RSSI 自动锁；`mode=car|ebike` 切换双模式） |
-| `0000FF02-...` | Read, Notify | 设备→App | 状态上报 | JSON：`{"c":1,"st":"LOCKED","r":-52,"f":-52,"b":85,"t":32.5,"d2":"","cd":8000,"kr":15,"al":1,"bn":1,"v":"3.36.1","m":0,"uc":3,"lc":5,"ucnt":1,"lcnt":0,"th":1,"ou":-45,"ol":-65,"fwsec":2}` |
+| `0000FF02-...` | Read, Notify | 设备→App | 状态上报 | JSON：`{"c":1,"st":"LOCKED","r":-52,"f":-52,"b":85,"t":32.5,"d2":"","cd":8000,"kr":15,"al":1,"bn":1,"v":"3.36.2","m":0,"uc":3,"lc":5,"ucnt":1,"lcnt":0,"th":1,"ou":-45,"ol":-65,"fwsec":2}` |
 | `0000FF03-...` | Write | App→设备 | 控制 / 绑定命令 | `UNLOCK` / `LOCK` / `TRUNK` / `RIDE` / `BIND:code\0phoneIdHex` / `AUTH:phoneIdHex:hmac` / `SETCODE:new` / `UNBIND` / `RSSISET:unlock:lock` / `STATUS` / `MODE:car|ebike` |
 | `0000FF04-...` | Read | 设备→App | 设备序列号（永久唯一） | ASCII 字符串，配对绑定用 |
 

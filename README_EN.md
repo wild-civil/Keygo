@@ -13,7 +13,7 @@
 | Name | KeyGo · Bluetooth Smart Car Key |
 | Form | Phone App (uni-app, Android) + Lock firmware (CH582M) |
 | Goal | Replace the physical car key with a phone: RSSI passive entry + real binding auth |
-| Firmware version | **3.36.1** |
+| Firmware version | **3.36.2** |
 | Auth system | v1 (per-phone identity + RSSI threshold follow, `fwsec=2`) |
 | Dual mode | Car (key/trunk) / E-bike (key/ride) |
 | Reconnect | Comfort / Turbo / Manual three tiers |
@@ -64,7 +64,7 @@ KeyGo is built around three principles:
 | Service | Perm | Dir | Use | Notes |
 | --- | --- | --- | --- | --- |
 | `0000FF01-...` | Write | App→Dev | Config push | `unlock=-45 lock=-65 uc=3 lc=5 interval=500 kf_r=15.0 autolock=1 mode=car` (`autolock=0` disables firmware RSSI auto-lock; `mode=car\|ebike` switches dual mode) |
-| `0000FF02-...` | Read, Notify | Dev→App | Status report | JSON: `{"c":1,"st":"LOCKED","r":-52,"f":-52,"b":85,"t":32.5,"d2":"","cd":8000,"kr":15,"al":1,"bn":1,"v":"3.36.1","m":0,"uc":3,"lc":5,"ucnt":1,"lcnt":0,"th":1,"ou":-45,"ol":-65,"fwsec":2}` |
+| `0000FF02-...` | Read, Notify | Dev→App | Status report | JSON: `{"c":1,"st":"LOCKED","r":-52,"f":-52,"b":85,"t":32.5,"d2":"","cd":8000,"kr":15,"al":1,"bn":1,"v":"3.36.2","m":0,"uc":3,"lc":5,"ucnt":1,"lcnt":0,"th":1,"ou":-45,"ol":-65,"fwsec":2}` |
 | `0000FF03-...` | Write | App→Dev | Control / bind commands | `UNLOCK` / `LOCK` / `TRUNK` / `RIDE` / `BIND:code\0phoneIdHex` / `AUTH:phoneIdHex:hmac` / `SETCODE:new` / `UNBIND` / `RSSISET:unlock:lock` / `STATUS` / `MODE:car\|ebike` |
 | `0000FF04-...` | Read | Dev→App | Device info | MAC / version / bind state |
 
@@ -86,7 +86,7 @@ KeyGo is built around three principles:
 | `kr` | Kalman R (filter strength) | `15` |
 | `al` | Auto-lock enable state | `1`=on (Comfort/Turbo) / `0`=off (Manual) |
 | `bn` | Bound flag | `1`=bound / `0`=unbound |
-| `v` | Firmware version | `3.36.1` |
+| `v` | Firmware version | `3.36.2` |
 | `m` | Device mode | `0`=car / `1`=e-bike |
 | `uc` | Device unlock-confirm count config (echo to verify push landed) | `3` |
 | `lc` | Device lock-confirm count config | `5` |

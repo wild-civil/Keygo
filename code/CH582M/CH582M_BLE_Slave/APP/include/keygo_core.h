@@ -36,7 +36,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.1"
+#define KEYGO_FW_VERSION   "3.36.2"   /* ★ v3.36.2 (2026-07-19): 配套本次发布——App 端「靠近进入模式」横向排布 + 电瓶车 EPRX 偏好 P1-P3 优化 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

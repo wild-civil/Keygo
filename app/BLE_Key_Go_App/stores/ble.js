@@ -99,7 +99,7 @@ import {
 //   自定义码统一走 SETCODE 通道（先 AUTH 证明持有旧码）。
 //   继承 v3.33.0/3.33.1：手动模式前台自动连 + fwsec 能力协商 + T4 回推修复 + AUTH 握手互斥锁 +
 //   长按恢复出厂 + FF01 长写重组 + 配置下发去重 + 重绑信任态保持 + 恢复出厂绑码核验 + 复位后回首绑。
-export const APP_VERSION = 'v3.33.4'
+export const APP_VERSION = 'v3.36.2'   // ★ v3.36.2 (2026-07-19): 与固件 KEYGO_FW_VERSION 对齐；此前滞后于固件（3.33.4），本次一并校准
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 原生前台服务 kill-switch（长期安全开关，非临时止血）：
