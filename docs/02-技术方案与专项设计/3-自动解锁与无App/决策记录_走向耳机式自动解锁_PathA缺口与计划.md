@@ -137,3 +137,24 @@ bond IRK 在 NV 按 `bondIdx` 存：`devIRKNvID(bondIdx) = calcNvID(bondIdx, GAP
 **注意**：静默重连不触发 `pairStateCB`，认 owner 必须挂在 `LINK_ENCRYPTED` 查询路径（不要指望配对回调）。IRK 解析是只读 NV 的纯函数，不影响安全门控（门控仍是 OS 加密）。
 
 **真机验收**：干净 OS 关前台服务验证自动重连；多台已绑手机分别走近，验 per-phone 阈值随 owner 切换；非法/未绑手机连上走全局阈值。
+
+### 8.8 方案 E（LTK 指纹，Trae 提议，已核实可行）与组合策略（2026-07-21）
+
+**Trae 对照（参考其分析）**：路线 A 用 IRK/栈 bond 身份做锚；方案 E 用 LTK 指纹（自取当前链路 LTK、遍历本表比对）。两者根本思路一致——"绑定时建 owner↔bond 映射，重连时反查 owner 设 `s_authedOwnerIdx`"。
+
+**核实 Trae 的关键断言（均成立）**：
+- `linkDB_PerformFunc( pfnPerformFuncCB_t )`（JT32，`CH58xBLE_ROM.h:2988`）：对每条连接调回调，签名 `void (*)(linkDBItem_t*)`（`:1321`）。KEYGO 仅 1 连接，直接拿本连接项。
+- `linkDBItem_t.pEncParams`（`encParams_t*`, `:1312`）→ `encParams_t.ltk[KEYLEN]`（`:1284`）即当前链路 LTK。**注意：无 `linkDB_Find` 公开 API**，取本连接项须用 `linkDB_PerformFunc`（对端 addr 已由 `gapEstLinkReqEvent_t` 提供，但取 LTK 仍需 PerformFunc）。
+- LTK 每 bond 唯一且重连稳定 → 存 `ltkFingerprint[4]`（LTK 前 4 字节）可 O(bondCount) 比对。
+
+**路线 A 与方案 E 的真实差异（修正"IRK 未验证"前提）**：
+- 路线 A 已在 2026-07-21 验证通过（**非开放问题**）：对端 RPA（`gapEstLinkReqEvent_t.devAddr`）+ `GAP_ResolvePrivateAddr`(JT75) + `tmos_snv_read(devIRKNvID)` 自解，无需栈给 bondIdx。
+- **方案 E 的独有优势 = 地址类型无关**：若对端手机用**公共/静态地址**（不分发 IRK、不走 RPA），路线 A 的 IRK 解析无解；而 LTK 每 bond 必有，方案 E 仍可命中。故方案 E 是更通用的兜底。
+- 两者复杂度同为 O(bondCount)，均只读 NV、不影响安全门控（门控仍是 OS 加密）。
+
+**组合策略（推荐）**：
+1. `bondEntry_t` 同时存 `devIrk[KEYLEN]`（路线 A）与 `ltkFingerprint[4]`（方案 E）；绑定时一并写入（`pairStateCB(BOND_SAVED)` 处：`pEncParams->ltk` 取指纹 + `tmos_snv_read(devIRKNvID)` 取 IRK）。
+2. `LINK_ENCRYPTED` 上升沿：① 先试方案 E——`linkDB_PerformFunc` 取 `pEncParams->ltk` 指纹，遍历本表命中即设 `s_authedOwnerIdx`；② 方案 E 未中再试路线 A——对端 RPA + `GAP_ResolvePrivateAddr` 反解；③ 都不中→全局阈值兜底。
+3. 升级兼容：旧手机无 `ltkFingerprint`/`devIrk` → 自动走全局，不失能；升级后首次 BIND/AUTH 自动补写。
+
+**结论**：路线 A 与方案 E 互不冲突、可组合；方案 E（LTK 指纹）因地址类型无关，建议作为主路径，路线 A（IRK）作补充。取本连接项用 `linkDB_PerformFunc`（`linkDB_Find` 不存在）。
