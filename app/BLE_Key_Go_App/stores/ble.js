@@ -333,6 +333,13 @@ export const useBleStore = defineStore('ble', {
       return Math.max(0, Math.min(100, Math.round(pct)))
     },
 
+    // ★ 2026-07-22: 已知设备持久记忆，仅用于"重新连接"按钮/系统连接复用依据。
+    //   与 ble_device_id（自动重连记忆）刻意分离：手动断开只删 ble_device_id（不自动冷启重连），
+    //   本 key 始终保留 → 断连后/杀App后仍可一键接管，且绝不被自动重连路径读取（自动路径只读 ble_device_id）。
+    knownDeviceId() {
+      return this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
+    },
+
     // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
     // ★ v3.25.2: 增加 ±xxm 误差显示，基于 watchPosition 系统报告的 accuracy
     geofenceDistanceText: (state) => {
@@ -2317,6 +2324,14 @@ export const useBleStore = defineStore('ble', {
 
       try { await initBluetooth() } catch {}
 
+      // ★ 2026-07-22 问题①: 已配对设备在无App模式被 OS 自动重连占用时停广播, BLE 扫描扫不到。
+      //   进扫描页先查系统级已连接列表, 命中已知设备(MAC)直接复用 GATT 连接, 跳过扫描。
+      //   无已知设备 / 系统未占用 / 查询失败 → 照常扫描（_reuseSystemConnectedDevice 内部已兜底）。
+      if (await this._reuseSystemConnectedDevice()) {
+        this.scanning = false
+        return []
+      }
+
       // ★ 防止快速切换导致的交叉污染：递增扫描序列号
       this._scanSerial = (this._scanSerial || 0) + 1
       const mySerial = this._scanSerial
@@ -2355,6 +2370,42 @@ export const useBleStore = defineStore('ble', {
     async stopScanDevices() {
       this.scanning = false
       await stopScan()
+    },
+
+    /**
+     * ★ 2026-07-22 (问题① — 扫描页扫不到已配对设备)：扫描页进入时，先查系统级已连接列表。
+     *   无App模式下，已配对手机 OS 会在设备进范围时自动加密重连 → 固件作为单连接从机停广播
+     *   → App 的 BLE 扫描扫不到（这是 BLE 单连接物理事实，非 bug）。此时系统蓝牙管理器里
+     *   本设备其实已处于 connected，直接复用该 GATT 连接即可，跳过扫描，避免"已配对却扫不到"
+     *   的体验问题（与蓝牙耳机/手表进范围自动重连同理）。
+     *   @returns {Promise<boolean>} true=已复用系统连接（调用方应跳过扫描）
+     */
+    async _reuseSystemConnectedDevice() {
+      if (this.connected) return false                  // 已连则无需复用
+      if (this.reconnectMode === 'dormant') return false // ★ 2026-07-22: 用户手动断开后不自动复用系统连接，需其主动点"重新连接"按钮
+      const knownId = this.deviceId || this.lastDeviceId
+      if (!knownId) return false                         // 无已知设备 → 照常扫描
+      try {
+        const list = await new Promise((resolve, reject) => {
+          uni.getConnectedBluetoothDevices({
+            services: [BLE_CONFIG.serviceUUID],
+            success: (res) => resolve(res.devices || []),
+            fail: (err) => reject(err)
+          })
+        })
+        const hit = (list || []).find(d => d.deviceId === knownId)
+        if (!hit) return false
+        console.log('[Store] 系统已连接命中本设备(无App OS重连占用), 直接复用跳过扫描:', knownId)
+        this.deviceId = knownId
+        this.deviceName = hit.name || this.deviceName || 'KeyGo'
+        this._connFinalizedFor = null                   // 允许本连接经 _finalizeConnection 重新初始化一次
+        // 复用系统 GATT 链路：重订阅 FF02 + 读序列号 + 自动 AUTH（_finalizeConnection 幂等且自愈）
+        this._finalizeConnection(knownId)
+        return true
+      } catch (e) {
+        console.warn('[Store] 系统连接复用查询失败，回退普通扫描:', e?.message || e)
+        return false
+      }
     },
 
     // ==================== 连接 ====================
@@ -2432,6 +2483,8 @@ export const useBleStore = defineStore('ble', {
         }
 
         uni.setStorageSync('ble_device_id', deviceId)
+        // ★ 2026-07-22: 同步持久化"已知设备"记忆（手动断开时保留，用于"重新连接"按钮）
+        uni.setStorageSync('ble_last_device_id', deviceId)
 
         // ★ v3.6: 全局监听器已处理连接状态变化和特征值数据（不再重复注册）
 

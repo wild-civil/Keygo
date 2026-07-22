@@ -3,7 +3,9 @@
     <!-- ★ 连接状态提示 -->
     <view class="conn-warning" v-if="!bleStore.connected">
       <text v-if="bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused'">🔄 设备离线，正在自动重连中...</text>
-      <text v-else>⚠️ 请先在「连接」页面连接设备</text>
+      <text v-else>⚠️ 设备未连接</text>
+      <!-- ★ 2026-07-22: 手动断开后"重新连接"按钮（已知设备记忆驱动，OS 占用也能接管 ACL） -->
+      <button v-if="bleStore.knownDeviceId" style="background:var(--accent,#4a90d9);color:#fff;border:none;border-radius:12rpx;padding:12rpx 28rpx;font-size:26rpx;margin-top:16rpx;" @tap="handleReconnect">重新连接</button>
     </view>
 
     <template v-else>
@@ -250,6 +252,21 @@ async function handleStatus() {
     toast.info('状态已刷新')
   } catch {
     toast.error('刷新失败')
+  }
+}
+
+// ★ 2026-07-22: 手动断开后一键重新连接（OS 已占用同 ACL 时也能接管，connect 不受 dormant 门控）
+async function handleReconnect() {
+  const id = bleStore.knownDeviceId
+  if (!id) return
+  uni.showLoading({ title: '连接中...', mask: true })
+  try {
+    await bleStore.connect(id, bleStore.deviceName || 'KeyGo')
+    uni.hideLoading()
+    toast.success('连接成功')
+  } catch (e) {
+    uni.hideLoading()
+    toast.error('连接失败，请重试')
   }
 }
 

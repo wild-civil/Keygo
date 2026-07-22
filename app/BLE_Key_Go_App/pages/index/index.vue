@@ -167,6 +167,15 @@
       </view>
     </view>
 
+    <!-- ★ 2026-07-22: 手动断开后"重新连接"入口（已知设备记忆驱动，OS 占用也能接管 ACL） -->
+    <view v-if="!bleStore.connected && bleStore.knownDeviceId" style="display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:16rpx;padding:24rpx;margin:0 24rpx 16rpx;box-shadow:0 4rpx 16rpx rgba(0,0,0,.06);">
+      <view style="display:flex;flex-direction:column;">
+        <text style="font-size:24rpx;color:#888;">已知设备</text>
+        <text style="font-size:26rpx;color:#333;margin-top:4rpx;">{{ bleStore.knownDeviceId }}</text>
+      </view>
+      <button style="background:var(--accent,#4a90d9);color:#fff;border:none;border-radius:12rpx;padding:12rpx 28rpx;font-size:28rpx;margin:0;" @tap="handleReconnect">重新连接</button>
+    </view>
+
     <!-- 设备扫描区域 -->
     <view class="section" v-if="!bleStore.connected">
       <view class="section-header">
@@ -574,11 +583,28 @@ async function handleDisconnect() {
   const ok = await bleStore.disconnect()
   uni.hideLoading()
   if (ok) {
+    // 只删"自动重连记忆"，保留 ble_last_device_id（knownDeviceId 来源）→ 断开后不自动冷启重连，但按钮仍可一键接管
     uni.removeStorageSync('ble_device_id')
     bleStore.devices = []
     toast.info('已断开连接')
   } else {
     toast.error('断开失败，请重试')
+  }
+}
+
+// ★ 2026-07-22: 手动断开后一键重新连接（OS 占用时也能接管 ACL；connect 会清回 active 并重写 ble_device_id）
+async function handleReconnect() {
+  const id = bleStore.knownDeviceId
+  if (!id) return
+  uni.showLoading({ title: '连接中...', mask: true })
+  try {
+    await bleStore.connect(id, bleStore.deviceName || 'KeyGo')
+    uni.hideLoading()
+    toast.success('连接成功')
+    bleStore.devices = []
+  } catch (e) {
+    uni.hideLoading()
+    toast.error('连接失败，请重试')
   }
 }
 
