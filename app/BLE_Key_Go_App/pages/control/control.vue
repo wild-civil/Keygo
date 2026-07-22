@@ -10,12 +10,21 @@
           <text class="reconnect-label">已知设备</text>
           <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
           <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+          <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
         </view>
         <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
       </view>
     </view>
 
     <template v-else>
+      <!-- ★ v3.36.3-fix5: 连接态设备名条(显示 customDeviceName) + 已命名徽章 -->
+      <view class="device-tag" v-if="bleStore.deviceId">
+        <view class="device-tag-text">
+          <text class="device-tag-name">{{ bleStore.connectedDisplayName }}</text>
+          <text class="device-tag-mac">{{ bleStore.deviceId }}</text>
+        </view>
+        <text v-if="bleStore.customDeviceName" class="device-alias-tag">已命名</text>
+      </view>
       <!-- ★ v3.15-#21: Status Notify 过期警告 — 设备连接中但推送超时（静默断连） -->
       <view class="stale-warning" v-if="bleStore.statusStale">
         <text>⚠️ 设备状态已过期，连接可能已中断</text>
@@ -377,6 +386,29 @@ async function onToggleProxRide(v) {
   font-size: 24rpx;
 }
 .reconnect-btn:active { opacity: 0.7; }
+
+/* ★ v3.36.3-fix5: 「已命名」徽章（设备已设自定义名），重连卡/连接态设备名条通用 */
+.device-alias-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  font-size: 18rpx;
+  color: var(--accent);
+  background: var(--alpha-12);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+.device-tag {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  padding: 20rpx 24rpx;
+  margin-bottom: 20rpx;
+}
+.device-tag-text { display: flex; flex-direction: column; min-width: 0; }
+.device-tag-name { font-size: 30rpx; color: var(--text-primary); font-weight: 600; }
+.device-tag-mac { font-size: 22rpx; color: var(--text-muted); margin-top: 4rpx; }
 
 
 /* ★ v3.15-#21: Status 过期警告 — 比断连警告更严重（无声中断） */

@@ -173,6 +173,7 @@
         <text class="reconnect-label">已知设备</text>
         <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
         <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+        <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
       </view>
       <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
     </view>
@@ -195,9 +196,10 @@
         <view class="device-item" v-for="device in bleStore.devices" :key="device.deviceId"
           :class="{ active: bleStore.deviceId === device.deviceId }" @tap="handleConnect(device)">
           <view class="device-info">
-            <text class="device-name">{{ device.name }}</text>
+            <text class="device-name">{{ deviceDisplayName(device) }}</text>
             <text class="device-id">{{ device.deviceId }}</text>
             <text v-if="device.nameIsFallback" class="device-occupied-tag">⚠ 设备占用中</text>
+            <text v-if="bleStore.customNameForMac(device.deviceId)" class="device-alias-tag">已命名</text>
           </view>
           <view class="device-rssi">
             <text class="device-rssi-val">{{ device.RSSI }}</text>
@@ -609,6 +611,13 @@ async function handleReconnect() {
   }
 }
 
+// ★ v3.36.3-fix5: 扫描列表展示名，优先本机自定义名(customDeviceName 持久化副本) > 设备广播名(device.name)
+function deviceDisplayName(device) {
+  const custom = bleStore.customNameForMac(device.deviceId)
+  if (custom) return custom
+  return device.name || 'KeyGo'
+}
+
 // ==================== 车辆控制 ====================
 
 async function handleUnlock() {
@@ -684,6 +693,10 @@ const thirdAction = computed(() => {
 function showNameDialog() {
   if (!bleStore.connected) {
     toast.info('请先连接设备')
+    return
+  }
+  if (!bleStore.isBound) {
+    toast.info('请先绑定设备后再设置名称')
     return
   }
   pwModal.mode = 'setName'
@@ -1167,6 +1180,17 @@ async function handleSetName() {
 
 .device-rssi-unit { font-size: 18rpx; color: var(--text-muted); }
 .device-arrow { font-size: 36rpx; color: var(--text-muted); }
+
+/* ★ v3.36.3-fix5: 「已命名」徽章（设备已设自定义名），扫描列表/重连卡通用 */
+.device-alias-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  font-size: 18rpx;
+  color: var(--accent);
+  background: var(--alpha-12);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
 
 .empty-state {
   display: flex;

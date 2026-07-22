@@ -278,6 +278,7 @@ export const useBleStore = defineStore('ble', {
     _reconnectGuard: 0,            // 重连会话锁，蓝牙关闭时递增
     _bondingInProgress: false,     // ★ 2026-07-16: 配对(_triggerBond)期间断开 GATT 让 OS 配对，抑制 store 自动重连
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
+    _customNamesByMac: (() => { try { return uni.getStorageSync('ble_device_custom_names') || {} } catch (e) { return {} } })(), // ★ v3.36.3-fix5: 按 MAC 索引的本机自定义名副本(由 customDeviceName 持久化而来)，供断连后的扫描列表/重连卡统一显示
     /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
      *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
     _configDirty: false,
@@ -340,12 +341,29 @@ export const useBleStore = defineStore('ble', {
       return this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
     },
 
-    // ★ 2026-07-22: 已知设备展示名，与扫描列表完全一致（KeyGo- + MAC 末6位），便于识别
+    // ★ v3.36.3-fix5: 已知设备展示名，优先用本机为该 MAC 存的自定义名(customDeviceName 持久化副本)，否则回退生成名 KeyGo-XXXXXX
     knownDeviceName() {
       const id = this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
       if (!id) return ''
+      const custom = this.customNameForMac(id)
+      if (custom) return custom
       const clean = id.replace(/:/g, '').toUpperCase()
       return 'KeyGo-' + clean.slice(-6)
+    },
+
+    // ★ v3.36.3-fix5: 按 MAC 查本机自定义名(由 customDeviceName 持久化而来)；返回函数供模板传参，供扫描列表/重连卡/"已命名"徽章统一使用
+    customNameForMac: (state) => (mac) => {
+      if (!mac) return ''
+      const key = mac.replace(/:/g, '').toUpperCase()
+      return state._customNamesByMac[key] || ''
+    },
+
+    // ★ v3.36.3-fix5: 连接态展示名，优先 customDeviceName(用户设置) > deviceName(生成名 KeyGo-XXXXXX)
+    connectedDisplayName() {
+      if (this.customDeviceName) return this.customDeviceName
+      if (this.deviceName) return this.deviceName
+      if (this.deviceId) return 'KeyGo-' + this.deviceId.replace(/:/g, '').toUpperCase().slice(-6)
+      return ''
     },
 
     // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
@@ -2283,6 +2301,25 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.36.3-fix5: 把自定义名按 MAC 持久化一份，供断连后的扫描列表/重连卡/"已命名"徽章显示
+     * @param {string} mac 设备 MAC
+     * @param {string} name 自定义名
+     */
+    _seedCustomNameByMac(mac, name) {
+      if (!mac || !name) return
+      const key = mac.replace(/:/g, '').toUpperCase()
+      if (this._customNamesByMac[key] === name) return
+      const next = { ...this._customNamesByMac }
+      next[key] = name
+      this._customNamesByMac = next
+      try {
+        uni.setStorageSync('ble_device_custom_names', next)
+      } catch (e) {
+        console.warn('[Store] 按 MAC 持久化设备名失败:', e)
+      }
+    },
+
+    /**
      * ★ v3.8: 根据序列号恢复设备自定义名称
      * 连接成功后调用（SN 读取完成时 / 重连成功时）
      * @param {string} sn 设备序列号（FF04）
@@ -2298,11 +2335,13 @@ export const useBleStore = defineStore('ble', {
         this.customDeviceName = entry.name
         entry.lastSeen = Date.now()
         this._saveDeviceNames()
+        this._seedCustomNameByMac(this.deviceId, entry.name) // ★ v3.36.3-fix5: 同步到 MAC 索引，供断连后展示
         console.log('[Store] 设备名称已从本地恢复:', entry.name, '(SN:', sn, ')')
       } else if (this.customDeviceName) {
         // 本地无记录，但 d2 已从 NotifyStatus 读回 → 用 d2 作为初始名并记录
         this._deviceNames[sn] = { name: this.customDeviceName, lastSeen: Date.now() }
         this._saveDeviceNames()
+        this._seedCustomNameByMac(this.deviceId, this.customDeviceName) // ★ v3.36.3-fix5
         console.log('[Store] 首次记录设备名称（来自固件 d2）:', this.customDeviceName, '(SN:', sn, ')')
       }
       // else: 本地无记录 + 无 d2 → 保持默认名（KeyGo-XXXXXX）
@@ -4191,6 +4230,11 @@ export const useBleStore = defineStore('ble', {
       if (name.length > 20) throw new Error('名称最长 20 字符')
 
       this.customDeviceName = name
+
+      // ★ v3.36.3-fix5: 同时按 MAC 持久化一份自定义名，供断连后的扫描列表/重连卡统一显示
+      if (this.deviceId) {
+        this._seedCustomNameByMac(this.deviceId, name)
+      }
 
       // ★ 本地存储（按序列号索引）
       if (this.serialNumber) {
