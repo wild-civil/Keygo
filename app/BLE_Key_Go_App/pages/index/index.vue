@@ -168,12 +168,13 @@
     </view>
 
     <!-- ★ 2026-07-22: 手动断开后"重新连接"入口（已知设备记忆驱动，OS 占用也能接管 ACL） -->
-    <view v-if="!bleStore.connected && bleStore.knownDeviceId" style="display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:16rpx;padding:24rpx;margin:0 24rpx 16rpx;box-shadow:0 4rpx 16rpx rgba(0,0,0,.06);">
-      <view style="display:flex;flex-direction:column;">
-        <text style="font-size:24rpx;color:#888;">已知设备</text>
-        <text style="font-size:26rpx;color:#333;margin-top:4rpx;">{{ bleStore.knownDeviceId }}</text>
+    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDeviceId">
+      <view class="reconnect-info">
+        <text class="reconnect-label">已知设备</text>
+        <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
+        <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
       </view>
-      <button style="background:var(--accent,#4a90d9);color:#fff;border:none;border-radius:12rpx;padding:12rpx 28rpx;font-size:28rpx;margin:0;" @tap="handleReconnect">重新连接</button>
+      <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
     </view>
 
     <!-- 设备扫描区域 -->
@@ -1039,6 +1040,34 @@ async function handleSetName() {
   padding: 24rpx;
   margin-bottom: 30rpx;
 }
+
+/* ★ 2026-07-22: 手动断开后"重新连接"卡片 — 与 .section/.status-card 等宽对齐 */
+.reconnect-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  padding: 24rpx;
+  margin: 0 0 30rpx;          /* 横向无外边距 → 与上/下卡片等宽；纵向 30rpx 保持节奏一致 */
+  box-sizing: border-box;
+}
+.reconnect-info { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; } /* ★ flex:1 占满剩余空间 → 强制把按钮顶到最右 */
+.reconnect-label { font-size: 22rpx; color: var(--text-muted); margin-bottom: 6rpx; }
+.reconnect-name { font-size: 28rpx; color: var(--text-primary); font-weight: 600; line-height: 1.3; }
+.reconnect-mac { font-size: 22rpx; color: var(--text-tertiary); margin-top: 2rpx; }
+.reconnect-btn {
+  flex: 0 0 auto;              /* ★ 不伸缩、按内容宽度，配合左侧 flex:1 稳定靠右 */
+  margin-left: 20rpx;
+  width: auto;
+  background: var(--alpha-12); /* 与"扫描设备"(.btn-scan)完全一致：透明强调色底 */
+  color: var(--accent);
+  border: 1rpx solid var(--alpha-27);
+  border-radius: 20rpx;
+  padding: 12rpx 24rpx;       /* 与 .btn-scan 完全一致：不写 line-height，沿用与 .btn-scan 相同的默认行高，避免按钮被撑高 */
+  font-size: 24rpx;
+}
+.reconnect-btn:active { opacity: 0.7; }
 
 .section-header {
   display: flex;

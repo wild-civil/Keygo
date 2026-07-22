@@ -340,6 +340,14 @@ export const useBleStore = defineStore('ble', {
       return this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
     },
 
+    // ★ 2026-07-22: 已知设备展示名，与扫描列表完全一致（KeyGo- + MAC 末6位），便于识别
+    knownDeviceName() {
+      const id = this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
+      if (!id) return ''
+      const clean = id.replace(/:/g, '').toUpperCase()
+      return 'KeyGo-' + clean.slice(-6)
+    },
+
     // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
     // ★ v3.25.2: 增加 ±xxm 误差显示，基于 watchPosition 系统报告的 accuracy
     geofenceDistanceText: (state) => {

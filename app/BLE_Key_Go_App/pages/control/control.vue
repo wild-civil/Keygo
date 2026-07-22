@@ -5,7 +5,14 @@
       <text v-if="bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused'">🔄 设备离线，正在自动重连中...</text>
       <text v-else>⚠️ 设备未连接</text>
       <!-- ★ 2026-07-22: 手动断开后"重新连接"按钮（已知设备记忆驱动，OS 占用也能接管 ACL） -->
-      <button v-if="bleStore.knownDeviceId" style="background:var(--accent,#4a90d9);color:#fff;border:none;border-radius:12rpx;padding:12rpx 28rpx;font-size:26rpx;margin-top:16rpx;" @tap="handleReconnect">重新连接</button>
+      <view class="reconnect-block" v-if="bleStore.knownDeviceId">
+        <view class="reconnect-info">
+          <text class="reconnect-label">已知设备</text>
+          <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
+          <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+        </view>
+        <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
+      </view>
     </view>
 
     <template v-else>
@@ -345,6 +352,32 @@ async function onToggleProxRide(v) {
   gap: 16rpx;
   margin-bottom: 24rpx;
 }
+
+/* ★ 2026-07-22: 手动断开后"重新连接"块 — 置于连接警告框内，信息左/按钮右，与连接页等宽对齐 */
+.reconnect-block {
+  margin-top: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+.reconnect-info { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; flex: 1 1 auto; } /* ★ flex:1 占满剩余空间 → 强制把按钮顶到最右 */
+.reconnect-label { font-size: 22rpx; color: var(--text-tertiary); margin-bottom: 4rpx; }
+.reconnect-name { font-size: 28rpx; color: var(--text-primary); font-weight: 600; }
+.reconnect-mac { font-size: 22rpx; color: var(--text-muted); margin-top: 2rpx; }
+.reconnect-btn {
+  flex: 0 0 auto;              /* ★ 不伸缩、按内容宽度，配合左侧 flex:1 稳定靠右 */
+  margin-left: 20rpx;
+  width: auto;
+  background: var(--alpha-12); /* 与"扫描设备"(.btn-scan)完全一致：透明强调色底 */
+  color: var(--accent);
+  border: 1rpx solid var(--alpha-27);
+  border-radius: 20rpx;
+  padding: 12rpx 24rpx;       /* 与 .btn-scan 完全一致：不写 line-height，沿用默认行高，避免按钮被撑高 */
+  font-size: 24rpx;
+}
+.reconnect-btn:active { opacity: 0.7; }
+
 
 /* ★ v3.15-#21: Status 过期警告 — 比断连警告更严重（无声中断） */
 .stale-warning {
