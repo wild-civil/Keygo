@@ -113,7 +113,10 @@
 #define BLE_SNV_BLOCK                       256
 #endif
 #ifndef BLE_SNV_NUM
-#define BLE_SNV_NUM                         8   /* 8 个 OS 绑定，匹配信任列表 BOND_ENTRY_MAX=8 */
+#define BLE_SNV_NUM                         9   /* ★ [v3.36.2-fix-4] 由 MCU.c 边界(0x77700+256*N≤0x78000)推最大=9 块(2304B)。
+                                                 *   每条 OS bond 占 6 个 NV ID，故 9 块是「双手机 OS 绑定」能争取到的上限；
+                                                 *   是否真能装 2 条取决于 WCH SNV 是否将多个小 NV item 塞进 1 个 256B 块，
+                                                 *   需真机用 [DIAG] snvBonds 验证(读到 2=成功)。 */
 #endif
 
 /* 【RTC】内部 32K */

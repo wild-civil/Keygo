@@ -3460,6 +3460,16 @@ export const useBleStore = defineStore('ble', {
       //   导致 createBond 在已连接状态下被系统拒绝、不弹配对窗）。
       this._bondingInProgress = true
       try {
+        // ★ 2026-07-22: 重发 ENCRYPT:1 重新拉开配对窗口(30s)，避免「开启无App模式」
+        //   到真正 createBond 之间窗口已过期 → 固件 PasscodeCB 返回 FAILURE 拒配对 →
+        //   Android 进入“幽灵配对”状态(现象: 配对失败 + 之后扫描不到设备, 需重启App才恢复)。
+        //   无App模式已开时重发幂等(仅重置 encRequired/配对模式/开窗)。
+        try {
+          await enqueueWrite(() => rawSendCommand(this.deviceId, 'ENCRYPT:1'))
+          await new Promise((r) => setTimeout(r, 150))
+          console.log('[BOND] 已重发 ENCRYPT:1 确保配对窗口开启')
+        } catch (e) { console.warn('[BOND] 重发 ENCRYPT:1 失败(忽略, 继续尝试配对)', e) }
+
         // ① 断开 GATT，让 OS 能发起系统配对
         try {
           await new Promise((r) => { try { uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => r() }) } catch (e) { r() } })
@@ -3706,8 +3716,10 @@ export const useBleStore = defineStore('ble', {
       //     但无 OS 级加密重连、需 App 在前台/后台维持连接才解锁。
       //   开启：调原生 createBond 弹系统配对窗(需自定义基座+原生插件)，配对成功→OS 加密重连→无 App 也能解锁。
       if (this.usePasskey) {
-        // forceRebond：设备无 owner（首绑/恢复出厂后）时强制重绑，确保手机侧旧 bond 被清除并重新弹 passkey。
-        const bondRes = await this._triggerBond(!(this.deviceBound || this.isBound))
+        // ★ 2026-07-22 修正：主动绑定一律 forceRebond=true，清掉 Android 可能残留的
+        //   陈旧/幽灵 bond（B 之前配对失败常留「已配对」假状态）→ 否则 createBond 不强制重绑、
+        //   配对静默失败。清掉后重新弹系统配对窗，配合固件 60s 配对窗即可稳定配对。
+        const bondRes = await this._triggerBond(true)
         if (bondRes && bondRes.ok) {
           console.log('[BIND] ✅ 已配对，链路加密，绑定码将以密文传输')
         } else {

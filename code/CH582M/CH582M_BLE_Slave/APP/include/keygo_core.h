@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.2"   /* ★ v3.36.2 (2026-07-19): 配套本次发布——App 端「靠近进入模式」横向排布 + 电瓶车 EPRX 偏好 P1-P3 优化 */
+#define KEYGO_FW_VERSION   "3.36.3-fix3"  /* ★ v3.36.3-fix3 (2026-07-22): 汇总 无App per-phone阈值(LTK指纹) + 串口日志细分开关(verbose) + 配对窗60s/ERASE_AUTO关闭/多绑不被挤；详见决策文档 §8.7/§8.8 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
@@ -111,12 +111,27 @@ extern uint8_t  g_cfgKalmanR;            // ★ v3.13: 卡尔曼滤波器 R 值 
 extern uint8_t g_encRequired;            // 1=固件配对模式切 INITIATE(连接即触发 OS 弹 passkey)；0=WAIT_FOR_REQ(默认)
 void KeyGo_LoadEncrypt(void);            // 上电时从 DataFlash 恢复 g_encRequired
 void KeyGo_SaveEncrypt(uint8_t v);       // 持久化 g_encRequired 到 DataFlash
+/* ★ 2026-07-21 (v3.36.2-fix): 同页保存 g_encRequired 标志字节 + LTK 指纹表。
+ *   ENCRYPT 页(KEYGO_ENCRYPT_ADDR=0x7500) 现同时存放「无 App 识别 owner 的 LTK 指纹表」(偏移 KEYGO_LTKFP_OFF, 见 bonding.h)，
+ *   擦整页后先写标志(偏移0)再写指纹(偏移KEYGO_LTKFP_OFF)，避免切换配对模式时清掉指纹、或存指纹时清掉标志。 */
+void KeyGo_SaveEncryptPage(uint8_t encFlag);
 
 // ★ 2026-07-16 调试增强: "Scan req from" 串口日志开关（仅 DEBUG 构建生效）。
 //   默认 1(开，与历史行为一致)；串口输入 `scan` 切换 / `scan on` / `scan off` 控制。
 //   实现见 peripheral.c KeyGo_UartCmdPoll()（主循环每圈轮询 UART1 接收，非中断）。
 extern uint8_t  g_scanLogEnabled;        // 1=打印扫描请求日志；0=静默
 extern uint8_t  g_rssiLogEnabled;        // ★ v3.36.2-debug: 1=打印 [RSSI] using owner threshold 日志；0=静默（串口 `rssi` 命令控制）
+
+// ★ v3.36.2-verbose: 常规运行/诊断日志总开关（串口 `verbose`[on|off] 切换，**默认关**）。
+//   受控日志（默认静默，排查时 `verbose on` 打开）：[OBS] rssi / [RAW] / [RSSISET] / [STATE] / [DIAG] / [GAP] healthy 等高频/诊断类。
+//   始终输出（不受此开关影响）：连接/断连事件及原因([OBS] CONNECTED/DISCONNECTED)、解锁/上锁/后备箱([KEY])、
+//     绑定成功/失败([BIND])、加密升降([OBS] LINK_*)、看门狗/错误/警告类。
+#ifdef DEBUG
+extern uint8_t  g_verboseLogEnabled;     // 1=打印常规运行/诊断日志；0=静默（默认关）
+#define PRINTV(X...) do { if (g_verboseLogEnabled) printf(X); } while (0)
+#else
+#define PRINTV(X...)                       // 非 DEBUG 构建：完全剔除，零开销
+#endif
 void KeyGo_UartCmdPoll(void);            // 主循环调用：解析 UART1 调试命令
 
 // ★ 方案1 扩展: 系统配对码(OS SMP passkey)，与绑定码完全独立，仅服务于无 App 模式。
@@ -151,8 +166,10 @@ uint16_t KeyGo_GetDisconnectLockTicks(void);
 #define KEYGO_CFG_ADDR          0x7000      // 物理 0x77000 = 0x70000 + 0x7000
 #define KEYGO_CFG_MAGIC         0x4B474346  // "KGCF"
 
-// ★ 方案1: 无 App 模式(OS 系统配对)持久化标志位（单字节）。
+// ★ 方案1: 无 App 模式(OS 系统配对)持久化标志位（单字节, 占本页偏移 0）。
 //   偏移 0x7500 独占一页(256B)，右界 0x7600 < BLE SNV(偏移 0x7700)，不冲突。
+//   ★ 2026-07-21: 本页同时存放 LTK 指纹表(无 App 识别 owner, 偏移 KEYGO_LTKFP_OFF=4, 见 bonding.h)，
+//     因 0x7600 页已被 KEYGO_PASSCODE_ADDR(系统配对码) 占用，指纹表不能独占该页，故并入此处。
 #define KEYGO_ENCRYPT_ADDR      0x7500      // 物理 0x77500 = 0x70000 + 0x7500
 #if (KEYGO_ENCRYPT_ADDR + 256) > 0x7700
 #error "KEYGO_ENCRYPT region overlaps BLE SNV (offset 0x7700)!"

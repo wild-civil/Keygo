@@ -57,6 +57,24 @@
 #ifndef KEYGO_SECEP_ADDR
 #define KEYGO_SECEP_ADDR   0x7400   /* 物理 0x77400, ★ Phase 2 安全迁移标记页(升级到 passkey 时代清旧 Just-Works bond); < SNV(偏移 0x7700) 独占 1 页 */
 #endif
+/* ★ 2026-07-21 (v3.36.2-fix): 无 App 重连识别 owner 用的「LTK 指纹表」。
+ *   纯 OS 自动重连（蓝牙耳机式体验）时链路由系统加密重连，但固件侧 s_authedOwnerIdx
+ *   仅 App AUTH/BIND 时写入；为让「无 App 也能用 per-phone 阈值」，需在加密完成时
+ *   用【当前链路 LTK】反查本机 owner。每条 owner 存 4 字节 LTK 指纹（LTK 前 4 字节），
+ *   与 s_bondTbl[] 平行索引（下标一一对应）。
+ *   ★ 存储位置修正（重要）：最初想独占 0x7600 页，但该页已被 KEYGO_PASSCODE_ADDR（系统配对码，
+ *     方案1）占用，独占会互相擦写损坏数据！故改为【并入 ENCRYPT 页（KEYGO_ENCRYPT_ADDR=0x7500）】：
+ *     该页目前仅用 1 字节存 g_encRequired 标志（偏移 0），指纹表放在偏移 KEYGO_LTKFP_OFF(=4) 起，
+ *     36 字节远小于页内剩余空间；KeyGo_SaveEncrypt 与 Bonding_SaveLtkFp 共享同页、互相保留对方数据。
+ *   设计取舍：路线 A(IRK) 需存整条 16B IRK、空间紧张；本方案用 4B LTK 指纹，且
+ *   地址类型无关（公共/静态地址亦能命中，IRK 反解仅对 RPA 有效），更通用。详见决策文档 §8.7/§8.8。 */
+#ifndef KEYGO_LTKFP_OFF
+#define KEYGO_LTKFP_OFF    4       /* ★ 2026-07-21: LTK 指纹表在 ENCRYPT 页内的偏移(紧邻 g_encRequired 标志字节, 单字节占 0) */
+#endif
+#define LTKFP_MAGIC        0x4B4C544Bu  /* "KLTK" */
+#define LTKFP_FP_LEN       4       /* 指纹长度：LTK 前 4 字节（仅作身份锚，安全性由 OS 加密保障） */
+#define LTKFP_ENTRY_MAX    BOND_ENTRY_MAX  /* 与信任表平行，容量一致 */
+#define LTKFP_IO_BYTES     ((4 + LTKFP_ENTRY_MAX * LTKFP_FP_LEN + 3) & ~3)  /* 4 + 32 = 36 */
 #define KEYGO_SECEP_VALUE 0x01      /* 已迁移到 passkey 时代的标记值 */
 #define BOND_PAGE_SIZE    256
 
@@ -99,9 +117,18 @@ typedef struct __attribute__((packed)) {
 #if (KEYGO_SECEP_ADDR + BOND_PAGE_SIZE) > 0x7700
 #error "SECEP region overlaps BLE SNV (offset 0x7700)! Move KEYGO_SECEP_ADDR lower."
 #endif
+#if (KEYGO_LTKFP_OFF + LTKFP_IO_BYTES) > BOND_PAGE_SIZE
+#error "LTK fingerprint table overflows ENCRYPT page! Reduce LTKFP_FP_LEN/LTKFP_ENTRY_MAX."
+#endif
 
 /* ── 生命周期 ── */
 void    Bonding_Init(void);                       /* 载入信任列表 + 配置 Bond Manager + 注册回调 + 跑密码学自测 */
+/* ★ 2026-07-21 (v3.36.2-fix): OS 加密重连完成(上升沿)时调用，用链路 LTK 指纹反查 owner，
+ *   使「无 App」场景也能启用 per-phone 阈值。connHandle 为当前连接句柄。 */
+void    Bonding_OnLinkEncrypted(uint16_t connHandle);
+/* ★ 2026-07-21 (v3.36.2-fix): 把 RAM 中 s_ltkFp[] 指纹表写入 ENCRYPT 页(偏移 KEYGO_LTKFP_OFF)；
+ *   调用方负责先擦整页(EEPROM_ERASE)，本函数只写不擦。由 KeyGo_SaveEncryptPage 统一擦+写标志+写指纹。 */
+void    Bonding_WriteLtkFpRegion(void);
 void    Bonding_ApplyPairingMode(void);           /* ★ 方案1: 根据 g_encRequired 切换配对模式(INITIATE/WAIT_FOR_REQ) */
 uint8_t Bonding_Load(void);                        /* 从 DataFlash 读入 RAM 表 */
 uint8_t Bonding_Save(void);                        /* RAM 表写回 DataFlash（擦+写） */
@@ -144,6 +171,9 @@ void Bonding_IssueNonce(char *outHex32);
 /* ── 会话鉴权 ── */
 void    Bonding_ConnTerminated(void);             /* 断连：清空会话态（鉴权/nonce 一次性） */
 uint8_t Bonding_IsSessionAuthed(uint16_t connHandle); /* 当前连接是否已会话鉴权 */
+void Bonding_OpenPairingWindow(uint32_t ms);  /* [v3.36.2-fix-2] 开窗(ms=0 用默认 30s) */
+void Bonding_TickPairingWindow(void);         /* [v3.36.2-fix-2] 周期收尾：窗口超时自动关闭并打印 */
+uint8_t Bonding_PairingWindowOpen(void);      /* [v3.36.2-fix-3] 查询窗口是否仍开（供 30s 未绑强断豁免） */
 
 /* ── FF03 指令处理（回报文经 KeyGo_SendRawNotify 走 FF02）── */
 uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint8_t peerAddrType,

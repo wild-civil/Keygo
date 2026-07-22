@@ -689,7 +689,7 @@ static void KeyGo_ProximityAct(void)
     if (g_deviceMode == 1 && g_ebikeProxMode == 1) {
         g_keyState = KSTATE_UNLOCKED;   // ★ 骑行视为已解锁
         KeyGo_Ride();
-        PRINT("[STATE] proximity → RIDE (ebike + proxMode=1)\n");
+        PRINTV("[STATE] proximity → RIDE (ebike + proxMode=1)\n");
     } else {
         g_keyState = KSTATE_UNLOCKED;
         KeyGo_Unlock();
@@ -698,6 +698,7 @@ static void KeyGo_ProximityAct(void)
 
 void KeyGo_ProcessStateMachine(void)
 {
+    Bonding_TickPairingWindow();  /* [v3.36.2-fix-2] 配对窗口超时收尾(仅打印) */
     /* ── [OBS_BEGIN] 观测性（①）：加密链路上升沿 + LED 提示驱动 + RSSI 节流打印 ──
      *   放在函数最前，确保每拍(≈125ms)都执行，不受下方看门狗/冷却提前 return 影响。
      *   串行 PRINT 由 HAL 条件编译（release 自动剔除）；LED 提示与状态检测始终运行。 ── [OBS_END] */
@@ -706,6 +707,7 @@ void KeyGo_ProcessStateMachine(void)
         if (encNow && !g_obsLinkEncrypted) {
             PRINT("[OBS] LINK_ENCRYPTED (OS bonded reconnect — phone near & paired)\n");
             KeyGo_ObsBlinkTrigger();
+            Bonding_OnLinkEncrypted(peripheralConnList.connHandle);  /* ★ 2026-07-21 (v3.36.2-fix): 无 App 重连识别 owner，启用 per-phone 阈值 */
         } else if (!encNow && g_obsLinkEncrypted) {
             PRINT("[OBS] LINK_PLAIN (encryption dropped)\n");
         }
@@ -731,7 +733,7 @@ void KeyGo_ProcessStateMachine(void)
                 if (g_filteredRSSI != RSSI_UNINITIALIZED_F) {
                     uint8_t th = (g_filteredRSSI > g_cfgUnlockThreshold) ? 1
                                : (g_filteredRSSI < g_cfgLockThreshold)  ? 2 : 0;
-                    PRINT("[OBS] rssi r=%d f=%d th=%d enc=%d\n",
+                    PRINTV("[OBS] rssi r=%d f=%d th=%d enc=%d\n",
                           (int)g_latestRSSI, (int)g_filteredRSSI, th, encNow);
                 }
             }
@@ -760,7 +762,7 @@ void KeyGo_ProcessStateMachine(void)
         // ★ v3.7: 使用可配置变量 g_cfgManualCooldownMs 替代硬编码宏
         if (now - g_lastCommandMs >= g_cfgManualCooldownMs) {
             g_manualCooldown = 0;
-            PRINT("[STATE] manual command cooldown ended\n");
+            PRINTV("[STATE] manual command cooldown ended\n");
         } else {
             return;
         }
@@ -803,8 +805,9 @@ void KeyGo_ProcessStateMachine(void)
     if (!g_rssiUpdated) return;
     g_rssiUpdated = 0;
 
-    // ★ v3.36: RSSI 阈值跟随——按「当前已鉴权 owner」选阈值；无 owner 身份（纯 OS 无App模式，
-    //   仅靠 g_encRequired 加密授予）则用全局配置（家庭默认）。详见 Bonding_GetActiveOwnerRssi()。
+    // ★ v3.36 + v3.36.2-fix: RSSI 阈值跟随——按「当前已鉴权 owner」选阈值。
+    //   owner 身份来源二选一：① App AUTH/BIND 会话；② 无 App 时由 Bonding_OnLinkEncrypted()
+    //   在 LINK_ENCRYPTED 上升沿用 LTK 指纹反查（蓝牙耳机式纯 OS 重连）。详见 Bonding_GetActiveOwnerRssi()。
     int16_t _unlockTh = g_cfgUnlockThreshold;
     int16_t _lockTh   = g_cfgLockThreshold;
     if (Bonding_GetActiveOwnerRssi(&_unlockTh, &_lockTh)) {
@@ -823,7 +826,7 @@ void KeyGo_ProcessStateMachine(void)
         g_lockCounter = 0;
         if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED) {
             g_unlockCounter = 0;
-            PRINT("[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
+            PRINTV("[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
                   (int)g_filteredRSSI, (int)_unlockTh, g_cfgUnlockCount);
             KeyGo_ProximityAct();   // ★ 2026-07-19: 解锁 / (ebike+骑行偏好)骑行
         }
@@ -835,7 +838,7 @@ void KeyGo_ProcessStateMachine(void)
         if (g_lockCounter >= g_cfgLockCount && g_keyState != KSTATE_LOCKED) {
             g_keyState = KSTATE_LOCKED;
             g_lockCounter = 0;
-            PRINT("[STATE] lock threshold reached (RSSI=%d < %d, count=%d)\n",
+            PRINTV("[STATE] lock threshold reached (RSSI=%d < %d, count=%d)\n",
                   (int)g_filteredRSSI, (int)_lockTh, g_cfgLockCount);
             KeyGo_Lock();
         }
@@ -961,14 +964,19 @@ void KeyGo_NotifyStatus(void)
             tmos_memcpy(noti.pValue, json, noti.len);
             if (simpleProfile_Notify(peripheralConnList.connHandle, &noti) != SUCCESS) {
                 GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
-                /* ★ 2026-07-11 fix2：状态通知发送失败（写事务忙 / bm_alloc 失败）也重试，
-                 *   否则绑定后紧跟的 status(bn=1) 可能丢失 → App 的 bn 兜底确认失效。
-                 *   重排 SBP_DEFERRED_STATUS_EVT 再发一次（上限防死循环）。 */
+                /* ── [NOTIFY-NOISE-FIX] 2026-07-21 (v3.36.2-fix-2) ──
+                 * 无订阅(无App OS重连)时 simpleProfile_Notify 必失败；原「重试6次+刷屏 PRINT」
+                 * 是噪点。暂注释掉重试与 PRINT，改为单次静默失败：
+                 *   有订阅(App模式)首发即成功，无需重试；无固定订阅时失败属预期，不重试不打印。
+                 * ★ 若日后需恢复瞬时失败(ATT忙/bm_alloc失败)兜底，应改成「按返回码区分」：
+                 *   bleIncorrectMode(0x17,未订阅)→不重试；blePending/bleMemAllocError→保留重试。
+                 *   不要整体恢复本块，否则噪点回归。
                 if (s_statusRetry < 6) {
                     s_statusRetry++;
                     tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
                     PRINT("[STATUS] notify fail, retry=%d\n", s_statusRetry);
                 }
+                */
             } else {
                 s_statusRetry = 0;
             }
@@ -1022,7 +1030,7 @@ void KeyGo_SendRawNotify(const char *msg)
         /* ★ 2026-07-11 fix2：首踢延迟 8(≈5ms) 先试，若 ATT 事务仍忙被拒，
          *    FlushRawNotify 会以 32(≈20ms，与状态通知同档) 退避重试，直到成功。 */
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_RAW_EVT, 8);
-        PRINT("[RAW] enqueue '%s' pending=%d\n", msg, s_rawQPending);
+        PRINTV("[RAW] enqueue '%s' pending=%d\n", msg, s_rawQPending);
     }
     // 队列满则丢弃最旧未发（极低概率，绑定类报文频率极低）
 }
@@ -1055,14 +1063,19 @@ void KeyGo_FlushRawNotify(void)
             st = 0xFE;  // bm_alloc 失败
         }
     }
-    PRINT("[RAW] flush '%s' st=%d retry=%d pending=%d\n", m, (int)st, s_rawRetry, s_rawQPending);
+    PRINTV("[RAW] flush '%s' st=%d retry=%d pending=%d\n", m, (int)st, s_rawRetry, s_rawQPending);
 
     if (st == SUCCESS) {
         s_rawRetry = 0;
         s_rawQTail = (s_rawQTail + 1) % RAW_Q_SLOTS;
         s_rawQPending--;
     } else {
-        /* 发送失败：保留在队首重试；超过上限则丢弃，避免占满队列/死循环 */
+        /* ── [NOTIFY-NOISE-FIX] 2026-07-21 (v3.36.2-fix-2) ──
+         * 此 RAW 失败重试【刻意保留】，不要注释掉：
+         *  ① 噪点源头是无订阅状态通知(KeyGo_NotifyStatus)，而非 RAW 队列——无App模式下
+         *     RAW 队列恒为空(s_rawQPending==0)，FlushRawNotify 早返回，根本不会走到这里；
+         *  ② RAW 承载 BIND:OK 等需要可靠送达的 App 响应，瞬时失败(ATT忙)必须重试兜底。
+         *  若日后要为 RAW 也做「未订阅即静默」，同样按返回码区分 bleIncorrectMode。 */
         s_rawRetry++;
         if (s_rawRetry >= 6) {
             PRINT("[RAW] drop after %d retries: %s\n", s_rawRetry, m);
@@ -1450,16 +1463,22 @@ void KeyGo_LoadEncrypt(void)
     PRINT("[ENC] loaded encRequired=%d\n", g_encRequired);
 }
 
-void KeyGo_SaveEncrypt(uint8_t v)
+void KeyGo_SaveEncryptPage(uint8_t encFlag)
 {
-    uint8_t b = (v ? 1 : 0);
-    EEPROM_ERASE(KEYGO_ENCRYPT_ADDR, 256);   // DataFlash 写只能 1→0，改值前先擦本页
+    uint8_t b = (encFlag ? 1 : 0);
+    EEPROM_ERASE(KEYGO_ENCRYPT_ADDR, 256);   // DataFlash 写只能 1→0，改值前先擦整页
     if (EEPROM_WRITE(KEYGO_ENCRYPT_ADDR, &b, 1) != 0) {
         PRINT("[ENC] save FAILED\n");
     } else {
         g_encRequired = b;
         PRINT("[ENC] saved encRequired=%d\n", b);
     }
+    Bonding_WriteLtkFpRegion();   // ★ 2026-07-21: 同页重写 LTK 指纹表(与标志互不擦除)
+}
+
+void KeyGo_SaveEncrypt(uint8_t v)
+{
+    KeyGo_SaveEncryptPage(v);
 }
 
 /* ─────────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@
 #include "gattprofile.h"
 #include "battery_service.h"
 #include "peripheral.h"
+#include "bonding.h"        // ★ [v3.36.2-fix-3] 显式包含：Bonding_* 声明(含 Bonding_PairingWindowOpen)，消除隐式声明隐患
 #include "keygo_core.h"
 #include "keygo_hid.h"      /* ★ v3.34.0: 无App模式 HID 锚点(策略A 被动锚点) */
 #include "bonding.h"       /* ★ KeyGo 绑定/授权模块（信任列表 + Bond Manager 回调） */
@@ -31,6 +32,8 @@
 uint8_t g_scanLogEnabled = 1;
 // ★ v3.36.2-debug (2026-07-19): "[RSSI] using owner threshold" 阈值日志开关（串口 `rssi`[on|off] 切换，默认开）
 uint8_t g_rssiLogEnabled = 1;
+// ★ v3.36.2-verbose: 常规运行/诊断日志总开关（串口 `verbose`[on|off] 切换，**默认关**，排查问题时 `verbose on` 打开）
+uint8_t g_verboseLogEnabled = 0;
 
 // 扫描响应（v3.13: 运行时动态构建，名称含 MAC 后 3 字节）
 #define SCAN_RSP_MAX_LEN  31
@@ -383,8 +386,20 @@ static void KeyGo_UartCmdExec(char *line)
             return;
         }
         PRINT("[UART] rssi log %s\n", g_rssiLogEnabled ? "ON" : "OFF");
+    } else if (strcmp(tok, "verbose") == 0) {
+        if (*arg == '\0') {
+            g_verboseLogEnabled = g_verboseLogEnabled ? 0 : 1;   // 无参数 → 切换
+        } else if (strcmp(arg, "off") == 0) {
+            g_verboseLogEnabled = 0;
+        } else if (strcmp(arg, "on") == 0) {
+            g_verboseLogEnabled = 1;
+        } else {
+            PRINT("[UART] bad arg '%s' (use: verbose | verbose on | verbose off)\n", arg);
+            return;
+        }
+        PRINT("[UART] verbose log %s\n", g_verboseLogEnabled ? "ON" : "OFF");
     } else if (strcmp(tok, "help") == 0) {
-        PRINT("[UART] cmds: scan[on|off] | rssi[on|off] | 'help'\n");
+        PRINT("[UART] cmds: scan[on|off] | rssi[on|off] | verbose[on|off] | 'help'\n");
     } else {
         PRINT("[UART] unknown: %s (type 'help')\n", tok);
     }
@@ -511,7 +526,13 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             uint8_t osEncNoApp = g_encRequired
                     ? (linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0)
                     : 0;
-            if (g_unauthConnStartMs != 0 && !osEncNoApp &&
+            /* ★ [v3.36.2-fix-3] 配对窗口开着时豁免 30s 强断：
+             *   窗口是「我正在绑定」的显式信号(_triggerBond: ENCRYPT:1→断GATT→createBond→重连→输配对码)，
+             *   窗内连接占槽是预期的，且安全门控已由窗口承担(窗外陌生人配对被 PasscodeCB 拒)。
+             *   若不豁免，慢输配对码(30~60s)的用户会被 30s 未鉴权强断先杀链路，使 60s 配对窗形同虚设。
+             *   窗口关闭后(60s)本判断恢复 → 放弃绑定的陌生连接仍会被踢，DoS 防护不丢。 */
+            uint8_t pairWinOpen = Bonding_PairingWindowOpen();
+            if (g_unauthConnStartMs != 0 && !osEncNoApp && !pairWinOpen &&
                 Peripheral_GetSystemMs() - g_unauthConnStartMs >= UNBOUND_CONN_TIMEOUT_MS) {
                 PRINT("[SEC] unauth conn timeout %lums, schedule force disconnect\n",
                       (unsigned long)(Peripheral_GetSystemMs() - g_unauthConnStartMs));
@@ -576,7 +597,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             advMasked == GAPROLE_CONNECTED) {
             // 广播/连接均健康（含连接中仍广播的 CONNECTED_ADV），无需复位或重试
             advRestartRetryCount = 0;
-            PRINT("[GAP] adv/conn healthy (state=0x%02x), no reset\n", adv_state);
+            PRINTV("[GAP] adv/conn healthy (state=0x%02x), no reset\n", adv_state);
         } else if (advRestartRetryCount < SBP_ADV_RESTART_MAX_RETRIES) {
             // advertising 仍未恢复，再次触发
             uint8_t enable = TRUE;
@@ -735,7 +756,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         /* ★ 2026-07-17 埋点：打印本次连接的初始协商参数（手机发起连接时给的值）。
          *   interval 单位 1.25ms，timeout 单位 10ms。若 timeout 很小(如 100=1s)，
          *   锁屏/Doze 下极易触发监督超时断连——这是排查「APP 偶发断连」的第一手数据。 */
-        PRINT("[DIAG] LinkEst int=%d(%dms) lat=%d timeout=%d(%dms)\n",
+        PRINTV("[DIAG] LinkEst int=%d(%dms) lat=%d timeout=%d(%dms)\n",
               event->connInterval, (event->connInterval * 5) / 4,
               event->connLatency, event->connTimeout, event->connTimeout * 10);
     }
@@ -857,7 +878,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         // ★ v3.13: 200ms 后检查 advertising 状态，未恢复则触发重试机制
         tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
 
-        PRINT("Disconnected.. Reason:0x%02x (%s)\n",
+        PRINTV("Disconnected.. Reason:0x%02x (%s)\n",
               (unsigned)pEvent->linkTerminate.reason,
               KeyGo_DiscReasonStr(pEvent->linkTerminate.reason));
         PRINT("[OBS] DISCONNECTED reason=0x%02x (%s)\n",
@@ -886,7 +907,7 @@ static void peripheralParamUpdateCB(uint16_t connHandle, uint16_t connInterval,
         /* ★ 2026-07-17 埋点：打印参数更新协商结果（约连上 4s 后固件请求 min6/max100/lat0/timeout=100）。
          *   若这里 timeout 仍是 100(1s)，说明手机接受了 1s 监督超时 → 断连风险高，
          *   可作为「把 DEFAULT_DESIRED_CONN_TIMEOUT 提到 400(4s)」验证的对照数据。 */
-        PRINT("[DIAG] ParamUpd int=%d(%dms) lat=%d timeout=%d(%dms)\n",
+        PRINTV("[DIAG] ParamUpd int=%d(%dms) lat=%d timeout=%d(%dms)\n",
               connInterval, (connInterval * 5) / 4,
               connSlaveLatency, connTimeout, connTimeout * 10);
     }
@@ -1039,9 +1060,9 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 8 && tmos_memcmp(pValue, "RSSISET:", 8)) {
         /* ★ v3.36: per-phone RSSI 阈值校准（须已会话鉴权且有 owner 身份）。 */
-        PRINT("[RSSISET] enter\n");
+        PRINTV("[RSSISET] enter\n");
         uint8_t r = Bonding_HandleRssiSetCmd(connHandle, pValue + 8, len - 8);
-        PRINT("[RSSISET] exit r=%d\n", r);
+        PRINTV("[RSSISET] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 9 && tmos_memcmp(pValue, "ENCRYPT:", 8)) {
         /* ★ 方案1: 无 App 模式(OS 系统配对)开关。
@@ -1052,6 +1073,12 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         g_encRequired = ev;
         KeyGo_SaveEncrypt(ev);
         Bonding_ApplyPairingMode();
+        /* ★ [v3.36.2-fix-2] 启用无App模式时自动开一次配对窗。
+         *   窗口时长由默认 30s 提至 60s：覆盖「ENCRYPT→断GATT→createBond→重连→AUTH」
+         *   整条绑定流程(含用户在系统配对弹窗里输入配对码的时间)，避免窗口提前过期 →
+         *   PasscodeCB 拒配对 → Android 幽灵配对/扫描卡死(双手机 B 配对失败的根因)。
+         *   仅 owner 主动发 ENCRYPT:1(开无App)时才开窗，常态连接不重开，安全门控不变。 */
+        if (ev) Bonding_OpenPairingWindow(60000);
         KeyGo_SendRawNotify(ev ? "ENCRYPT:OK" : "ENCRYPT:OFF");
         PRINT("[ENCRYPT] set encRequired=%d\n", ev);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
@@ -1078,6 +1105,29 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         if (!ok) {
             KeyGo_SendRawNotify("SETPASS:FAIL");
             PRINT("[PASS] set sysPasscode FAILED (need 6 digits)\n");
+        }
+        tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
+    } else if (len >= 9 && tmos_memcmp(pValue, "PAIR:OPEN", 9)) {
+        /* ★ [v3.36.2-fix-2] 显式开窗：须已会话鉴权(证明是 owner，防陌生人开后门)。
+         *   支持可选 :ms 后缀自定义窗口时长(1000~300000ms)，否则用默认 KEYGO_PAIR_WIN_MS。
+         *   开窗期间手机侧发起系统配对(ENCRYPT:1 后 App 调 createBond，或用户蓝牙设置里点 KeyGo)
+         *   才会被 PasscodeCB 放行；窗口外一律拒绝 → 陌生手机无法配对成为 owner。 */
+        if (!Bonding_IsSessionAuthed(connHandle)) {
+            KeyGo_SendRawNotify("PAIR:FAIL:NO_AUTH");
+            PRINT("[PAIRWIN] open rejected: not authed\n");
+        } else {
+            uint32_t ms = 0; uint8_t ok = 1;
+            if (len > 9 && pValue[9] == ':') {
+                ms = 0;
+                for (uint16_t i = 10; i < len; i++) {
+                    char c = (char)pValue[i];
+                    if (c < '0' || c > '9') { ok = 0; break; }
+                    ms = ms * 10u + (uint32_t)(c - '0');
+                }
+                if (!ok) ms = 0;
+            }
+            Bonding_OpenPairingWindow(ms);   /* ms=0 → 用默认时长 */
+            KeyGo_SendRawNotify("PAIR:OK");
         }
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else {

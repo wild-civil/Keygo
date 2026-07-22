@@ -30,6 +30,7 @@ static uint8_t s_sessionAuthed = 0;
  *   定位 owner，故用此标记支撑「解绑自己」精准删除（而非清整张表）；AUTH/BIND/C1 命中时写。 */
 static int8_t  s_authedOwnerIdx = -1;
 static uint8_t g_cryptoOk     = 0;   /* 1 = SHA256/HMAC 自测通过；0 = 失败(降级鉴权) */
+static uint8_t s_ltkFp[LTKFP_ENTRY_MAX][LTKFP_FP_LEN];  /* ★ 2026-07-21: 无 App 重连识别 owner 的 LTK 指纹表（与 s_bondTbl[] 平行索引）*/
 
 /* ★ P0-2（§15.3 修订）：C1 命令签名会话盐 + 同连接重放计数器。
  *   s_sessionSalt 在 AUTH/BIND 成功后建立（= 本次握手 nonce，App 已知），
@@ -115,15 +116,17 @@ void Bonding_DumpStatus(const char *tag)
 {
     uint8_t snvBonds = 0;
     GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &snvBonds);
-    PRINT("[DIAG][%s] appOwners=%d snvBonds=%d authed=%d\n",
+    PRINTV("[DIAG][%s] appOwners=%d snvBonds=%d authed=%d\n",
           tag ? tag : "?", s_bondCount, snvBonds, s_sessionAuthed);
     for (uint8_t i = 0; i < s_bondCount && i < BOND_ENTRY_MAX; i++) {
-        PRINT("[DIAG]   owner[%d] phoneId=%02X%02X%02X%02X%02X%02X%02X%02X phoneKey=%02X%02X%02X%02X.. rssi=%d/%d\n",
+        uint8_t fp = (s_ltkFp[i][0] | s_ltkFp[i][1] | s_ltkFp[i][2] | s_ltkFp[i][3]) ? 1 : 0;
+        PRINTV("[DIAG]   owner[%d] phoneId=%02X%02X%02X%02X%02X%02X%02X%02X phoneKey=%02X%02X%02X%02X.. fp=%s rssi=%d/%d\n",
               i, s_bondTbl[i].phoneId[0], s_bondTbl[i].phoneId[1], s_bondTbl[i].phoneId[2],
               s_bondTbl[i].phoneId[3], s_bondTbl[i].phoneId[4], s_bondTbl[i].phoneId[5],
               s_bondTbl[i].phoneId[6], s_bondTbl[i].phoneId[7],
               s_bondTbl[i].phoneKey[0], s_bondTbl[i].phoneKey[1],
               s_bondTbl[i].phoneKey[2], s_bondTbl[i].phoneKey[3],
+              fp ? "Y" : "N",
               (int)s_bondTbl[i].rssiUnlock, (int)s_bondTbl[i].rssiLock);
     }
 }
@@ -213,17 +216,71 @@ void Bonding_Init(void)
     Bonding_DumpStatus("INIT");   /* ★ 2026-07-17 埋点：上电基线（应用层 owner + SNV bond） */
 }
 
+/* ── [v3.36.2-fix-2] 配对窗口：限制「新 bond 形成」仅在开窗期间，修补无App模式安全短板 ──
+ * 背景：encRequired=1 原先用 GAPBOND_PAIRING_MODE_INITIATE，任何连接都触发系统配对；
+ *   知道设备 PIN(g_sysPasscode) 的陌生人可随时配对成为 owner → 安全缺口。
+ * 改法：① 配对模式恒为 WAIT_FOR_REQ(设备不再主动发 Security Request，避免「连接即配对」竞态)；
+ *       ② 真正授权门控放在 Bonding_PasscodeCB：窗口关闭时直接拒绝 passkey → 新配对失败；
+ *       ③ 已配对 owner 用 SNV 中 LTK 自动重连(不触发 PasscodeCB)，不受窗口影响，无App自动解锁仍生效。
+ * 开窗途径：A) App 发 ENCRYPT:1 启用无App模式时自动开一次窗(给首台手机配对)；
+ *           B) App 已 AUTH 后发 PAIR:OPEN[:ms] 显式开窗(给后续手机添加)。
+ * 窗口默认 30s，超时自动关闭(Bonding_TickPairingWindow 在状态机周期里收尾打印)。 */
+#define KEYGO_PAIR_WIN_MS   30000u
+static uint32_t g_pairWinUntilMs = 0;   // 0 = 窗口关闭
+
+uint8_t Bonding_PairingWindowOpen(void)
+{
+    uint32_t now = Peripheral_GetSystemMs();
+    return (g_pairWinUntilMs != 0 && now < g_pairWinUntilMs) ? 1 : 0;
+}
+
+void Bonding_OpenPairingWindow(uint32_t ms)
+{
+    uint32_t dur = (ms >= 1000u && ms <= 300000u) ? ms : KEYGO_PAIR_WIN_MS;
+    g_pairWinUntilMs = Peripheral_GetSystemMs() + dur;
+    PRINT("[PAIRWIN] opened for %lu ms (new pairing allowed until then)\n", (unsigned long)dur);
+}
+
+void Bonding_TickPairingWindow(void)
+{
+    if (g_pairWinUntilMs != 0 && Peripheral_GetSystemMs() >= g_pairWinUntilMs) {
+        PRINT("[PAIRWIN] auto-closed (new pairing denied again)\n");
+        g_pairWinUntilMs = 0;
+    }
+}
+/* ── end [v3.36.2-fix-2] 配对窗口 ── */
+
 /* ★ 方案1: 根据 g_encRequired 切换配对模式。
- *   =1 → GAPBOND_PAIRING_MODE_INITIATE(连接即主动发 Slave Security Request → OS 弹 passkey 配对)；
- *   =0 → GAPBOND_PAIRING_MODE_WAIT_FOR_REQ(默认，不强制配对)。
+ *   =0 → GAPBOND_PAIRING_MODE_WAIT_FOR_REQ(不强制配对)；
+ *   =1 → 同样 WAIT_FOR_REQ(见 [v3.36.2-fix-2]：设备不再主动发 Security Request，
+ *        避免「连接即配对」竞态；新配对授权改由 Bonding_PasscodeCB 的配对窗口门控)。
  *   在 Bonding_Init(上电) 与 ENCRYPT 命令(运行时) 两处调用。 */
 void Bonding_ApplyPairingMode(void)
 {
+    /* ★ [v3.36.2-fix-2] 配对窗口门控由 Bonding_PasscodeCB 兜底，故配对模式恢复为
+     *   encRequired=1 → INITIATE / encRequired=0 → WAIT_FOR_REQ：
+     *   ① INITIATE 让设备在连接瞬间主动发 Security Request → 手机立刻配对加密，
+     *      恢复「无App模式」下快速绑定验证（v3.36.2-fix-2 误改成 WAIT_FOR_REQ 导致变慢）；
+     *   ② 安全仍由 PasscodeCB 的「配对窗口」保障：已绑 owner 用 SNV 旧 LTK 自动重连
+     *      (不触发 PasscodeCB)，无App自动解锁不受影响；陌生手机在窗口关闭时 PasscodeCB
+     *      返回 FAILURE → 配对被拒，知道 PIN 也配不上。
+     *   ③ 指纹采集(per-phone阈值)：INITIATE 使 AUTH 时链路已加密，
+     *      Bonding_CaptureLinkLtk 能取到 LTK → s_ltkFp 正常播种 → 无App重连可反查识别 owner。 */
     uint8_t pm = g_encRequired ? GAPBOND_PAIRING_MODE_INITIATE
                                : GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
     GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pm);
-    PRINT("[BOND] pairing mode = %s (encRequired=%d)\n",
+    PRINT("[BOND] pairing mode = %s (encRequired=%d, new-bond gated by PAIRWIN)\n",
           g_encRequired ? "INITIATE" : "WAIT_FOR_REQ", g_encRequired);
+
+    /* ★ [v3.36.2-fix-4] 多手机绑定：关闭「配对表达到上限自动擦最旧 bond」(GAPBOND_ERASE_AUTO)。
+     *   该参数默认=1(开启)：bond 表满(当前 SNV 仅容 ~1 条)再来新配对会静默擦掉最旧一条，
+     *   → 表现为「手机A配对了、手机B配对的就把A挤掉」(用户实测 snvBonds 长期=1、appOwners=2)。
+     *   关闭后：表满时新配对会被拒绝(而非擦旧)，先配的手机 bond 不再被悄无声息淘汰。
+     *   配合把 BLE_SNV_NUM 提到边界上限(见 config.h)，给「双手机都 OS 级绑定」争取空间。
+     *   WCH 官方 BLE 文档亦明确要求：多绑定应用须关闭 GAPBOND_ERASE_AUTO。 */
+    uint8_t eraseAuto = 0;
+    GAPBondMgr_SetParameter(GAPBOND_ERASE_AUTO, sizeof(uint8_t), &eraseAuto);
+    PRINT("[BOND] ERASE_AUTO = disabled (multi-phone safe)\n");
 
     /* ★ v3.34.0 无App模式(HID锚点)同步广播占空比：
      *   encRequired=1 → 高占空比(20/30ms)加快 OS 后台自动重连；
@@ -242,6 +299,121 @@ void Bonding_ApplyPairingMode(void)
 /*********************************************************************
  * @fn      Bonding_Load / Bonding_Save
  *********************************************************************/
+/* ─────────────────────────────────────────────────────────────────────────
+ * ★ 2026-07-21 (v3.36.2-fix): 无 App 重连识别 owner（LTK 指纹方案 / 路线 E）
+ *   背景：per-phone 阈值需要 s_authedOwnerIdx，而它以往只在 App AUTH/BIND 时写入。
+ *   纯 OS 自动重连（蓝牙耳机式体验）时，手机 OS 自行加密重连但不发 AUTH，导致
+ *   s_authedOwnerIdx 一直为 -1 → 回退全局阈值。本组函数解决该缺口：
+ *     1) 配对完成时（BOND_SAVED）把当前链路 LTK 前 4 字节指纹存入该 owner 槽；
+ *     2) OS 加密重连上升沿（LINK_ENCRYPTED）用当前链路 LTK 指纹反查 owner 槽，
+ *        命中即设 s_authedOwnerIdx，使 per-phone 阈值在无 App 时生效。
+ *   LTK 是每条 bond 唯一且重连稳定的身份锚；4 字节指纹仅用于「比中哪台手机」，
+ *   安全性仍由 OS 加密（LINK_ENCRYPTED 门控）保障。详见决策文档 §8.7/§8.8。
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/* 取当前连接链路的 LTK（linkDB_PerformFunc 遍历连接库，把已加密链路的 encParams->ltk 拷出）。
+ * KEYGO 仅 1 连接，回调必触发一次。返回 1=取到，0=未取到（链路未加密 / pEncParams 空）。 */
+static uint8_t s_capLtk[KEYLEN];
+static void Bonding_CapLtkCB(linkDBItem_t *pItem) {
+    if (pItem && pItem->pEncParams) {
+        tmos_memcpy(s_capLtk, pItem->pEncParams->ltk, KEYLEN);
+    }
+}
+static uint8_t Bonding_CaptureLinkLtk(uint8_t ltk[KEYLEN]) {
+    tmos_memset(s_capLtk, 0, KEYLEN);
+    linkDB_PerformFunc(Bonding_CapLtkCB);
+    tmos_memcpy(ltk, s_capLtk, KEYLEN);
+    /* ★ 2026-07-21 诊断：打印抓到的链路 LTK 前 4 字节(指纹)。
+     *   若为全 00 → 说明 WCH 协议栈未把 LTK 暴露给应用层(pEncParams->ltk 恒零)，
+     *   则「LTK 指纹」整条路线 E 在此芯片上不可行，需换身份锚(如 IRK/地址)。 */
+    PRINT("[BOND-DBG] capLTK fp=%02X%02X%02X%02X (rest %02X%02X%02X%02X...)\n",
+          s_capLtk[0], s_capLtk[1], s_capLtk[2], s_capLtk[3],
+          s_capLtk[4], s_capLtk[5], s_capLtk[6], s_capLtk[7]);
+    return (s_capLtk[0] | s_capLtk[1] | s_capLtk[2] | s_capLtk[3]) != 0;
+}
+
+/* 载入 LTK 指纹表（与 s_bondTbl[] 平行）。magic 不符（旧版本/未初始化）则保持全 0，待 BIND 时写入。 */
+static void Bonding_LoadLtkFp(void) {
+    uint8_t buf[LTKFP_IO_BYTES];
+    uint32_t magic;
+    tmos_memset(s_ltkFp, 0, sizeof(s_ltkFp));
+    if (EEPROM_READ(KEYGO_ENCRYPT_ADDR + KEYGO_LTKFP_OFF, buf, LTKFP_IO_BYTES) != 0) return;
+    magic = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+            ((uint32_t)buf[2] << 8)  |  (uint32_t)buf[3];
+    if (magic != LTKFP_MAGIC) return;
+    tmos_memcpy(s_ltkFp, buf + 4, LTKFP_ENTRY_MAX * LTKFP_FP_LEN);
+    /* ★ 诊断：重启后从 ENCRYPT 页载入的指纹表（前 4 字节/槽），验证持久化+重载成对正确 */
+    for (uint8_t i = 0; i < LTKFP_ENTRY_MAX; i++) {
+        if (s_ltkFp[i][0] | s_ltkFp[i][1] | s_ltkFp[i][2] | s_ltkFp[i][3])
+            PRINT("[BOND-DBG] loadLtkFp slot[%d]=%02X%02X%02X%02X\n",
+                  i, s_ltkFp[i][0], s_ltkFp[i][1], s_ltkFp[i][2], s_ltkFp[i][3]);
+    }
+}
+
+/* 把 RAM 中 s_ltkFp[] 指纹表写入 ENCRYPT 页(偏移 KEYGO_LTKFP_OFF)。只写不擦，调用方已擦整页。 */
+void Bonding_WriteLtkFpRegion(void) {
+    uint8_t buf[LTKFP_IO_BYTES];
+    buf[0] = (LTKFP_MAGIC >> 24) & 0xFF;
+    buf[1] = (LTKFP_MAGIC >> 16) & 0xFF;
+    buf[2] = (LTKFP_MAGIC >> 8)  & 0xFF;
+    buf[3] =  LTKFP_MAGIC        & 0xFF;
+    tmos_memcpy(buf + 4, s_ltkFp, LTKFP_ENTRY_MAX * LTKFP_FP_LEN);
+    EEPROM_WRITE(KEYGO_ENCRYPT_ADDR + KEYGO_LTKFP_OFF, buf, LTKFP_IO_BYTES);
+}
+
+/* 持久化 LTK 指纹表：与 g_encRequired 标志同处 ENCRYPT 页，统一由 KeyGo_SaveEncryptPage 擦整页+写标志+写指纹，避免互擦。 */
+static void Bonding_SaveLtkFp(void) {
+    KeyGo_SaveEncryptPage(g_encRequired);   /* 保留当前配对模式标志，确保切换时不丢指纹 */
+}
+
+/* OS 加密重连完成（上升沿）时调用：用链路 LTK 指纹反查 owner。
+ * 见 bonding.h Bonding_OnLinkEncrypted 说明。 */
+void Bonding_OnLinkEncrypted(uint16_t connHandle) {
+    uint8_t ltk[KEYLEN];
+    (void)connHandle;
+    if (!Bonding_CaptureLinkLtk(ltk)) return;   /* 取不到 LTK，保持现状 */
+
+    /* App 已 AUTH（s_authedOwnerIdx>=0）：刷新该 owner 指纹（容错 BOND_SAVED 时未取到的情况），
+     * 并尊重 App 身份、不再反查。 */
+    if (s_authedOwnerIdx >= 0 && s_authedOwnerIdx < (int8_t)LTKFP_ENTRY_MAX) {
+        if (tmos_memcmp(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN) != TRUE) {
+            tmos_memcpy(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN);
+            Bonding_SaveLtkFp();
+            PRINT("[BOND] owner %d LTK fingerprint refreshed (no-App reconnect ready)\n", s_authedOwnerIdx);
+        }
+        return;
+    }
+
+    /* 无 App：用 LTK 指纹反查 owner 槽 */
+    for (uint8_t i = 0; i < LTKFP_ENTRY_MAX; i++) {
+        if (s_ltkFp[i][0] == 0 && s_ltkFp[i][1] == 0 &&
+            s_ltkFp[i][2] == 0 && s_ltkFp[i][3] == 0) continue;  /* 空槽跳过 */
+        if (tmos_memcmp(s_ltkFp[i], ltk, LTKFP_FP_LEN) == TRUE) {
+            s_authedOwnerIdx = (int8_t)i;
+            PRINT("[BOND] No-App reconnect: owner %d identified by LTK fingerprint (per-phone ON)\n", i);
+            return;
+        }
+    }
+    /* 诊断：重连抓到的指纹与所有已存槽都不匹配（或指纹表全空） */
+    PRINT("[BOND-DBG] No-App reconnect: no LTK-fp match. reconnect fp=%02X%02X%02X%02X, authedIdx=-1 (global threshold)\n",
+          ltk[0], ltk[1], ltk[2], ltk[3]);
+    s_authedOwnerIdx = -1;  /* 陌生/未绑手机，全局阈值兜底 */
+}
+
+/* ★ 2026-07-21: 当本连接已会话鉴权（s_authedOwnerIdx 有效）且链路已加密时，
+ *   采集并持久化该 owner 的 LTK 指纹，使后续纯 OS 重连（无 App）可反查识别。
+ *   在 AUTH/BIND/C1 命中 owner 时调用（此时链路必已加密，noApp 模式 g_encRequired 门控）。 */
+static void Bonding_RecordLtkFpIfAuthed(void) {
+    if (s_authedOwnerIdx < 0 || s_authedOwnerIdx >= (int8_t)LTKFP_ENTRY_MAX) return;
+    uint8_t ltk[KEYLEN];
+    if (!Bonding_CaptureLinkLtk(ltk)) return;  /* 链路尚未加密，跳过（后续重连再补） */
+    if (tmos_memcmp(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN) != TRUE) {
+        tmos_memcpy(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN);
+        Bonding_SaveLtkFp();
+        PRINT("[BOND] owner %d LTK fingerprint recorded at AUTH/BIND (no-App reconnect ready)\n", s_authedOwnerIdx);
+    }
+}
+
 uint8_t Bonding_Load(void)
 {
     __attribute__((aligned(4))) uint8_t buf[BOND_IO_BYTES];
@@ -273,6 +445,7 @@ uint8_t Bonding_Load(void)
         tmos_memcpy(&s_bondTbl[s_bondCount], e, BOND_ENTRY_SIZE);
         s_bondCount++;
     }
+    Bonding_LoadLtkFp();   /* ★ 2026-07-21: 载入 LTK 指纹表（与 s_bondTbl[] 平行），供无 App 重连识别 owner */
     return 0;
 }
 
@@ -624,6 +797,7 @@ uint8_t Bonding_HandleBindCmd(uint16_t connHandle, const uint8_t *peerAddr, uint
         return 5;
     }
     s_authedOwnerIdx = Bonding_FindByPhoneId(phoneId);  /* 定位本 owner（刷新/新增都命中） */
+    Bonding_RecordLtkFpIfAuthed();  /* ★ 2026-07-21: 记录 LTK 指纹供无 App 重连识别 */
     /* BIND 成功即视为本连接已会话鉴权（证明了码知识） */
     s_sessionAuthed = 1;
     /* ★ 方案A（2026-07-12）：BIND 成功 → 取消未鉴权计时（合法用户长连不受限） */
@@ -748,7 +922,7 @@ uint8_t Bonding_HandleRssiSetCmd(uint16_t connHandle, const uint8_t *payload, ui
     if (Bonding_Save() != 0) {
         PRINT("[RSSISET] WARNING: save failed (not persisted)\n");
     }
-    PRINT("[RSSISET] owner[%d] unlock=%d lock=%d\n", s_authedOwnerIdx, u, l);
+    PRINTV("[RSSISET] owner[%d] unlock=%d lock=%d\n", s_authedOwnerIdx, u, l);
     KeyGo_SendRawNotify("RSSISET:OK");
     return 0;
 }
@@ -850,6 +1024,7 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
             if (ct_eq(expect, resp, SHA256_DIGEST_LEN)) {
                 authed = 1;
                 s_authedOwnerIdx = idx;
+                Bonding_RecordLtkFpIfAuthed();  /* ★ 2026-07-21: 记录 LTK 指纹供无 App 重连识别 */
             }
         }
         /* phoneId 未知或校验失败 → authed 保持 0，下面统一 FAIL（该手机需重新绑定） */
@@ -995,6 +1170,7 @@ uint8_t Bonding_VerifySignedCmd(const char *tail, uint16_t len, char *outBody, u
         if (ct_eq(expect, resp, SHA256_DIGEST_LEN)) {
             authed = 1;
             s_authedOwnerIdx = (int8_t)i;
+            Bonding_RecordLtkFpIfAuthed();  /* ★ 2026-07-21: 记录 LTK 指纹供无 App 重连识别 */
             break;
         }
     }
@@ -1023,6 +1199,19 @@ static void Bonding_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_
         case GAPBOND_PAIRING_STATE_BOND_SAVED:
             PRINT("[BOND] bond saved (LTK in SNV), status=%x\n", status);
             Bonding_DumpStatus("BOND_SAVED");   /* ★ 2026-07-17 埋点：LTK 落 SNV 后统计 bond 数（多手机挤占关键点） */
+            /* ★ 2026-07-21 (v3.36.2-fix): 配对完成时把当前链路 LTK 指纹记入本 owner 槽，
+             *   使后续纯 OS 自动重连（无 App）时能用指纹反查 owner、启用 per-phone 阈值。
+             *   仅当已 AUTH/BIND（s_authedOwnerIdx 有效）才记录；否则该 bond 无对应 owner，跳过。 */
+            if (s_authedOwnerIdx >= 0 && s_authedOwnerIdx < (int8_t)LTKFP_ENTRY_MAX) {
+                uint8_t ltk[KEYLEN];
+                if (Bonding_CaptureLinkLtk(ltk)) {
+                    tmos_memcpy(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN);
+                    Bonding_SaveLtkFp();
+                    PRINT("[BOND] owner %d LTK fingerprint recorded (no-App reconnect ready)\n", s_authedOwnerIdx);
+                } else {
+                    PRINT("[BOND] LTK not captured at BOND_SAVED, skip fingerprint (will refresh on next enc)\n");
+                }
+            }
             break;
         default:
             PRINT("[BOND] state=%x status=%x\n", state, status);
@@ -1038,13 +1227,20 @@ static void Bonding_PasscodeCB(uint8_t *deviceAddr, uint16_t connectionHandle,
                                 uint8_t uiInputs, uint8_t uiOutputs)
 {
     (void)deviceAddr; (void)uiInputs; (void)uiOutputs;
+    /* ★ [v3.36.2-fix-2] 配对窗口门控：窗口关闭时拒绝 passkey → 新配对失败(防陌生人)。
+     *   已配对 owner 用 SNV 中旧 LTK 自动重连，不触发本回调，无App自动解锁不受影响。 */
+    if (!Bonding_PairingWindowOpen()) {
+        PRINT("[PAIRWIN] closed -> reject pairing request (passkey withheld)\n");
+        GAPBondMgr_PasscodeRsp(connectionHandle, FAILURE, 0);
+        return;
+    }
     /* ★ 方案1 扩展：系统配对码(OS SMP passkey) 与 绑定码 完全解耦。
      *   本设备无屏无键，以 DISPLAY_ONLY 身份把「系统配对码 g_sysPasscode」回传给协议栈，
      *   手机系统弹窗「输入密码」→ 用户输系统配对码 → 完成 MITM 认证 bond。
      *   系统配对码仅服务于无 App 模式的系统层配对(确认是主人手机)，与绑定码(应用层车锁钥匙) 是两道独立秘密。
      *   此回调在配对需 passkey 时由协议栈触发；必须回 SUCCESS + 数值 passcode，否则配对会吊死/失败。 */
     uint32_t passcode = (g_sysPasscode >= 100000u && g_sysPasscode <= 999999u) ? g_sysPasscode : 123456u;
-    PRINT("[BOND] passcode requested -> respond with sys passcode\n");
+    PRINT("[BOND] passcode requested -> respond with sys passcode (PAIRWIN open)\n");
     GAPBondMgr_PasscodeRsp(connectionHandle, SUCCESS, passcode);
 }
 
