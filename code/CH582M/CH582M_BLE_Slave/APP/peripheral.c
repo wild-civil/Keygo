@@ -32,8 +32,19 @@
 uint8_t g_scanLogEnabled = 1;
 // ★ v3.36.2-debug (2026-07-19): "[RSSI] using owner threshold" 阈值日志开关（串口 `rssi`[on|off] 切换，默认开）
 uint8_t g_rssiLogEnabled = 1;
-// ★ v3.36.2-verbose: 常规运行/诊断日志总开关（串口 `verbose`[on|off] 切换，**默认关**，排查问题时 `verbose on` 打开）
-uint8_t g_verboseLogEnabled = 0;
+// ★ v3.36.3-fix4: 串口日志「分类」位掩码（串口 `verbose` 总闸 / `obs|raw|state|diag|rssiset|gap` 子命令，默认全静默）
+uint8_t g_logMask = 0;
+
+// ★ v3.36.3-fix4: 串口子命令 → 日志分类位（非日志命令返回 0）
+static uint8_t Keygo_LogCatFromTok(const char *tok) {
+    if (strcmp(tok, "obs") == 0)     return LOG_OBS;
+    if (strcmp(tok, "raw") == 0)     return LOG_RAW;
+    if (strcmp(tok, "state") == 0)   return LOG_STATE;
+    if (strcmp(tok, "diag") == 0)    return LOG_DIAG;
+    if (strcmp(tok, "rssiset") == 0) return LOG_RSSISET;
+    if (strcmp(tok, "gap") == 0)     return LOG_GAP;
+    return 0;
+}
 
 // 扫描响应（v3.13: 运行时动态构建，名称含 MAC 后 3 字节）
 #define SCAN_RSP_MAX_LEN  31
@@ -387,22 +398,41 @@ static void KeyGo_UartCmdExec(char *line)
         }
         PRINT("[UART] rssi log %s\n", g_rssiLogEnabled ? "ON" : "OFF");
     } else if (strcmp(tok, "verbose") == 0) {
+        // ★ v3.36.3-fix4: 总闸 — 无参切换 / on 全开 / off 全关
         if (*arg == '\0') {
-            g_verboseLogEnabled = g_verboseLogEnabled ? 0 : 1;   // 无参数 → 切换
+            g_logMask = g_logMask ? 0 : LOG_VERBOSE_ALL;
         } else if (strcmp(arg, "off") == 0) {
-            g_verboseLogEnabled = 0;
+            g_logMask = 0;
         } else if (strcmp(arg, "on") == 0) {
-            g_verboseLogEnabled = 1;
+            g_logMask = LOG_VERBOSE_ALL;
         } else {
             PRINT("[UART] bad arg '%s' (use: verbose | verbose on | verbose off)\n", arg);
             return;
         }
-        PRINT("[UART] verbose log %s\n", g_verboseLogEnabled ? "ON" : "OFF");
-    } else if (strcmp(tok, "help") == 0) {
-        PRINT("[UART] cmds: scan[on|off] | rssi[on|off] | verbose[on|off] | 'help'\n");
+        PRINT("[UART] verbose(all) %s\n", g_logMask ? "ON" : "OFF");
     } else {
-        PRINT("[UART] unknown: %s (type 'help')\n", tok);
+        uint8_t _cat = Keygo_LogCatFromTok(tok);
+        if (_cat != 0) {
+            // ★ v3.36.3-fix4: 分类子开关 — obs/raw/state/diag/rssiset/gap
+            if (*arg == '\0') {
+                g_logMask ^= _cat;                               // 切换该位
+            } else if (strcmp(arg, "off") == 0) {
+                g_logMask &= (uint8_t)(~_cat);
+            } else if (strcmp(arg, "on") == 0) {
+                g_logMask |= _cat;
+            } else {
+                PRINT("[UART] bad arg '%s' (use: %s | %s on | %s off)\n", arg, tok, tok, tok);
+                return;
+            }
+            PRINT("[UART] log[%s] %s\n", tok, (g_logMask & _cat) ? "ON" : "OFF");
+        } else if (strcmp(tok, "help") == 0) {
+            PRINT("[UART] cmds: scan[on|off] | rssi[on|off] | verbose[on|off] | "
+                  "obs/raw/state/diag/rssiset/gap[on|off] | 'help'\n");
+        } else {
+            PRINT("[UART] unknown cmd '%s' (try 'help')\n", tok);
+        }
     }
+    
 }
 
 void KeyGo_UartCmdPoll(void)
@@ -597,7 +627,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
             advMasked == GAPROLE_CONNECTED) {
             // 广播/连接均健康（含连接中仍广播的 CONNECTED_ADV），无需复位或重试
             advRestartRetryCount = 0;
-            PRINTV("[GAP] adv/conn healthy (state=0x%02x), no reset\n", adv_state);
+            LOGF(LOG_GAP, "[GAP] adv/conn healthy (state=0x%02x), no reset\n", adv_state);
         } else if (advRestartRetryCount < SBP_ADV_RESTART_MAX_RETRIES) {
             // advertising 仍未恢复，再次触发
             uint8_t enable = TRUE;
@@ -756,7 +786,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         /* ★ 2026-07-17 埋点：打印本次连接的初始协商参数（手机发起连接时给的值）。
          *   interval 单位 1.25ms，timeout 单位 10ms。若 timeout 很小(如 100=1s)，
          *   锁屏/Doze 下极易触发监督超时断连——这是排查「APP 偶发断连」的第一手数据。 */
-        PRINTV("[DIAG] LinkEst int=%d(%dms) lat=%d timeout=%d(%dms)\n",
+        LOGF(LOG_DIAG, "[DIAG] LinkEst int=%d(%dms) lat=%d timeout=%d(%dms)\n",
               event->connInterval, (event->connInterval * 5) / 4,
               event->connLatency, event->connTimeout, event->connTimeout * 10);
     }
@@ -878,7 +908,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         // ★ v3.13: 200ms 后检查 advertising 状态，未恢复则触发重试机制
         tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
 
-        PRINTV("Disconnected.. Reason:0x%02x (%s)\n",
+        LOGF(LOG_DIAG, "Disconnected.. Reason:0x%02x (%s)\n",
               (unsigned)pEvent->linkTerminate.reason,
               KeyGo_DiscReasonStr(pEvent->linkTerminate.reason));
         PRINT("[OBS] DISCONNECTED reason=0x%02x (%s)\n",
@@ -907,7 +937,7 @@ static void peripheralParamUpdateCB(uint16_t connHandle, uint16_t connInterval,
         /* ★ 2026-07-17 埋点：打印参数更新协商结果（约连上 4s 后固件请求 min6/max100/lat0/timeout=100）。
          *   若这里 timeout 仍是 100(1s)，说明手机接受了 1s 监督超时 → 断连风险高，
          *   可作为「把 DEFAULT_DESIRED_CONN_TIMEOUT 提到 400(4s)」验证的对照数据。 */
-        PRINTV("[DIAG] ParamUpd int=%d(%dms) lat=%d timeout=%d(%dms)\n",
+        LOGF(LOG_DIAG, "[DIAG] ParamUpd int=%d(%dms) lat=%d timeout=%d(%dms)\n",
               connInterval, (connInterval * 5) / 4,
               connSlaveLatency, connTimeout, connTimeout * 10);
     }
@@ -1060,9 +1090,9 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 8 && tmos_memcmp(pValue, "RSSISET:", 8)) {
         /* ★ v3.36: per-phone RSSI 阈值校准（须已会话鉴权且有 owner 身份）。 */
-        PRINTV("[RSSISET] enter\n");
+        LOGF(LOG_RSSISET, "[RSSISET] enter\n");
         uint8_t r = Bonding_HandleRssiSetCmd(connHandle, pValue + 8, len - 8);
-        PRINTV("[RSSISET] exit r=%d\n", r);
+        LOGF(LOG_RSSISET, "[RSSISET] exit r=%d\n", r);
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT, 32);
     } else if (len >= 9 && tmos_memcmp(pValue, "ENCRYPT:", 8)) {
         /* ★ 方案1: 无 App 模式(OS 系统配对)开关。

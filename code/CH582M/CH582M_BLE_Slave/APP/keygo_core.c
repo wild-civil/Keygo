@@ -689,7 +689,7 @@ static void KeyGo_ProximityAct(void)
     if (g_deviceMode == 1 && g_ebikeProxMode == 1) {
         g_keyState = KSTATE_UNLOCKED;   // ★ 骑行视为已解锁
         KeyGo_Ride();
-        PRINTV("[STATE] proximity → RIDE (ebike + proxMode=1)\n");
+        LOGF(LOG_STATE, "[STATE] proximity → RIDE (ebike + proxMode=1)\n");
     } else {
         g_keyState = KSTATE_UNLOCKED;
         KeyGo_Unlock();
@@ -733,7 +733,7 @@ void KeyGo_ProcessStateMachine(void)
                 if (g_filteredRSSI != RSSI_UNINITIALIZED_F) {
                     uint8_t th = (g_filteredRSSI > g_cfgUnlockThreshold) ? 1
                                : (g_filteredRSSI < g_cfgLockThreshold)  ? 2 : 0;
-                    PRINTV("[OBS] rssi r=%d f=%d th=%d enc=%d\n",
+                    LOGF(LOG_OBS, "[OBS] rssi r=%d f=%d th=%d enc=%d\n",
                           (int)g_latestRSSI, (int)g_filteredRSSI, th, encNow);
                 }
             }
@@ -762,7 +762,7 @@ void KeyGo_ProcessStateMachine(void)
         // ★ v3.7: 使用可配置变量 g_cfgManualCooldownMs 替代硬编码宏
         if (now - g_lastCommandMs >= g_cfgManualCooldownMs) {
             g_manualCooldown = 0;
-            PRINTV("[STATE] manual command cooldown ended\n");
+            LOGF(LOG_STATE, "[STATE] manual command cooldown ended\n");
         } else {
             return;
         }
@@ -826,7 +826,7 @@ void KeyGo_ProcessStateMachine(void)
         g_lockCounter = 0;
         if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED) {
             g_unlockCounter = 0;
-            PRINTV("[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
+            LOGF(LOG_STATE, "[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
                   (int)g_filteredRSSI, (int)_unlockTh, g_cfgUnlockCount);
             KeyGo_ProximityAct();   // ★ 2026-07-19: 解锁 / (ebike+骑行偏好)骑行
         }
@@ -838,7 +838,7 @@ void KeyGo_ProcessStateMachine(void)
         if (g_lockCounter >= g_cfgLockCount && g_keyState != KSTATE_LOCKED) {
             g_keyState = KSTATE_LOCKED;
             g_lockCounter = 0;
-            PRINTV("[STATE] lock threshold reached (RSSI=%d < %d, count=%d)\n",
+            LOGF(LOG_STATE, "[STATE] lock threshold reached (RSSI=%d < %d, count=%d)\n",
                   (int)g_filteredRSSI, (int)_lockTh, g_cfgLockCount);
             KeyGo_Lock();
         }
@@ -1030,7 +1030,7 @@ void KeyGo_SendRawNotify(const char *msg)
         /* ★ 2026-07-11 fix2：首踢延迟 8(≈5ms) 先试，若 ATT 事务仍忙被拒，
          *    FlushRawNotify 会以 32(≈20ms，与状态通知同档) 退避重试，直到成功。 */
         tmos_start_task(Peripheral_TaskID, SBP_DEFERRED_RAW_EVT, 8);
-        PRINTV("[RAW] enqueue '%s' pending=%d\n", msg, s_rawQPending);
+        LOGF(LOG_RAW, "[RAW] enqueue '%s' pending=%d\n", msg, s_rawQPending);
     }
     // 队列满则丢弃最旧未发（极低概率，绑定类报文频率极低）
 }
@@ -1063,7 +1063,7 @@ void KeyGo_FlushRawNotify(void)
             st = 0xFE;  // bm_alloc 失败
         }
     }
-    PRINTV("[RAW] flush '%s' st=%d retry=%d pending=%d\n", m, (int)st, s_rawRetry, s_rawQPending);
+    LOGF(LOG_RAW, "[RAW] flush '%s' st=%d retry=%d pending=%d\n", m, (int)st, s_rawRetry, s_rawQPending);
 
     if (st == SUCCESS) {
         s_rawRetry = 0;

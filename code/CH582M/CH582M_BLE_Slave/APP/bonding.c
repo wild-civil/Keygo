@@ -116,11 +116,11 @@ void Bonding_DumpStatus(const char *tag)
 {
     uint8_t snvBonds = 0;
     GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &snvBonds);
-    PRINTV("[DIAG][%s] appOwners=%d snvBonds=%d authed=%d\n",
+    LOGF(LOG_DIAG, "[DIAG][%s] appOwners=%d snvBonds=%d authed=%d\n",
           tag ? tag : "?", s_bondCount, snvBonds, s_sessionAuthed);
     for (uint8_t i = 0; i < s_bondCount && i < BOND_ENTRY_MAX; i++) {
         uint8_t fp = (s_ltkFp[i][0] | s_ltkFp[i][1] | s_ltkFp[i][2] | s_ltkFp[i][3]) ? 1 : 0;
-        PRINTV("[DIAG]   owner[%d] phoneId=%02X%02X%02X%02X%02X%02X%02X%02X phoneKey=%02X%02X%02X%02X.. fp=%s rssi=%d/%d\n",
+        LOGF(LOG_DIAG, "[DIAG]   owner[%d] phoneId=%02X%02X%02X%02X%02X%02X%02X%02X phoneKey=%02X%02X%02X%02X.. fp=%s rssi=%d/%d\n",
               i, s_bondTbl[i].phoneId[0], s_bondTbl[i].phoneId[1], s_bondTbl[i].phoneId[2],
               s_bondTbl[i].phoneId[3], s_bondTbl[i].phoneId[4], s_bondTbl[i].phoneId[5],
               s_bondTbl[i].phoneId[6], s_bondTbl[i].phoneId[7],
@@ -390,7 +390,8 @@ void Bonding_OnLinkEncrypted(uint16_t connHandle) {
             s_ltkFp[i][2] == 0 && s_ltkFp[i][3] == 0) continue;  /* 空槽跳过 */
         if (tmos_memcmp(s_ltkFp[i], ltk, LTKFP_FP_LEN) == TRUE) {
             s_authedOwnerIdx = (int8_t)i;
-            PRINT("[BOND] No-App reconnect: owner %d identified by LTK fingerprint (per-phone ON)\n", i);
+            PRINT("[BOND] No-App reconnect: owner %d identified by LTK fingerprint (per-phone ON, unlock=%d lock=%d)\n",
+                  i, s_bondTbl[i].rssiUnlock, s_bondTbl[i].rssiLock);
             return;
         }
     }
@@ -922,7 +923,7 @@ uint8_t Bonding_HandleRssiSetCmd(uint16_t connHandle, const uint8_t *payload, ui
     if (Bonding_Save() != 0) {
         PRINT("[RSSISET] WARNING: save failed (not persisted)\n");
     }
-    PRINTV("[RSSISET] owner[%d] unlock=%d lock=%d\n", s_authedOwnerIdx, u, l);
+    LOGF(LOG_RSSISET, "[RSSISET] owner[%d] unlock=%d lock=%d\n", s_authedOwnerIdx, u, l);
     KeyGo_SendRawNotify("RSSISET:OK");
     return 0;
 }
@@ -935,7 +936,12 @@ uint8_t Bonding_HandleRssiSetCmd(uint16_t connHandle, const uint8_t *payload, ui
  *********************************************************************/
 uint8_t Bonding_GetActiveOwnerRssi(int16_t *unlock, int16_t *lock)
 {
-    if (s_sessionAuthed && s_authedOwnerIdx >= 0 &&
+    // ★ v3.36.3-fix4 修正：去掉 s_sessionAuthed 门控，使「无 App 纯 OS 重连（LTK 指纹反查）」定位到的
+    //   owner 也能用其专属阈值。s_sessionAuthed 仅保护「写」操作(RSSISET 改阈值需真 AUTH 会话)，
+    //   选「读」阈值只需 s_authedOwnerIdx 有效即可——owner 身份两大来源(AUTH/BIND 会话 / OS 重连指纹反查)
+    //   都代表「已可信定位到某台已绑手机」，均应套用该 owner 的 rssiUnlock/rssiLock。
+    //   此前无 App 模式 s_sessionAuthed 恒为 0 → 本函数返回 0 → 状态机回退全局阈值（per-phone 名存实亡）。
+    if (s_authedOwnerIdx >= 0 &&
         (uint8_t)s_authedOwnerIdx < s_bondCount) {
         *unlock = s_bondTbl[s_authedOwnerIdx].rssiUnlock;
         *lock   = s_bondTbl[s_authedOwnerIdx].rssiLock;

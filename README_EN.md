@@ -98,6 +98,29 @@ KeyGo is built around three principles:
 | `fwsec` | Protocol capability version (1=baseline, 2=auth v1) | `2` |
 | `t` | Chip temperature (°C), CH582M internal TSENSE (5s throttle); `null`/absent on disconnect or when not sampled | `32.5` |
 
+### 5.1 UART Debug Commands (v3.36.3-fix4)
+
+In **DEBUG builds** the firmware accepts real-time UART1 commands to observe no-App mode / per-phone threshold / RSSI behavior (baud = firmware config, default 115200; commands are case-insensitive, CR-terminated).
+
+> The switches are a **bitmask of categories** (`verbose` is the master switch). Active only in DEBUG builds; in non-DEBUG builds all logs are compiled out (zero overhead). By default only `scan` / `rssi` are ON; all other categories are silent.
+
+| Command | Controls | Default | Prefix | Meaning |
+|---------|----------|---------|--------|---------|
+| `scan on\|off` | `g_scanLogEnabled` | ON | — | Scan-request log (low frequency, ON by default) |
+| `rssi on\|off` | `g_rssiLogEnabled` | ON | `[RSSI]` | **Key to verify per-phone threshold is actually used**: prints `using owner threshold unlock=-45 lock=-55`, should match the `[BOND]` fingerprint line |
+| `verbose on\|off` | `g_logMask` master | OFF | all | Toggle ALL category logs at once (= `obs\|raw\|state\|diag\|rssiset\|gap`) |
+| `obs on\|off` | `LOG_OBS` | OFF | `[OBS] rssi` | Periodic RSSI observation (~1s in no-App mode, the #1 screen-spam source); watch live signal drift |
+| `raw on\|off` | `LOG_RAW` | OFF | `[RAW]` | RAW notify queue enqueue/flush |
+| `state on\|off` | `LOG_STATE` | OFF | `[STATE]` | State machine "unlock/lock threshold reached" / "manual-command cooldown ended" |
+| `diag on\|off` | `LOG_DIAG` | OFF | `[DIAG]` | Connection params (LinkEst/ParamUpd), owner list (dual view), disconnect reason |
+| `rssiset on\|off` | `LOG_RSSISET` | OFF | `[RSSISET]` | RSSI calibration enter/exit/owner result |
+| `gap on\|off` | `LOG_GAP` | OFF | `[GAP]` | adv/conn healthy periodic health check |
+| `help` | — | — | — | List all commands |
+
+- **No argument = toggle that switch** (e.g. `obs` flips ON/OFF); `on` forces ON, `off` forces OFF.
+- **Always printed (not gated by any switch)**: connect/disconnect + reason (`[OBS] CONNECTED`/`[OBS] DISCONNECTED`), unlock/lock/trunk (`[KEY]`), bind success/fail (`[BIND]`), encryption up/down (`[OBS] LINK_ENCRYPTED`/`LINK_PLAIN`), fingerprint-identification result (`[BOND] No-App reconnect: owner N identified ... (per-phone ON, unlock=.. lock=..)`), watchdog / error / warning.
+- **Typical debug flow**: `rssi` is ON by default — after reconnect, check `[RSSI] using owner threshold` matches the `unlock/lock` in the `[BOND]` line → match means per-phone threshold is truly applied; for live RSSI drift add `obs on` (turn `obs off` when done to stop the spam).
+
 ## 6. Architecture & Status
 
 ### 6.1 Firmware

@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix3"  /* ★ v3.36.3-fix3 (2026-07-22): 汇总 无App per-phone阈值(LTK指纹) + 串口日志细分开关(verbose) + 配对窗60s/ERASE_AUTO关闭/多绑不被挤；详见决策文档 §8.7/§8.8 */
+#define KEYGO_FW_VERSION   "3.36.3-fix4"  /* ★ v3.36.3-fix4 (2026-07-22): 串口日志开关细分(obs/raw/state/diag/rssiset/gap + verbose 总闸) + 指纹识别时串口输出该 owner 的 rssi 阈值；详见决策文档 §8.7/§8.8 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
@@ -122,15 +122,31 @@ void KeyGo_SaveEncryptPage(uint8_t encFlag);
 extern uint8_t  g_scanLogEnabled;        // 1=打印扫描请求日志；0=静默
 extern uint8_t  g_rssiLogEnabled;        // ★ v3.36.2-debug: 1=打印 [RSSI] using owner threshold 日志；0=静默（串口 `rssi` 命令控制）
 
-// ★ v3.36.2-verbose: 常规运行/诊断日志总开关（串口 `verbose`[on|off] 切换，**默认关**）。
-//   受控日志（默认静默，排查时 `verbose on` 打开）：[OBS] rssi / [RAW] / [RSSISET] / [STATE] / [DIAG] / [GAP] healthy 等高频/诊断类。
-//   始终输出（不受此开关影响）：连接/断连事件及原因([OBS] CONNECTED/DISCONNECTED)、解锁/上锁/后备箱([KEY])、
-//     绑定成功/失败([BIND])、加密升降([OBS] LINK_*)、看门狗/错误/警告类。
+// ★ v3.36.3-fix4: 串口日志「分类」开关（位掩码，DEBUG 下生效）。
+//   scan/rssi 沿用原有独立 uint8_t 开关（串口 `scan` / `rssi`）；其余诊断类日志归入 g_logMask 位掩码，
+//   可单独开某一类（obs / raw / state / diag / rssiset / gap），或 `verbose` 总闸一键全开/全关。
+//   默认 g_logMask=0（全静默）；排查时 `verbose on` 全开，或按需 `obs on` / `diag on` 等单独开。
+//   各分类含义：
+//     LOG_OBS     [OBS] rssi 周期 RSSI 观察（无App 模式 ≈1s 一次，刷屏头号源）
+//     LOG_RAW     [RAW] 队列 enqueue/flush
+//     LOG_STATE   [STATE] 状态机阈值到达/冷却结束
+//     LOG_DIAG    [DIAG] 连接参数/owner 列表/断连原因
+//     LOG_RSSISET [RSSISET] 校准 enter/exit/owner
+//     LOG_GAP     [GAP] adv/conn healthy 周期健康检查
+//   始终输出（不受开关影响）：连接/断连及原因([OBS] CONNECTED/DISCONNECTED)、解锁/上锁/后备箱([KEY])、
+//     绑定成功/失败([BIND])、加密升降([OBS] LINK_*)、指纹识别结果([BOND])、看门狗/错误/警告类。
+#define LOG_OBS           0x01
+#define LOG_RAW           0x02
+#define LOG_STATE         0x04
+#define LOG_DIAG          0x08
+#define LOG_RSSISET       0x10
+#define LOG_GAP           0x20
+#define LOG_VERBOSE_ALL   0x3F   // obs|raw|state|diag|rssiset|gap
 #ifdef DEBUG
-extern uint8_t  g_verboseLogEnabled;     // 1=打印常规运行/诊断日志；0=静默（默认关）
-#define PRINTV(X...) do { if (g_verboseLogEnabled) printf(X); } while (0)
+extern uint8_t  g_logMask;                // verbose 子类别位掩码（默认 0=全静默）
+#define LOGF(CAT, X...) do { if (g_logMask & (CAT)) printf(X); } while (0)
 #else
-#define PRINTV(X...)                       // 非 DEBUG 构建：完全剔除，零开销
+#define LOGF(CAT, X...)                   // 非 DEBUG 构建：完全剔除，零开销
 #endif
 void KeyGo_UartCmdPoll(void);            // 主循环调用：解析 UART1 调试命令
 
