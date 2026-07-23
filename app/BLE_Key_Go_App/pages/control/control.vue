@@ -46,12 +46,14 @@
 
       <!-- ★ 车辆状态大卡 -->
       <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
-        <!-- ★ 2026-07-23: 车辆大卡顶部设备身份。只显示自定义名(不带「( 出厂名 )」后缀)，未命名回退出厂名 -->
+      <view class="car-icon">{{ carIcon }}</view>
+      <!-- ★ 2026-07-23: 设备身份(自定义名/出厂名)下移到图标下方，与锁车状态同行(标题栏：左名右状态) -->
+      <view class="car-head">
         <text class="car-identity" v-if="bleStore.deviceId">{{ bleStore.controlTopName }}</text>
-        <view class="car-icon">{{ carIcon }}</view>
-        <view class="car-status">
-          <text class="car-state-text">{{ bleStore.stateText }}</text>
-          <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
+        <text class="car-state-text">{{ bleStore.stateText }}</text>
+      </view>
+      <view class="car-status">
+        <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
           <!-- ▼ ★ v3.15: 电池电量 — 默认 emoji 图标
                如需切换为 CSS 电池组件，注释下面 18 行，取消注释 19~24 行 -->
           <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
@@ -453,13 +455,23 @@ async function onToggleProxRide(v) {
   border-radius: 8rpx;
   padding: 2rpx 10rpx;
 }
-/* ★ 2026-07-23: 车辆大卡顶部设备身份，样式对齐 index.vue 连接页 .custom-name-display */
-.car-identity {
-  display: block;
+/* ★ 2026-07-23: 车辆大卡标题栏（图标下方：自定义名 + 空格 + 锁车状态，整体居中） */
+.car-head {
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 16rpx; /* ★ 自定义名 与 锁车状态 之间的空格 */
+  margin-bottom: 14rpx;
+}
+
+.car-identity { 
   color: var(--accent);
   font-weight: bold;
-  font-size: 32rpx;
-  margin-bottom: 12rpx; /* 控制页 自定义名称下方间距； 上方留白由 .car-card 的 padding: 50rpx 提供 */
+  font-size: 32rpx; /* ★ 自定义名字体大小 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
 }
 
 
@@ -495,10 +507,9 @@ async function onToggleProxRide(v) {
 .car-icon { font-size: 80rpx; margin-bottom: 16rpx; }
 
 .car-state-text {
-  font-size: 36rpx;
+  font-size: 32rpx; /* ★ 控制页面 锁车状态 字体大小 */
   font-weight: 700;
   color: var(--text-primary);
-  display: block;
 }
 
 .car-rssi {
