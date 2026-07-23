@@ -2377,11 +2377,17 @@ export const useBleStore = defineStore('ble', {
      * @param {string} name 自定义名
      */
     _seedCustomNameByMac(mac, name) {
-      if (!mac || !name) return
+      if (!mac) return
       const key = mac.replace(/:/g, '').toUpperCase()
-      if (this._customNamesByMac[key] === name) return
       const next = { ...this._customNamesByMac }
-      next[key] = name
+      // ★ 恢复默认名：空名 = 删除 MAC 副本（而非跳过），否则断连态仍显旧名 + 「已命名」徽章
+      if (name) {
+        if (next[key] === name) return
+        next[key] = name
+      } else {
+        if (!(key in next)) return
+        delete next[key]
+      }
       this._customNamesByMac = next
       try {
         uni.setStorageSync('ble_device_custom_names', next)
@@ -4369,15 +4375,19 @@ export const useBleStore = defineStore('ble', {
         this._seedCustomNameByMac(this.deviceId, name)
       }
 
-      // ★ 本地存储（按序列号索引）
+      // ★ 本地存储（按序列号索引）；恢复默认名时删除条目而非存空串
       if (this.serialNumber) {
         this._loadDeviceNames()
-        this._deviceNames[this.serialNumber] = {
-          name: name,
-          lastSeen: Date.now()
+        if (name) {
+          this._deviceNames[this.serialNumber] = {
+            name: name,
+            lastSeen: Date.now()
+          }
+        } else {
+          delete this._deviceNames[this.serialNumber]
         }
         this._saveDeviceNames()
-        console.log('[Store] 设备名称已保存到本地 (SN:', this.serialNumber, '):', name)
+        console.log('[Store] 设备名称已保存到本地 (SN:', this.serialNumber, '):', name || '(已恢复默认名)')
       } else {
         console.warn('[Store] 设备序列号尚未就绪，名称仅暂存内存，断开后将丢失')
       }

@@ -730,7 +730,9 @@ function showNameDialog() {
   }
   pwModal.mode = 'setName'
   pwModal.title = '设置设备名称'
-  pwModal.hint = '给设备起个名字，如车牌号、车型等'
+  pwModal.hint = bleStore.customDeviceName
+    ? '清空输入框并保存可恢复为出厂名称'
+    : '给设备起个名字，如车牌号、车型等'
   pwModal.placeholder = '设备名称（最长20字符，支持中文）'
   pwModal.value = bleStore.customDeviceName || ''
   pwModal.showDefaultHint = false
@@ -741,21 +743,21 @@ function showNameDialog() {
   pwModal.visible = true
 }
 
+// ★ 恢复默认名称 = 在名称弹窗里清空输入框并保存（handleSetName 已支持空名，
+//   经 setDeviceName('') 同步清空 SN + MAC 两份本地存储，见 ble.js）
+
 async function handleSetName() {
   const name = pwModal.value.trim()
-  if (!name) {
-    toast.info('请输入设备名称')
-    return
-  }
+  const isRestore = !name
   pwModal.visible = false
-  uni.showLoading({ title: '保存中...', mask: true })
+  uni.showLoading({ title: isRestore ? '恢复中...' : '保存中...', mask: true })
   try {
     await bleStore.setDeviceName(name)
     uni.hideLoading()
-    toast.success('设备名称已更新')
+    toast.success(isRestore ? '已恢复默认名称' : '设备名称已更新')
   } catch (err) {
     uni.hideLoading()
-    toast.error(err.message || '保存失败')
+    toast.error(err.message || '操作失败')
   }
 }
 
