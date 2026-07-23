@@ -280,6 +280,19 @@ export const useBleStore = defineStore('ble', {
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
     _customNamesByMac: (() => { try { return uni.getStorageSync('ble_device_custom_names') || {} } catch (e) { return {} } })(), // ★ v3.36.3-fix5: 按 MAC 索引的本机自定义名副本(由 customDeviceName 持久化而来)，供断连后的扫描列表/重连卡统一显示
     _advertisedNames: (() => { try { return uni.getStorageSync('ble_advertised_names') || {} } catch (e) { return {} } })(), // ★ 2026-07-23: 设备真实广播名(扫描拿到)按 MAC 持久化，作为出厂名"真相"(与手机蓝牙列表一致)
+    knownDevices: (() => {  // ★ 2026-07-23 ②: 所有连过的设备集合 { [cleanMac]: { mac, lastConnectedAt } }，持久化 ble_known_devices
+      try {
+        const map = uni.getStorageSync('ble_known_devices') || {}
+        // 兼容旧数据：升级前只记了单值 ble_last_device_id，补入集合，避免老用户"已知设备"空列表
+        const legacy = uni.getStorageSync('ble_last_device_id') || ''
+        if (legacy) {
+          const k = legacy.replace(/:/g, '').toUpperCase()
+          if (!map[k]) map[k] = { mac: legacy, lastConnectedAt: 0 }
+        }
+        return map
+      } catch (e) { return {} }
+    })(),
+    defaultDeviceId: (() => { try { return uni.getStorageSync('ble_default_device_id') || '' } catch (e) { return '' } })(), // ★ 2026-07-23 ④: 用户标记默认设备(cleanMac)，持久化 ble_default_device_id
     /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
      *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
     _configDirty: false,
@@ -340,6 +353,31 @@ export const useBleStore = defineStore('ble', {
     //   本 key 始终保留 → 断连后/杀App后仍可一键接管，且绝不被自动重连路径读取（自动路径只读 ble_device_id）。
     knownDeviceId() {
       return this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
+    },
+
+    // ★ 2026-07-23 ②: 已知设备列表（用于"重新连接"卡片，多设备展开为列表）。
+    //   排序：默认设备置顶(④) > 最近连接时间倒序。每项含展示名/自定义名/MAC/是否默认。
+    //   单设备时返回长度为 1，UI 退化为单卡(与现状一致)；≥2 台展开为可滚动列表。
+    knownDevicesList() {
+      const arr = Object.keys(this.knownDevices || {}).map(k => {
+        const d = this.knownDevices[k]
+        const custom = this.customNameForMac(d.mac)
+        const factory = this._resolveFactoryName(d.mac)
+        return {
+          mac: d.mac,
+          customName: custom,
+          displayName: custom || factory,
+          lastConnectedAt: d.lastConnectedAt || 0,
+          isDefault: (this.defaultDeviceId || '').replace(/:/g, '').toUpperCase() === k,
+        }
+      })
+      const def = (this.defaultDeviceId || '').replace(/:/g, '').toUpperCase()
+      arr.sort((a, b) => {
+        if (a.mac.replace(/:/g, '').toUpperCase() === def) return -1
+        if (b.mac.replace(/:/g, '').toUpperCase() === def) return 1
+        return b.lastConnectedAt - a.lastConnectedAt
+      })
+      return arr
     },
 
     // ==================== 2026-07-23 设备命名 / 出厂名 / 已配对 功能组 ====================
@@ -1875,6 +1913,7 @@ export const useBleStore = defineStore('ble', {
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
+      this._touchKnownDevice(deviceId) // ★ 2026-07-23 ②: 记录到已知设备集合
       if (!this.deviceName) {
         this.deviceName = this._resolveFactoryName(this.deviceId)
       }
@@ -2411,6 +2450,25 @@ export const useBleStore = defineStore('ble', {
         if (!this._advertisedNames) this._advertisedNames = {}
         this._advertisedNames[key] = name
         try { uni.setStorageSync('ble_advertised_names', this._advertisedNames) } catch (e) {}
+      },
+
+      // ★ 2026-07-23 ②: 记录一台"连过的设备"到 knownDevices 集合(多设备记忆)。
+      //   仅成功连接(_finalizeConnection)时调用；陌生设备永不进集合。
+      _touchKnownDevice(mac) {
+        if (!mac) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        const next = { ...(this.knownDevices || {}) }
+        next[key] = { mac, lastConnectedAt: Date.now() }
+        this.knownDevices = next
+        try { uni.setStorageSync('ble_known_devices', next) } catch (e) {}
+      },
+
+      // ★ 2026-07-23 ④: 把某台设为默认设备(在重连列表中置顶)。
+      setDefaultDevice(mac) {
+        if (!mac) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        this.defaultDeviceId = key
+        try { uni.setStorageSync('ble_default_device_id', key) } catch (e) {}
       },
 
       // 自定义名 + 出厂名组合显示，例如「爱车 ( KeyGo-5E3D0C )」。

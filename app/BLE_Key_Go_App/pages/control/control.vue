@@ -5,14 +5,35 @@
       <text v-if="bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused'">🔄 设备离线，正在自动重连中...</text>
       <text v-else>⚠️ 设备未连接</text>
       <!-- ★ 2026-07-22: 手动断开后"重新连接"按钮（已知设备记忆驱动，OS 占用也能接管 ACL） -->
-      <view class="reconnect-block" v-if="bleStore.knownDeviceId">
-        <view class="reconnect-info">
-          <text class="reconnect-label">已知设备</text>
-          <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
-          <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
-          <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
-        </view>
-        <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
+      <view class="reconnect-block" v-if="bleStore.knownDevicesList.length">
+        <!-- 多设备：展开为可滚动列表 -->
+        <template v-if="bleStore.knownDevicesList.length > 1">
+          <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
+          <scroll-view class="known-list" scroll-y>
+            <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac">
+              <view class="reconnect-info">
+                <text class="reconnect-name">{{ d.displayName }}</text>
+                <text class="reconnect-mac">{{ d.mac }}</text>
+                <text v-if="d.customName" class="device-alias-tag">已命名</text>
+                <text v-if="d.isDefault" class="device-default-tag">默认</text>
+              </view>
+              <view class="known-item-actions">
+                <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
+                <button v-if="!d.isDefault" class="default-btn" @tap="handleSetDefault(d.mac)">默认</button>
+              </view>
+            </view>
+          </scroll-view>
+        </template>
+        <!-- 单设备：维持原单卡 -->
+        <template v-else>
+          <view class="reconnect-info">
+            <text class="reconnect-label">已知设备</text>
+            <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
+            <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+            <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
+          </view>
+          <button class="reconnect-btn" @tap="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
+        </template>
       </view>
     </view>
 
@@ -266,19 +287,26 @@ async function handleStatus() {
   }
 }
 
-// ★ 2026-07-22: 手动断开后一键重新连接（OS 已占用同 ACL 时也能接管，connect 不受 dormant 门控）
-async function handleReconnect() {
-  const id = bleStore.knownDeviceId
+// ★ 2026-07-22/23: 手动断开后一键重新连接（可指定 targetMac 用于多设备列表）
+async function handleReconnect(targetMac) {
+  const id = targetMac || bleStore.knownDeviceId
   if (!id) return
   uni.showLoading({ title: '连接中...', mask: true })
   try {
-    await bleStore.connect(id, bleStore.deviceName || 'KeyGo')
+    await bleStore.connect(id, bleStore._resolveFactoryName(id))
     uni.hideLoading()
     toast.success('连接成功')
   } catch (e) {
     uni.hideLoading()
     toast.error('连接失败，请重试')
   }
+}
+
+// ★ 2026-07-23 ④: 把指定设备设为默认(在重连列表中置顶)
+function handleSetDefault(mac) {
+  if (!mac) return
+  bleStore.setDefaultDevice(mac)
+  toast.success('已设为默认设备')
 }
 
 async function setRSSI(value) {
@@ -381,6 +409,39 @@ async function onToggleProxRide(v) {
   font-size: 24rpx;
 }
 .reconnect-btn:active { opacity: 0.7; }
+
+/* ★ 2026-07-23 ②④: 多设备重连列表 */
+.known-list { max-height: 320rpx; margin-top: 10rpx; }
+.known-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18rpx 0;
+  border-top: 1rpx solid var(--border);
+}
+.known-item:first-child { border-top: none; }
+.known-item-actions { display: flex; align-items: center; flex: 0 0 auto; margin-left: 16rpx; }
+.default-btn {
+  margin-left: 12rpx;
+  width: auto;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1rpx solid var(--border);
+  border-radius: 20rpx;
+  padding: 12rpx 20rpx;
+  font-size: 22rpx;
+}
+.default-btn:active { opacity: 0.7; }
+.device-default-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  margin-left: 8rpx;
+  font-size: 18rpx;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
 
 /* ★ v3.36.3-fix5: 「已命名」徽章（设备已设自定义名），重连卡/连接态设备名条通用 */
 .device-alias-tag {
