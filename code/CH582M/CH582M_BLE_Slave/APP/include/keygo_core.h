@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix4"  /* ★ v3.36.3-fix4 (2026-07-22): 串口日志开关细分(obs/raw/state/diag/rssiset/gap + verbose 总闸) + 指纹识别时串口输出该 owner 的 rssi 阈值；详见决策文档 §8.7/§8.8 */
+#define KEYGO_FW_VERSION   "3.36.3-fix8"  /* ★ v3.36.3-fix8 (2026-07-23): 新增骑行态 KSTATE_RIDE，状态报文 st 报 "RIDE"；手动/靠近骑行均进入 RIDE（=已解锁语义：离场锁车/LED 亮），App 控制页显示「骑行模式」；手动 RIDE 命令后补 KeyGo_NotifyStatus 即时推送。前序 v3.36.3-fix5/6/7 为 App 侧 UI（控制页标题栏居中、命名入口简化），未 bump 固件 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

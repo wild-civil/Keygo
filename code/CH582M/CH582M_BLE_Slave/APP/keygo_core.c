@@ -330,8 +330,8 @@ static void KeyGo_FactoryReset_Poll(void)
 
     if (g_frState == 1) {  // arming：按住累计中
         if (!pressed) {    // 提前松开 → 取消
-            if (g_keyState == KSTATE_UNLOCKED) GPIOB_SetBits(GPIO_Pin_4);
-            else                               GPIOB_ResetBits(GPIO_Pin_4);
+            if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) GPIOB_SetBits(GPIO_Pin_4);
+            else GPIOB_ResetBits(GPIO_Pin_4);
             KeyGo_FactoryReset_SendBle("RESET:CANCEL");
             PRINT("[FR] released early, cancelled\n");
             g_frState = 0;
@@ -466,7 +466,8 @@ static uint8_t g_rideStep = 0;
 
 void KeyGo_Ride(void)
 {
-    if (g_rideStep != 0) return;   // 上一轮双脉冲未结束，忽略
+    g_keyState = KSTATE_RIDE;      // ★ v3.36.3-fix8: 骑行态=已解锁语义；状态报文 st 报 "RIDE"
+    if (g_rideStep != 0) return;   // 上一轮双脉冲未结束，忽略（keyState 已置 RIDE）
     g_rideStep = 0;
     GPIOA_SetBits(PIN_RIDE_GPIO);  // 第 1 个脉冲 ON（继电器控制，与 LED 解耦）
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_HALF_TICKS);
@@ -529,13 +530,13 @@ void KeyGo_LedTrunkBlinkHandler(void)
         /* 闪烁结束 → 恢复 LED 到当前锁状态 */
         g_ledBlinkLocked = 0;
         g_ledTrunkBlinkToggle = 0;
-        if (g_keyState == KSTATE_UNLOCKED) {
-            GPIOB_SetBits(GPIO_Pin_4);     // 解锁 → LED 亮 (高电平)
+        if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
+            GPIOB_SetBits(GPIO_Pin_4);     // 解锁/骑行 → LED 亮 (高电平)
         } else {
             GPIOB_ResetBits(GPIO_Pin_4);   // 锁车 → LED 灭 (低电平)
         }
         PRINT("[LED] trunk blink end, restored to %s\n",
-              g_keyState == KSTATE_UNLOCKED ? "ON (HIGH)" : "OFF (LOW)");
+              (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) ? "ON (HIGH)" : "OFF (LOW)");
         return;
     }
     /* 翻转 LED: 奇数翻转 → OFF (低电平), 偶数翻转 → ON (高电平) */
@@ -558,13 +559,13 @@ void KeyGo_LedRideBlinkHandler(void)
         /* 闪烁结束 → 恢复 LED 到当前锁状态 */
         g_ledBlinkLocked = 0;
         g_ledRideBlinkToggle = 0;
-        if (g_keyState == KSTATE_UNLOCKED) {
-            GPIOB_SetBits(GPIO_Pin_4);     // 解锁 → LED 亮 (高电平)
+        if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
+            GPIOB_SetBits(GPIO_Pin_4);     // 解锁/骑行 → LED 亮 (高电平)
         } else {
             GPIOB_ResetBits(GPIO_Pin_4);   // 锁车 → LED 灭 (低电平)
         }
         PRINT("[LED] ride blink end, restored to %s\n",
-              g_keyState == KSTATE_UNLOCKED ? "ON (HIGH)" : "OFF (LOW)");
+              (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) ? "ON (HIGH)" : "OFF (LOW)");
         return;
     }
     /* 翻转 LED: 奇数翻转 → OFF (低电平), 偶数翻转 → ON (高电平) */
@@ -681,14 +682,13 @@ static void KeyGo_ObsBlinkTrigger(void)
     g_obsBlinkNextMs = Peripheral_GetSystemMs();
 }
 
-// ★ 2026-07-19: 进近解锁动作封装 — 电瓶车且开启「靠近骑行」偏好时进入骑行, 否则普通解锁。
-//   关键: 骑行路径必须显式置 g_keyState=KSTATE_UNLOCKED, 否则状态机仍认为 LOCKED →
-//   离场不触发锁车、LED 状态错乱、下次进近又重复解锁。注意 KeyGo_Ride() 本身【不】置 keyState。
+// ★ v3.36.3-fix8: 进近解锁动作封装 — 电瓶车且开启「靠近骑行」偏好时进入骑行, 否则普通解锁。
+//   骑行态由 KeyGo_Ride() 内部置 KSTATE_RIDE（=已解锁语义：离场锁车 / LED 亮 / 状态报文报 RIDE），
+//   此处【不】再显式置 keyState，避免与 KeyGo_Ride() 重复赋值。
 static void KeyGo_ProximityAct(void)
 {
     if (g_deviceMode == 1 && g_ebikeProxMode == 1) {
-        g_keyState = KSTATE_UNLOCKED;   // ★ 骑行视为已解锁
-        KeyGo_Ride();
+        KeyGo_Ride();   // ★ 内部置 KSTATE_RIDE
         LOGF(LOG_STATE, "[STATE] proximity → RIDE (ebike + proxMode=1)\n");
     } else {
         g_keyState = KSTATE_UNLOCKED;
@@ -721,8 +721,8 @@ void KeyGo_ProcessStateMachine(void)
             g_obsBlinkLeft--;
             g_obsBlinkNextMs = Peripheral_GetSystemMs() + 160;  // ~100ms 半周期
             if (g_obsBlinkLeft == 0) {
-                if (g_keyState == KSTATE_UNLOCKED) GPIOB_SetBits(GPIO_Pin_4);
-                else                                GPIOB_ResetBits(GPIO_Pin_4);
+                if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) GPIOB_SetBits(GPIO_Pin_4);
+                else GPIOB_ResetBits(GPIO_Pin_4);
             }
         }
 
@@ -824,7 +824,7 @@ void KeyGo_ProcessStateMachine(void)
         // if (g_unlockCounter < g_cfgUnlockCount) g_unlockCounter++; // 之前版本：g_unlockCounter++;  
         g_unlockCounter++; // ★ v3.31 方案B: 直接 ++（计数溢出由 App 端 Math.min 钳制显示，固件保持原样避免锁车阈值响应延迟）
         g_lockCounter = 0;
-        if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED) {
+        if (g_unlockCounter >= g_cfgUnlockCount && g_keyState != KSTATE_UNLOCKED && g_keyState != KSTATE_RIDE) {
             g_unlockCounter = 0;
             LOGF(LOG_STATE, "[STATE] unlock threshold reached (RSSI=%d > %d, count=%d)\n",
                   (int)g_filteredRSSI, (int)_unlockTh, g_cfgUnlockCount);
@@ -931,7 +931,8 @@ void KeyGo_NotifyStatus(void)
     int n = snprintf(json, sizeof(json),
         "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"ou\":%d,\"ol\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d,\"conn\":%d,\"enc\":%d,\"t\":%d,\"er\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
-        g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" : "ACTION",
+        g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" :
+        g_keyState == KSTATE_RIDE     ? "RIDE"     : "ACTION",
         (int)g_latestRSSI,
         (int)(g_filteredRSSI != RSSI_UNINITIALIZED_F ? (int)g_filteredRSSI : RSSI_UNINITIALIZED),
         d2,
@@ -1211,6 +1212,7 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
     if (len == 4 && upper[0] == 'R' && upper[1] == 'I' && upper[2] == 'D' && upper[3] == 'E') {
         if (g_deviceMode == 1) {
             KeyGo_Ride();
+            KeyGo_NotifyStatus();   // ★ v3.36.3-fix8: 骑行改变 keyState，立即推送状态让 App 显示「骑行模式」
             PRINT("[RIDE] ride (ebike)\n");
         } else {
             // car 模式 RIDE 无意义 → 拒绝

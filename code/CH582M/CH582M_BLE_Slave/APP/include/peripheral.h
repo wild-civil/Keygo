@@ -132,7 +132,8 @@ extern "C" {
 typedef enum {
     KSTATE_LOCKED   = 0,
     KSTATE_UNLOCKED = 1,
-    KSTATE_ACTION   = 2
+    KSTATE_ACTION   = 2,
+    KSTATE_RIDE     = 3   // ★ v3.36.3-fix8: 电瓶车骑行态（解锁+启动骑行），状态报文 st 报 "RIDE"，App 显示「骑行模式」
 } KeyState_t;
 
 // ── 连接信息 ──

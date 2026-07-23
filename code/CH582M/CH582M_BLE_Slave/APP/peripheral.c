@@ -678,7 +678,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
          *  tmos_stop_task 取消此事件，不会到达这里。
          *  双重校验（+g_deviceConnected）防止极端竞态：
          *  取消指令发出前 TMOS 已调度此事件 → 仍会触发 → 但 g_deviceConnected==1 跳过 */
-        if (!g_deviceConnected && g_keyState == KSTATE_UNLOCKED) {
+        if (!g_deviceConnected && (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE)) {
             PRINT("[SAFETY] disconnect lock timer expired, locking\n");
             KeyGo_Lock();
             g_keyState = KSTATE_LOCKED;
@@ -880,7 +880,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
          *   延时模式（dlockMs>0）：启动定时器延迟锁车，允许断连后快速重连恢复
          *   重连成功后由 Peripheral_LinkEstablished 取消此定时器
          *   定时器到期时若仍断连则执行锁车 */
-        if (g_keyState == KSTATE_UNLOCKED) {
+        if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
             // ★ v3.32.2-fix: 手动模式(autolock=0)完全不自动锁车，连断连场景也不锁
             //   此前仅 RSSI 状态机受 autolock 闸门保护，断连自动锁未受控，导致手动模式
             //   下设备解锁后断连仍会在 dlock 后自动上锁，与「完全手动：也不自动锁车」矛盾。

@@ -158,7 +158,7 @@ export const useBleStore = defineStore('ble', {
     devices: [],
 
     // 设备状态（从 FF02 Notify 接收）
-    deviceState: 'LOCKED',        // LOCKED / UNLOCKED / ACTION
+    deviceState: 'LOCKED',        // LOCKED / UNLOCKED / RIDE / ACTION
     deviceMode: 'car',            // ★ Phase 2: 设备模式 'car' / 'ebike'（权威来自设备状态 m，本地缓存兜底）
     rssi: -999,
     filteredRssi: -999,
@@ -324,7 +324,7 @@ export const useBleStore = defineStore('ble', {
 
   getters: {
     stateText: (state) => {
-      const map = { 'LOCKED': '已锁车', 'UNLOCKED': '已解锁', 'ACTION': '执行中...' }
+      const map = { 'LOCKED': '已锁车', 'UNLOCKED': '已解锁', 'RIDE': '骑行模式', 'ACTION': '执行中...' }
       return map[state.deviceState] || state.deviceState
     },
 
@@ -456,7 +456,7 @@ export const useBleStore = defineStore('ble', {
       return `${(state.geofenceDistance / 1000).toFixed(1)}km${errSuffix}`
     },
 
-    isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
+    isUnlocked: (state) => state.connected && (state.deviceState === 'UNLOCKED' || state.deviceState === 'RIDE'),
 
     // ★ Phase 2: 双模式派生状态
     isEbike: (state) => state.deviceMode === 'ebike',

@@ -218,7 +218,7 @@ int main(void)
     WWDG_SetCounter(26);
 
     /* LED 最终同步：确保 LED 反映实际锁状态 */
-    if (g_keyState == KSTATE_UNLOCKED) {
+    if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
         GPIOB_SetBits(GPIO_Pin_4);     /* 解锁 → LED 亮 (高电平) */
     } else {
         GPIOB_ResetBits(GPIO_Pin_4);   /* 锁车 → LED 灭 (低电平) */
