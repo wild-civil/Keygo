@@ -17,14 +17,7 @@
     </view>
 
     <template v-else>
-      <!-- ★ v3.36.3-fix5: 连接态设备名条(显示 customDeviceName) + 已命名徽章 -->
-      <view class="device-tag" v-if="bleStore.deviceId">
-        <view class="device-tag-text">
-          <text class="device-tag-name">{{ bleStore.connectedDisplayName }}</text>
-          <text class="device-tag-mac">{{ bleStore.deviceId }}</text>
-        </view>
-        <text v-if="bleStore.customDeviceName" class="device-alias-tag">已命名</text>
-      </view>
+      <!-- ★ 2026-07-23: 设备身份移到车辆大卡顶部(car-identity)，不再单独显示 MAC 行/已命名徽章 -->
       <!-- ★ v3.15-#21: Status Notify 过期警告 — 设备连接中但推送超时（静默断连） -->
       <view class="stale-warning" v-if="bleStore.statusStale">
         <text>⚠️ 设备状态已过期，连接可能已中断</text>
@@ -32,6 +25,8 @@
 
       <!-- ★ 车辆状态大卡 -->
       <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
+        <!-- ★ 2026-07-23: 车辆大卡顶部设备身份。只显示自定义名(不带「( 出厂名 )」后缀)，未命名回退出厂名 -->
+        <text class="car-identity" v-if="bleStore.deviceId">{{ bleStore.controlTopName }}</text>
         <view class="car-icon">{{ carIcon }}</view>
         <view class="car-status">
           <text class="car-state-text">{{ bleStore.stateText }}</text>
@@ -397,18 +392,14 @@ async function onToggleProxRide(v) {
   border-radius: 8rpx;
   padding: 2rpx 10rpx;
 }
-.device-tag {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--bg-card);
-  border-radius: 16rpx;
-  padding: 20rpx 24rpx;
-  margin-bottom: 20rpx;
+/* ★ 2026-07-23: 车辆大卡顶部设备身份，样式对齐 index.vue 连接页 .custom-name-display */
+.car-identity {
+  display: block;
+  color: var(--accent);
+  font-weight: bold;
+  font-size: 32rpx;
+  margin-bottom: 12rpx; /* 控制页 自定义名称下方间距； 上方留白由 .car-card 的 padding: 50rpx 提供 */
 }
-.device-tag-text { display: flex; flex-direction: column; min-width: 0; }
-.device-tag-name { font-size: 30rpx; color: var(--text-primary); font-weight: 600; }
-.device-tag-mac { font-size: 22rpx; color: var(--text-muted); margin-top: 4rpx; }
 
 
 /* ★ v3.15-#21: Status 过期警告 — 比断连警告更严重（无声中断） */

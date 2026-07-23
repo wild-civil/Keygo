@@ -279,6 +279,7 @@ export const useBleStore = defineStore('ble', {
     _bondingInProgress: false,     // ★ 2026-07-16: 配对(_triggerBond)期间断开 GATT 让 OS 配对，抑制 store 自动重连
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
     _customNamesByMac: (() => { try { return uni.getStorageSync('ble_device_custom_names') || {} } catch (e) { return {} } })(), // ★ v3.36.3-fix5: 按 MAC 索引的本机自定义名副本(由 customDeviceName 持久化而来)，供断连后的扫描列表/重连卡统一显示
+    _advertisedNames: (() => { try { return uni.getStorageSync('ble_advertised_names') || {} } catch (e) { return {} } })(), // ★ 2026-07-23: 设备真实广播名(扫描拿到)按 MAC 持久化，作为出厂名"真相"(与手机蓝牙列表一致)
     /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
      *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
     _configDirty: false,
@@ -341,29 +342,61 @@ export const useBleStore = defineStore('ble', {
       return this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
     },
 
-    // ★ v3.36.3-fix5: 已知设备展示名，优先用本机为该 MAC 存的自定义名(customDeviceName 持久化副本)，否则回退生成名 KeyGo-XXXXXX
+    // ==================== 2026-07-23 设备命名 / 出厂名 / 已配对 功能组 ====================
+    // 【背景】固件 peripheral.c 用 g_deviceMac[3..5] 生成广播名 "KeyGo-XXXXXX"，而 GetMACAddress 从
+    //   WCH ROM 读出的是【小端】MAC（[0]=末字节 … [5]=首字节），故 [3][4][5] = 公网 MAC 前 3 字节反转。
+    //   例: 公网 MAC 0C:3D:5E:A6:5F:90 → 广播名 KeyGo-5E3D0C（与手机蓝牙列表一致）。
+    //   旧代码用 macClean.slice(-6)（末 3 字节）得到 A65F90，与固件/手机蓝牙列表错位，本次修正。
+    // 【本组包含】
+    //   ① knownDeviceName / connectedDisplayName —— 重连卡/连接态展示名，格式「自定义名 ( 出厂名 )」
+    //   ② controlTopName —— 控制页车辆大卡顶部专用，只显示自定义名(不带括号)，未命名回退出厂名
+    //   ③ _factoryNameForMac / _resolveFactoryName —— 由 MAC 推算/解析出厂名，与固件公式一致
+    //   ④ _advertisedNames + _rememberAdvertisedName —— 扫描时记忆真实广播名(按 MAC 持久化)
+    //   ⑤ _formatDisplayName —— 组合「自定义名 ( 出厂名 )」
+    //   ⑥ isPairedDevice —— 本机已配对(连过)设备判定，供扫描列表「✓ 已配对」徽章
+
+    // 已知设备展示名：优先自定义名 > 出厂名，组合为「自定义名 ( 出厂名 )」（用于重连卡）
     knownDeviceName() {
-      const id = this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
+      const id = this.knownDeviceId
       if (!id) return ''
       const custom = this.customNameForMac(id)
-      if (custom) return custom
-      const clean = id.replace(/:/g, '').toUpperCase()
-      return 'KeyGo-' + clean.slice(-6)
+      const factory = this._resolveFactoryName(id)
+      return this._formatDisplayName(custom, factory)
     },
 
-    // ★ v3.36.3-fix5: 按 MAC 查本机自定义名(由 customDeviceName 持久化而来)；返回函数供模板传参，供扫描列表/重连卡/"已命名"徽章统一使用
+    // 按 MAC 查本机自定义名(由 customDeviceName 持久化而来)；返回函数供模板传参，供扫描列表/重连卡/"已命名"徽章统一使用
     customNameForMac: (state) => (mac) => {
       if (!mac) return ''
       const key = mac.replace(/:/g, '').toUpperCase()
       return state._customNamesByMac[key] || ''
     },
 
-    // ★ v3.36.3-fix5: 连接态展示名，优先 customDeviceName(用户设置) > deviceName(生成名 KeyGo-XXXXXX)
+    // 本机已配对(曾连接/使用)设备判定，供扫描列表「✓ 已配对」徽章。
+    // 以 knownDeviceId(本机连过的设备) 为准——与 OS 绑定意涵一致，且避免把扫到的陌生设备误标。
+    // ★ 优化：复用 knownDeviceId getter，避免重复读 storage。
+    isPairedDevice: (state) => (mac) => {
+      if (!mac) return false
+      const key = String(mac).replace(/:/g, '').toUpperCase()
+      const known = (state.knownDeviceId || '').replace(/:/g, '').toUpperCase()
+      return !!known && key === known
+    },
+
+    // 连接态展示名：有自定义名 → 「自定义名 ( 出厂名 )」；否则出厂名（用于连接态顶部/扫描列表等）
     connectedDisplayName() {
-      if (this.customDeviceName) return this.customDeviceName
+      if (this.customDeviceName) {
+        const factory = this.deviceName || (this.deviceId ? this._resolveFactoryName(this.deviceId) : '')
+        return this._formatDisplayName(this.customDeviceName, factory)
+      }
       if (this.deviceName) return this.deviceName
-      if (this.deviceId) return 'KeyGo-' + this.deviceId.replace(/:/g, '').toUpperCase().slice(-6)
+      if (this.deviceId) return this._resolveFactoryName(this.deviceId)
       return ''
+    },
+
+    // 控制页车辆大卡顶部专用名：只显示自定义名(不带「( 出厂名 )」后缀)，未命名时回退出厂名。
+    // 与 connectedDisplayName 的区别：大卡顶部空间紧凑，不重复展示出厂名，避免信息冗余。
+    controlTopName() {
+      if (this.customDeviceName) return this.customDeviceName
+      return this.connectedDisplayName
     },
 
     // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
@@ -1509,6 +1542,7 @@ export const useBleStore = defineStore('ble', {
               // ★ 标记发现 → 停止当前扫描后期会连接
               this._dormantFound = true
               this._dormantFoundDevice = device
+              this._rememberAdvertisedName(device.deviceId, device.name)
             }
           },
           5 // 5 秒超时
@@ -1685,9 +1719,9 @@ export const useBleStore = defineStore('ble', {
               this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置（防止沿用上一连接的去重标志）
               this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 亮屏修复连上后重置 RSSI 显示态
               this.lastDeviceId = targetId
+              this._rememberAdvertisedName(targetId, device.name)
               if (!this.deviceName) {
-                const macClean = targetId.replace(/:/g, '')
-                this.deviceName = 'KeyGo-' + macClean.slice(-6).toUpperCase()
+                this.deviceName = this._resolveFactoryName(targetId, device.name)
               }
               stopScan().catch(() => {})
               this.scanning = false
@@ -1842,9 +1876,7 @@ export const useBleStore = defineStore('ble', {
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
       if (!this.deviceName) {
-        const macClean = this.deviceId.replace(/:/g, '')
-        const macSuffix = macClean.slice(-6).toUpperCase()
-        this.deviceName = 'KeyGo-' + macSuffix
+        this.deviceName = this._resolveFactoryName(this.deviceId)
       }
           this._resetReconnectCounters()
           this._stopDormantPoll()
@@ -2344,8 +2376,49 @@ export const useBleStore = defineStore('ble', {
         this._seedCustomNameByMac(this.deviceId, this.customDeviceName) // ★ v3.36.3-fix5
         console.log('[Store] 首次记录设备名称（来自固件 d2）:', this.customDeviceName, '(SN:', sn, ')')
       }
-      // else: 本地无记录 + 无 d2 → 保持默认名（KeyGo-XXXXXX）
-    },
+        // else: 本地无记录 + 无 d2 → 保持默认名（KeyGo-XXXXXX）
+      },
+
+      // 由 MAC 推算出厂广播名，与固件 peripheral.c 完全一致。
+      //   固件: snprintf("KeyGo-%02X%02X%02X", g_deviceMac[3], g_deviceMac[4], g_deviceMac[5])
+      //   其中 g_deviceMac 为 ROM MAC 的【小端】存储([0]=末字节…[5]=首字节)，故 [3][4][5] = 公网 MAC 前 3 字节反转。
+      //   例: 公网 MAC 0C:3D:5E:A6:5F:90 → 广播名 KeyGo-5E3D0C（与手机蓝牙列表一致）。
+      //   ★ 兼容性：MAC 不足 12 位(旧数据/截断)时退化为旧逻辑 slice(-6)，避免崩溃。
+      _factoryNameForMac(mac) {
+        const clean = String(mac || '').replace(/:/g, '').toUpperCase()
+        if (clean.length < 12) return 'KeyGo-' + clean.slice(-6)
+        const first3 = clean.slice(0, 6)            // 公网 MAC 前 3 字节 M0M1M2
+        const reversed = first3.slice(4, 6) + first3.slice(2, 4) + first3.slice(0, 2) // M2M1M0
+        return 'KeyGo-' + reversed
+      },
+
+      // 解析出厂展示名：优先级 真实广播名(扫描拿到的 device.name) > 持久化广播名(_advertisedNames) > MAC 推导。
+      //   这样即使某次扫描没拿到 name，也能用历史记忆或 MAC 推算出正确出厂名，始终与手机蓝牙列表一致。
+      _resolveFactoryName(mac, scanName) {
+        if (scanName && String(scanName).startsWith('KeyGo')) return scanName
+        const key = String(mac || '').replace(/:/g, '').toUpperCase()
+        const adv = this._advertisedNames && this._advertisedNames[key]
+        if (adv) return adv
+        return this._factoryNameForMac(mac)
+      },
+
+      // 扫描时记忆设备真实广播名，按 MAC 持久化，作为出厂名"真相"(与手机蓝牙列表一致)。
+      //   仅接受以 "KeyGo" 开头的名(过滤脏数据)；值未变则跳过写 storage(减少无意义 IO)。
+      _rememberAdvertisedName(mac, name) {
+        if (!mac || !name || !String(name).startsWith('KeyGo')) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        if (this._advertisedNames && this._advertisedNames[key] === name) return
+        if (!this._advertisedNames) this._advertisedNames = {}
+        this._advertisedNames[key] = name
+        try { uni.setStorageSync('ble_advertised_names', this._advertisedNames) } catch (e) {}
+      },
+
+      // 自定义名 + 出厂名组合显示，例如「爱车 ( KeyGo-5E3D0C )」。
+      //   仅当两者都存在且不同才加括号；否则回退单个值(避免「爱车 ( 爱车 )」这类冗余)。
+      _formatDisplayName(custom, factory) {
+        if (custom && factory && custom !== factory) return custom + ' ( ' + factory + ' )'
+        return custom || factory || ''
+      },
 
     // ==================== 扫描 ====================
 
@@ -2396,6 +2469,7 @@ export const useBleStore = defineStore('ble', {
               this.devices[idx] = { ...this.devices[idx], RSSI: Math.max(this.devices[idx].RSSI, device.RSSI) }
             } else {
               this.devices.push(device)
+              this._rememberAdvertisedName(device.deviceId, device.name)
             }
           },
           timeout
@@ -2490,7 +2564,7 @@ export const useBleStore = defineStore('ble', {
 
         await this._connectWithResetFallback(deviceId)
         this.deviceId = deviceId
-        this.deviceName = deviceName || 'KeyGo'
+        this.deviceName = this._resolveFactoryName(deviceId, deviceName)
         this.connected = true
         this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
         this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 手动连上后重置 RSSI 显示态
@@ -2789,6 +2863,7 @@ export const useBleStore = defineStore('ble', {
         const idx = found.findIndex(d => d.deviceId === device.deviceId)
         if (idx >= 0) found[idx] = device
         else found.push(device)
+        this._rememberAdvertisedName(device.deviceId, device.name)
         console.log('[Store] autoConnectBest 发现已知设备:', device.name, 'RSSI:', device.RSSI)
       }
       try {

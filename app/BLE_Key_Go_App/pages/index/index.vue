@@ -200,6 +200,7 @@
             <text class="device-id">{{ device.deviceId }}</text>
             <text v-if="device.nameIsFallback" class="device-occupied-tag">⚠ 设备占用中</text>
             <text v-if="bleStore.customNameForMac(device.deviceId)" class="device-alias-tag">已命名</text>
+            <text v-if="bleStore.isPairedDevice(device.deviceId)" class="device-paired-tag">✓ 已配对</text>
           </view>
           <view class="device-rssi">
             <text class="device-rssi-val">{{ device.RSSI }}</text>
@@ -611,11 +612,11 @@ async function handleReconnect() {
   }
 }
 
-// ★ v3.36.3-fix5: 扫描列表展示名，优先本机自定义名(customDeviceName 持久化副本) > 设备广播名(device.name)
+// ★ 2026-07-23: 扫描列表展示名，有自定义名时组合为「自定义名 ( 出厂名 )」，否则出厂名
 function deviceDisplayName(device) {
   const custom = bleStore.customNameForMac(device.deviceId)
-  if (custom) return custom
-  return device.name || 'KeyGo'
+  const factory = device.name || (device.deviceId ? bleStore._resolveFactoryName(device.deviceId) : '') || 'KeyGo'
+  return bleStore._formatDisplayName(custom, factory)
 }
 
 // ==================== 车辆控制 ====================
@@ -1188,6 +1189,18 @@ async function handleSetName() {
   font-size: 18rpx;
   color: var(--accent);
   background: var(--alpha-12);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+
+/* ★ 2026-07-23: 「已配对」徽章（本机连过的设备），绿色，扫描列表防误连陌生人设备 */
+.device-paired-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  margin-left: 8rpx;
+  font-size: 18rpx;
+  color: #2ecc71;
+  background: rgba(46, 204, 113, 0.14);
   border-radius: 8rpx;
   padding: 2rpx 10rpx;
 }

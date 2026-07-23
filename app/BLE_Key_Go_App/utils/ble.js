@@ -585,12 +585,14 @@ export function startScan(onDeviceFound, timeout = 10) {
           if (!foundSet.has(device.deviceId)) {
             foundSet.add(device.deviceId)
             // 显示名：有完整前缀用原名，否则用 deviceId 重建 KeyGo-XXXXXX
-            //   注意：deviceId 可能是 60:55:F9:71:C6:5A 格式，需先去冒号再取后6位
-            const macClean = device.deviceId.replace(/:/g, '')
-            const macSuffix = macClean.slice(-6).toUpperCase()
+            //   注意：deviceId 可能是 60:55:F9:71:C6:5A 格式，需先去冒号。
+            //   ★ 2026-07-23: 重建名与固件 peripheral.c 一致 = KeyGo-<公网MAC前3字节反转>(=g_deviceMac[3..5]小端)
+            const macClean = device.deviceId.replace(/:/g, '').toUpperCase()
+            const first3 = macClean.slice(0, 6)
+            const reversed = first3.slice(4, 6) + first3.slice(2, 4) + first3.slice(0, 2)
             const displayName = rawName.startsWith(BLE_CONFIG.deviceNamePrefix)
               ? rawName
-              : ('KeyGo-' + macSuffix)
+              : ('KeyGo-' + reversed)
             const dev = {
               deviceId: device.deviceId,
               name: displayName,
