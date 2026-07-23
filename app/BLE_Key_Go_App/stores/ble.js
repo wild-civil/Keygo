@@ -2083,6 +2083,7 @@ export const useBleStore = defineStore('ble', {
     /**
      * ★ v3.14: GATT Read 读取电池电量（独立数据源，不依赖扫描缓存）
      *   连接建立后非阻塞调用，覆盖手动连接 + 自动重连两条路径。
+     * ★ 2026-07-24 (v3.36.3-fixApp-batt): 读取改为「重试 3 次退避」，消除「一次性读失败就永久 ---」的脆弱。
      */
     async _fetchBatteryLevel(deviceId) {
       if (!deviceId) return
@@ -2091,17 +2092,35 @@ export const useBleStore = defineStore('ble', {
       //   路径，与 App 无关）。App 侧 readBLECharacteristicValue 偶发 property not support，疑似手机 GATT 缓存
       //   对该特征缺 READ 位（同「缓存过期」类），故改为「仅当 Notify/广播未送达电量时」才兜底读取。
       //   ★ 注意：电量并不在 FF02 status JSON 里（该 JSON 无电池字段），不要误以为来自 FF02 Notify。
+      //   ★ 2026-07-24 修复策略（开发修复指南）：
+      //     当前在「先扫后连」场景靠扫描缓存拿到电量；但前台服务/已知设备直接重连无新鲜扫描时，
+      //     若本次 GATT Read 失败则 batteryLevel 恒为 -1 → 控制页永久显示 "---"。故此处加重试。
+      //     ⚠ 固件侧「连接建立即主动推送当前电量 (Battery_UpdateLevel()+Battery_Notify())」的修复
+      //       【刻意推迟到「外部 ADC 采集真实电池」那一轮固件改动一起 bump】（避免同一 battery_service.c 刷两次固件）。
+      //       届时外部 ADC 电平会变化 → 变化 Notify 才生效；但重连后电平≈上次值仍会长时间不推，
+      //       故那轮务必把连接即推送一并做掉。详见 docs/03-复盘与问题分析/4-硬件与专项分析/
+      //       KeyGo_电量长时间不显示_根因分析.md §3.1。
       await new Promise(r => setTimeout(r, 2500)) // 先等状态 Notify 把电量送上来
       if (this.deviceId !== deviceId || !this.connected) return
       if (this.batteryLevel >= 0) return // Notify/广播已覆盖，跳过冗余读
-      try {
-        const level = await readBatteryLevel(deviceId, 5000)
-        if (level >= 0 && level <= 100) {
-          this.batteryLevel = level
-          console.log('[Store] GATT 电池电量(兜底):', level + '%')
+
+      // ★ 2026-07-24: 重试 3 次（退避 800ms），覆盖手机 GATT 缓存瞬态缺 READ 位导致的偶发失败
+      const MAX_RETRY = 3
+      for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+        if (this.batteryLevel >= 0) break // 重试途中被 Notify/广播补到，提前退出
+        try {
+          const level = await readBatteryLevel(deviceId, 5000)
+          if (level >= 0 && level <= 100) {
+            this.batteryLevel = level
+            console.log('[Store] GATT 电池电量(兜底, 第' + attempt + '次):', level + '%')
+            break
+          }
+        } catch (e) {
+          console.log('[Store] GATT 电池电量兜底读取失败(第' + attempt + '/' + MAX_RETRY + '次):', e.message)
+          if (attempt < MAX_RETRY) {
+            await new Promise(r => setTimeout(r, 800)) // 退避后重试
+          }
         }
-      } catch (e) {
-        console.log('[Store] GATT 电池电量兜底读取失败（已依赖 Notify）:', e.message)
       }
     },
 
