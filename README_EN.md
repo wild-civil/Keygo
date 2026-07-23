@@ -41,6 +41,9 @@ KeyGo is built around three principles:
 | Battery monitoring | Real-time battery %; alert below 20%; 18650 Li-ion | Landed (dev board uses internal VBAT channel; reading is constant under LDO@3.3V, accurate only after moving to external divider+MOS on the real board) |
 | Chip temperature | Real-time chip temperature (FF02 `t` field, CH582M TSENSE 5s throttled sampling); hidden on disconnect | Landed (CH582M internal sensor) |
 | Security | Binding-code auth, challenge-response, RSSI anti-occupy, timeout force-disconnect, encryption gating | Landed (encryption gating reverted in v3.32.1, Phase 4 redo `[TODO]`) |
+| Bluetooth key naming | Each device can have a memorable custom name (persisted `ble_device_names`); control-page top card shows only the pure custom name, connect/scan lists show "custom (KeyGo-XXXXXX)" | Landed (2026-07-23) |
+| Paired-device badge | Devices in the `knownDevices` set show a "Paired" badge, distinguishing your own devices from strangers | Landed (2026-07-23) |
+| Multi-device: known-devices list + default pinning | `knownDevices` records every connected device; on disconnect a scrollable reconnect list shows (default pinned to top + most-recent first); "default" only affects ordering, not auto-reconnect target | Landed (2026-07-23); multi-device UI code-reviewed only, not on real multi-device |
 
 ## 4. Working Logic
 
@@ -58,6 +61,20 @@ KeyGo is built around three principles:
 ### 4.3 Dual Mode
 - First two keys (UNLOCK/LOCK) identical; 3rd key = TRUNK (car) / RIDE double-pulse (e-bike, PB4 LED sync). Mode stored in device flash.
 - Switch entry: control page bottom "Device Mode" card (`control.vue`); config command `MODE:car`/`MODE:ebike` (FF03, encryption+bbing protected).
+
+### 4.4 Bluetooth Key Naming & Multi-Device Management
+
+**Bluetooth key naming**
+- Each device can have a memorable custom name (default fallback `KeyGo-{last 6 of MAC}`), stored in `ble_device_names` (indexed by MAC, persisted).
+- Display rule: the control-page top card shows **only the pure custom name**; the connect/scan lists show "custom name (`KeyGo-XXXXXX`)" combined format.
+- The factory name `KeyGo-XXXXXX` derives its XXXXXX from the MAC bytes in the advertised name (firmware little-endian byte order, matching the phone's Bluetooth list), not random.
+
+**Multi-device: known-devices set + default device**
+- **Known-devices set `knownDevices`** (persisted `ble_known_devices`): every successful connection records the device MAC + last-connected time; compatible with the old `ble_last_device_id` (auto-merged on first connect). This is the "all ever-connected devices" list, **decoupled** from the auto-reconnect target `lastDeviceId` — auto-reconnect still only follows `lastDeviceId`, behavior unchanged.
+- **"Known devices" reconnect box**: after disconnect, the connect/control page shows the known-devices list, ordered by **default-pinned-to-top + most-recent-first**; 1 device = single card (same as before), ≥2 = scrollable list; tap an item to reconnect to that device.
+  - ⚠️ **When it appears**: the box shows only when `disconnected` AND `knownDevices` is non-empty. While connected to device A the box is hidden → to switch from A to B on a multi-device setup you must disconnect first; a fresh install with no connections shows no box (expected).
+- **Default device `defaultDeviceId`** (persisted `ble_default_device_id`): tap "Default" on a list item to pin it to top; only affects the reconnect-box ordering, not the auto-reconnect target.
+- **Paired badge**: in the "connected / known-devices" lists, devices recorded in `knownDevices` show a "Paired" badge, making it easy to tell your own devices from strangers.
 
 ## 5. Protocol & GATT
 
