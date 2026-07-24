@@ -163,6 +163,8 @@ export const useBleStore = defineStore('ble', {
     rssi: -999,
     filteredRssi: -999,
     displayRssi: -999,            // ★ v3.31.0 / 2026-07-13: 平滑+节流后的显示用 RSSI（UI 绑定此值，杜绝后台噪值狂跳）
+    rawRssiDisplay: -999,         // ★ 2026-07-24: 受节流的「原始 RSSI」展示副本（=固件上报 r），与 displayRssi 同节流窗口。
+                                    //   仅用于 info-grid 诊断展示，避免每条 FF02 直写导致控制页高频重渲染、destabilize swiper 手势（晃动）。
     rssiEma: -999,                // ★ 内部：displayRssi 的 EMA 累加器（仅 >-900 时视为有效）
     batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
     autoLockEnabled: -1,          // ★ v3.24-fixb: 固件自动锁使能状态(FF02 al 字段)，-1=未知/未同步，0=关闭(手动模式)，1=开启
@@ -191,7 +193,10 @@ export const useBleStore = defineStore('ble', {
     unlockProgress: 0,            // 当前解锁进度计数（连续几次滤波 RSSI 在解锁区）
     lockProgress: 0,              // 当前锁车进度计数
     thresholdZone: 0,             // 当前区间：0 中性 / 1 解锁区 / 2 锁车区
-    showProgressCard: true,       // ★ v3.31 方案B-修正: 连接页是否显示「确认进度」卡片（手机端偏好，不下发设备）
+    showProgressCard: false,      // ★ v3.31 方案B-修正: 连接页是否显示「确认进度」卡片（手机端偏好，不下发设备）
+                                     //   2026-07-24 改为默认 false：首次安装/清存储的用户默认【不显示】进度卡片，
+                                     //   避免一进连接页就被进度条/诊断信息占据。已手动开启过的用户由
+                                     //   ble.js:564（saved.showProgressCard !== undefined）恢复其偏好，不受影响。
 
     // ★ 2026-07-15: passkey 系统配对偏好（全局，手机端保存，不入下发配置）
     //   开启=舒适进入/无 App 也能解锁（需自定义基座+原生插件）；关闭(默认)=明文最大兼容
@@ -887,6 +892,7 @@ export const useBleStore = defineStore('ble', {
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 断连重置签名会话态
       this.filteredRssi = -999
       this.displayRssi = -999
+      this.rawRssiDisplay = -999   // ★ 2026-07-24: 断连同步清零受节流展示副本
       this.rssiEma = -999
       this.statusStale = false
       this.reconnectMode = 'paused'
@@ -1233,6 +1239,7 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.31.0 / 2026-07-13: 清掉 RSSI 看门狗并重置显示态（避免残留 stale 显示）
       this._clearRssiStaleWatchdog()
       this.displayRssi = -999
+      this.rawRssiDisplay = -999   // ★ 2026-07-24: 重置同步清零受节流展示副本
       this.rssiEma = -999
       if (this._disconnectRssiClearTimer) clearTimeout(this._disconnectRssiClearTimer)
       this._disconnectRssiClearTimer = setTimeout(() => {
@@ -3002,6 +3009,7 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.31.0 / 2026-07-13: 每次（重）连接时重置 RSSI 显示态 + 启动看门狗
     _resetRssiDisplay() {
       this.displayRssi = -999
+      this.rawRssiDisplay = -999   // ★ 2026-07-24: 重连重置同步清零
       this.rssiEma = -999
       this._lastFf02Ms = 0
       this._lastRssiDisplayMs = 0
@@ -3084,6 +3092,7 @@ export const useBleStore = defineStore('ble', {
         const _now = Date.now()
         if (_now - this._lastRssiDisplayMs >= this.rssiReadPeriodMs) {
           this.displayRssi = data.f
+          this.rawRssiDisplay = data.r   // ★ 2026-07-24: 原始 RSSI 展示副本同窗口节流（保留 raw vs filtered 诊断差异，但不每条重渲染）
           this._lastRssiDisplayMs = _now
         }
       }
