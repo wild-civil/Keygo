@@ -811,8 +811,7 @@ KeyGo/
     ├── BLE扫描_设备发现机制复盘_v2.2.md
     ├── BLE连接稳定性问题复盘_v2.2.md
     ├── KeyGo_v3.2_设备识别方案深度分析.md
-    ├── KeyGo_方案对比分析_市场主流方案.md
-    └── theme-fix-retrospective.md
+    └── KeyGo_方案对比分析_市场主流方案.md
 ```
 
 ---
