@@ -131,6 +131,12 @@ import { throwError, ERROR_MSGS } from '@/utils/readable-errors.js'
 // ★ ②: 绑定层模块级状态（提取到 stores/ble-binding.js，通过 B 命名空间对象访问）
 import { B, _waitFor, _resolveWaiter, _acquireBindLock, _acquireAuthLock, _waitBind, BIND_DISCONNECTED, _flushBindWaiters } from './ble-binding.js'
 
+// ★ 2026-07-24: 显示流合并（staging）——非响应式暂存，避免后台/重连 burst 逐包直写导致回放/狂跳。
+//   仅「显示字段」暂存；连接态/命令确认/绑定对账/无App模式/电量等控制流副作用仍即时（见 _parseSingleStatus）。
+let _stagedDisplay = null        // 最新一包解析出的显示字段（last-value-wins 覆盖）
+const _DISPLAY_COMMIT_TICK = 100 // 合并提交节拍(ms)：≤100ms 内提交最新值 → burst 自动合并为 1 次渲染
+let _displayCoalescer = null     // setInterval 句柄（懒启动，常驻，无包时 no-op）
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -3006,6 +3012,35 @@ export const useBleStore = defineStore('ble', {
     _clearRssiStaleWatchdog() {
       if (this._rssiStaleWatchdog) { clearInterval(this._rssiStaleWatchdog); this._rssiStaleWatchdog = null }
     },
+    // ★ 2026-07-24: 显示流合并（staging）相关 action
+    startDisplayCoalescer() {
+      // 懒启动：首次连接时调用一次，之后常驻（无包时 no-op，开销可忽略）
+      if (_displayCoalescer) return
+      const store = this
+      _displayCoalescer = setInterval(() => {
+        if (_stagedDisplay) store._commitStagedDisplay()
+      }, _DISPLAY_COMMIT_TICK)
+    },
+    _commitStagedDisplay() {
+      if (!_stagedDisplay) return
+      // ★ 断连后丢弃暂存，避免显示陈旧值（disconnect 已将 rssi/deviceTempC 重置为 -999/null）
+      if (!this.connected) { _stagedDisplay = null; return }
+      const s = _stagedDisplay
+      _stagedDisplay = null
+      if (s.r !== undefined) {
+        this.rssi = s.r
+        this.rawRssiDisplay = s.r   // ★ 原始 RSSI 展示副本随合并提交（不再每条重渲染）
+      }
+      if (s.f !== undefined) {
+        this.filteredRssi = s.f
+        this.displayRssi = s.f      // 显示用 Kalman 滤波值（与区间判定同源，不二次平滑）
+      }
+      if (s.t !== undefined) this.deviceTempC = s.t
+    },
+    // ★ 回前台立即提交最新暂存，保证第一帧即显示当前真实态（不回放历史）
+    flushStagedDisplay() {
+      this._commitStagedDisplay()
+    },
     // ★ v3.31.0 / 2026-07-13: 每次（重）连接时重置 RSSI 显示态 + 启动看门狗
     _resetRssiDisplay() {
       this.displayRssi = -999
@@ -3071,30 +3106,20 @@ export const useBleStore = defineStore('ble', {
           this._disconnectRssiClearTimer = null
         }
         this.connected = data.c === 1
+        if (this.connected) this.startDisplayCoalescer()   // ★ 懒启动合并提交（仅启动一次，常驻）
       }
 
-      // RSSI（先更新原始值，后续校验要用）
-      if (data.r !== undefined && data.r > -999) this.rssi = data.r
-      // ★ v3.31.0 / 2026-07-13: 显示用 RSSI 经 EMA 平滑 + 节流写入 displayRssi。
-      //   后台累积的噪值被 EMA 抹平 → 回前台不会「疯狂跳跃/回放」。
-      //   raw/filteredRssi 仍保留供其他逻辑使用，仅 UI 改绑 displayRssi。
-      //   ★ 节流窗口 = rssiReadPeriodMs（与固件采样间隔【同源】）：手机改 RSSI 采样间隔会同步改这里，
-      //     避免显示刷新比固件采样还快（徒增跳动）。注意：FF02 通知周期(~1s)独立于此，故显示实际
-      //     最多每 1s 跳一次（除非固件 FF02 周期也跟随 interval）。
+      // ★ 2026-07-24: 显示字段走「非响应式暂存 + 合并提交」(staging)，根治后台/重连 burst 回放/狂跳。
+      //   每条包只覆盖 _stagedDisplay（last-value-wins），由 _displayCoalescer 每 ~100ms 提交最新值一次
+      //   → N 条积压包合并为 1 次渲染，显示延迟 ≤100ms。控制流副作用(connected/st/绑定/无App模式/电量)即时，不走暂存。
+      if (data.r !== undefined && data.r > -999) {
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.r = data.r
+      }
       if (data.f !== undefined && data.f > -999) {
-        this.filteredRssi = data.f
-        this._lastFf02Ms = Date.now()
-        // ★ 2026-07-13 修正: 显示 RSSI 直接用固件 Kalman 滤波值 f（与区间判定 th/ucnt/lcnt
-        //   同源），**不再叠加 EMA 二次平滑**。原 EMA(0.7/0.3, 新值权重仅0.3) 让显示值严重滞后
-        //   于 f：走近时 f 已过 -40 触发解锁但 EMA 仍显示 -42；走远时 f 已回中性但 EMA 仍 -39。
-        //   改直接显示 f 后大数字与区间判定一致。f 本身已是 Kalman 平滑值，无需再叠一层；
-        //   节流(rssiReadPeriodMs)仅控刷新率，避免高于固件采样频率的徒增跳动。
-        const _now = Date.now()
-        if (_now - this._lastRssiDisplayMs >= this.rssiReadPeriodMs) {
-          this.displayRssi = data.f
-          this.rawRssiDisplay = data.r   // ★ 2026-07-24: 原始 RSSI 展示副本同窗口节流（保留 raw vs filtered 诊断差异，但不每条重渲染）
-          this._lastRssiDisplayMs = _now
-        }
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.f = data.f
+        this._lastFf02Ms = Date.now()   // ★ 看门狗用「真实包到达时刻」，保持即时（不随提交延迟）
       }
 
       if (data.st !== undefined) {
@@ -3257,7 +3282,11 @@ export const useBleStore = defineStore('ble', {
 
       // ★ v3.36.1: 内部芯片温度遥测（t 字段，摄氏度整数，固件 TSENSE 采样，5s 节流）。
       //   固件 v3.36.1 起上报；旧固件无此字段 → deviceTempC 保持 null，UI 不显示温度。
-      if (data.t !== undefined) this.deviceTempC = Number(data.t)
+      // ★ 2026-07-24: 温度同样进暂存（5s 才变一次，burst 内同值，合并不影响精度）
+      if (data.t !== undefined) {
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.t = Number(data.t)
+      }
 
       // ★ v3.15-#13: 每次收到有效 Status 后重置看门狗
       this._resetStatusStaleTimer()

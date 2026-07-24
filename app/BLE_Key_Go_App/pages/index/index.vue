@@ -1,13 +1,13 @@
 <template>
   <view class="page-index" :class="themeClass">
     <!-- ★ 蓝牙关闭横幅（模仿 nRF Connect）：系统弹窗期间保持红色 -->
-    <view class="bt-off-banner" v-if="!bleStore.connected && bleStore.btState === 'off'">
+    <view class="bt-off-banner" v-show="!bleStore.connected && bleStore.btState === 'off'">
       <text class="bt-off-icon">🔴</text>
       <text class="bt-off-text">蓝牙已关闭</text>
       <button class="bt-enable-btn" @tap="handleEnableBluetooth">开启</button>
     </view>
     <!-- ★ 绿色"正在开启"横幅：与底部系统弹窗同步出现/消失，模仿 nRF Connect -->
-    <view class="bt-on-banner" v-if="!bleStore.connected && bleStore.btState === 'just_enabled'">
+    <view class="bt-on-banner" v-show="!bleStore.connected && bleStore.btState === 'just_enabled'">
       <text class="bt-on-icon">🟢</text>
       <text class="bt-on-text">正在开启蓝牙...</text>
     </view>
@@ -35,7 +35,7 @@
         <text class="status-sub" v-else-if="bleStore.reconnectMode === 'paused'">第 {{ bleStore.reconnectAttempt }} 次重连失败，稍后自动重试</text>
         <text class="status-sub" v-else>扫描下方设备进行连接</text>
       </view>
-      <view class="status-rssi" v-if="bleStore.connected">
+      <view class="status-rssi" v-show="bleStore.connected">
         <text class="rssi-value">{{ bleStore.displayRssi > -999 ? bleStore.displayRssi : '---' }}</text>
         <text class="rssi-unit">dBm</text>
       </view>
@@ -47,7 +47,7 @@
     </view>
 
     <!-- ★ 信号强度条 -->
-    <view class="signal-section" v-if="bleStore.connected">
+    <view class="signal-section" v-show="bleStore.connected">
       <view class="signal-header">
         <text class="signal-label">信号强度</text>
         <text class="signal-dist">{{ bleStore.rssiDistance }}</text>
@@ -66,7 +66,7 @@
     <!-- ★ v3.36.1: 连接页补充 — 芯片温度（信号强度下方，与控制页同源）；电池已移至「已连接」框下方 -->
     <!-- ★ 2026-07-19: 温度遥测本就是连接态数据，必须 connected 才显示；断连后即便 deviceTempC
          因时序残留旧值也不应再显示，故加 bleStore.connected 守卫（与断连置 null 双保险）。 -->
-    <view class="conn-extra" v-if="bleStore.connected && bleStore.deviceTempC !== null">
+    <view class="conn-extra" v-show="bleStore.connected && bleStore.deviceTempC !== null">
       <view class="temp-card" v-if="bleStore.connected && bleStore.deviceTempC !== null" :class="tempClass">
         <view class="temp-head">
           <text class="temp-icon">🌡️</text>
@@ -86,7 +86,7 @@
     </view>
 
     <!-- ★ v3.31 方案B-修正②: 开关打开即「始终显示」进度卡片（解锁区/锁车区/中间区都显示），deviceUc<1(旧固件/未同步)不显示 -->
-    <view class="progress-card" v-if="bleStore.connected && bleStore.showProgressCard && bleStore.deviceUc >= 1">
+    <view class="progress-card" v-show="bleStore.connected && bleStore.showProgressCard && bleStore.deviceUc >= 1">
       <!-- 自动锁关闭（手动模式）→ 直接说明为什么不会自动锁车，这是「没法锁车」最常见原因 -->
       <text class="progress-tip" v-if="bleStore.autoLockEnabled === 0">
         ⚠️ 自动锁已关闭（手动模式），RSSI 不会自动解锁/锁车，请用手动按键
@@ -136,7 +136,7 @@
     </view>
 
     <!-- ★ v3.25: 极速模式距离显示（仅 speed 模式 + 未连接 + 有停车位置时显示） -->
-    <view class="geofence-card" v-if="!bleStore.connected && bleStore.autoReconnectMode === 'speed' && bleStore.parkingLocation">
+    <view class="geofence-card" v-show="!bleStore.connected && bleStore.autoReconnectMode === 'speed' && bleStore.parkingLocation">
       <view class="geofence-header">
         <text class="geofence-icon">🅿️</text>
         <text class="geofence-title">停车位置</text>
@@ -168,7 +168,7 @@
     </view>
 
     <!-- ★ 2026-07-22/23: 手动断开后"重新连接"入口（knownDevicesList 驱动，多设备展开为列表） -->
-    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDevicesList.length">
+    <view class="reconnect-card" v-show="!bleStore.connected && bleStore.knownDevicesList.length">
       <!-- 多设备：展开为可滚动列表 -->
       <template v-if="bleStore.knownDevicesList.length > 1">
         <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
@@ -200,7 +200,7 @@
     </view>
 
     <!-- 设备扫描区域 -->
-    <view class="section" v-if="!bleStore.connected">
+    <view class="section" v-show="!bleStore.connected">
       <view class="section-header">
         <text class="section-title">附近设备</text>
         <button class="btn-scan" @tap="handleScanToggle">
@@ -387,10 +387,10 @@ watch(() => bleStore.needsRebind, (v) => {
 })
 
 onShow(async () => {
-  // ★ v3.31.0 / 2026-07-13: 方案 B —— 回前台【保留】后台持续平滑出来的旧 RSSI 值，
-  //   不再清零成 ---。原因：displayRssi 已被 EMA 平滑 + 500ms 节流（见 stores/ble.js），
-  //   后台噪值「回放/狂跳」的根因已消除，保留旧值视觉更连续；下一个节流刻度（≤500ms）
-  //   会静默刷新为最新平滑值，期间不跳。
+  // ★ 2026-07-24: 回前台立即提交显示暂存（staging），保证第一帧即显示当前真实态，
+  //   且【不回放】后台/重连积压的历史包（burst 已合并为最新一次）。旧注释（EMA+500ms 节流）
+  //   已随「入口流合并」方案退役：现在后台每包只覆盖非响应式 _stagedDisplay，合并提交 → 无回放。
+  bleStore.flushStagedDisplay()
   themeStore.applyNavBar()
 
   // ★ 冷启动修复：先确保蓝牙适配器已打开（仅 openBluetoothAdapter，不申请权限、BT 已开无弹窗），

@@ -257,6 +257,7 @@ const themeClass = computed(() => themeStore.themeClass)
 
 onShow(() => {
   themeStore.applyNavBar()
+  bleStore.flushStagedDisplay()   // ★ 2026-07-24: 回前台立即提交最新暂存显示，避免回放历史
 })
 
 async function handleUnlock() {
