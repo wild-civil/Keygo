@@ -1,5 +1,8 @@
 <template>
   <view class="main-root" :class="themeClass">
+    <!-- ★ 全局蓝牙状态横幅（方案1, v3.36.3fix11.3）：仅连接页(0)/控制页(1)显示，配置页(2)/帮助页(3)不显示 -->
+    <BtStateBanner v-show="tabIndex === 0 || tabIndex === 1" />
+
     <!-- ★ swiper 承载 4 个 tab 页面，支持平滑滑动切换 -->
     <swiper
       class="tab-swiper"
@@ -60,6 +63,7 @@ import ControlPage from '@/pages/control/control.vue'
 import ConfigPage from '@/pages/config/config.vue'
 import HelpPage from '@/pages/help/help.vue'
 import DebugFloatPanel from '@/components/DebugFloatPanel.vue'
+import BtStateBanner from '@/components/BtStateBanner.vue'
 import { DEV_PANEL_ENABLED } from '@/utils/debug-panel.js'
 
 const bleStore = useBleStore()

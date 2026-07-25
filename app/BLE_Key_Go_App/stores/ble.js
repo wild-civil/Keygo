@@ -99,7 +99,7 @@ import {
 //   自定义码统一走 SETCODE 通道（先 AUTH 证明持有旧码）。
 //   继承 v3.33.0/3.33.1：手动模式前台自动连 + fwsec 能力协商 + T4 回推修复 + AUTH 握手互斥锁 +
 //   长按恢复出厂 + FF01 长写重组 + 配置下发去重 + 重绑信任态保持 + 恢复出厂绑码核验 + 复位后回首绑。
-export const APP_VERSION = 'v3.36.3fix11.1'   // ★ v3.36.3fix11.1 (2026-07-25): 对齐固件 3.36.3-fix8；App 侧 fix 系列命名 v3.36.3fix11.(x+1)（x+1 递增）
+export const APP_VERSION = 'v3.36.3fix11.3'   // ★ v3.36.3fix11.3 (2026-07-25): 方案1 全局蓝牙横幅(连接页+控制页)；App 侧 fix 系列命名 v3.36.3fix11.(x+1)（x+1 递增）
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 原生前台服务 kill-switch（长期安全开关，非临时止血）：
@@ -1054,14 +1054,14 @@ export const useBleStore = defineStore('ble', {
             this.btState = 'on'
           }
         } else if (this.btState !== 'just_enabled') {
-          // ★★★ fix12 临时诊断日志（待②复现确认后删除）★★★
+          // ★★★ v3.36.3fix11.4 临时诊断日志（待②复现确认后删除）★★★
           // 目的：坐实 ② 根因——available=false 把原生 STATE_ON 已置的 'on' 盖回 'off'（红 banner 误复现）。
           // 若真机红 banner 误复现且此日志打印 → 100% 确认走此路径。
-          // 后续修复（fix12）：在下面 this.btState='off' 之前加一行
+          // 后续修复（v3.36.3fix11.4）：在下面 this.btState='off' 之前加一行
           //   if (this.btState === 'on' && this._nativeBtFired) return   // 信任原生广播开启态，不被延迟 available=false 覆盖
           // 删除本段（含下方 console.warn）即可落地修复；本次仅加日志，不改行为。
           if (this.btState === 'on') {
-            console.warn('[Store][fix12-DIAG] ⚠ btState on→off 翻转！available=' + state.available +
+            console.warn('[Store][v3.36.3fix11.4-DIAG] ⚠ btState on→off 翻转！available=' + state.available +
               ' _nativeBtFired=' + this._nativeBtFired +
               ' → 疑似②(延迟 available=false 覆盖原生 on)。若同时红 banner 误复现即坐实')
           }
