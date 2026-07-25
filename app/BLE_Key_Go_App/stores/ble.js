@@ -99,7 +99,17 @@ import {
 //   自定义码统一走 SETCODE 通道（先 AUTH 证明持有旧码）。
 //   继承 v3.33.0/3.33.1：手动模式前台自动连 + fwsec 能力协商 + T4 回推修复 + AUTH 握手互斥锁 +
 //   长按恢复出厂 + FF01 长写重组 + 配置下发去重 + 重绑信任态保持 + 恢复出厂绑码核验 + 复位后回首绑。
-export const APP_VERSION = 'v3.36.3fix11.3'   // ★ v3.36.3fix11.3 (2026-07-25): 方案1 全局蓝牙横幅(连接页+控制页)；App 侧 fix 系列命名 v3.36.3fix11.(x+1)（x+1 递增）
+// ★ v3.36.3fix11.4 (2026-07-25) —— Problem B 修正
+//   死滚动根因：4 个 tab 页根原 min-height:100vh，但真实滚动容器 main.vue 的 scroll-view
+//   高度 = 100vh − 顶部 BtStateBanner − 底部 custom-tabbar，页内容永远比可视区高
+//   banner+tabbar≈100~150px 的“可滚动空白”（未连接时内容短，用户下滑滑的就是这段背景）。
+//   fix11.3 把 banner 从 index.vue 内联提到 main.vue 固定头后，banner≈50px 不再参与滚动，
+//   反而使该空白翻倍（≈100px+），连/控两页下滑空白感更明显（属 fix11.3 回归，本提交补回）。
+//   修法：index/control/config/help 4 个页根 min-height:100vh → 100%，并设 box-sizing:border-box 使 100% 已含纵向 padding，
+//   可视区：内容短=零死滚，内容长=正常滚；不动 scroll-y、不动 swiper 手势，低风险。
+//   ★ ② 诊断日志保留 v3.36.3fix11.4-DIAG（用户决策：不随本次顺延，仅作 ② 复现定位用）。
+//   命名规则：fix 系列按 v3.36.3fix11.(x+1) 递增。
+export const APP_VERSION = 'v3.36.3fix11.4'   // ★ v3.36.3fix11.4 (2026-07-25): Problem B 死滚动修正(4页根 100vh→100%) + 补回 fix11.3 banner 回归
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 原生前台服务 kill-switch（长期安全开关，非临时止血）：
