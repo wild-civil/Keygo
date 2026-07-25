@@ -587,7 +587,12 @@ export const useBleStore = defineStore('ble', {
           //   设备通过 FF02 Notify 上报当前冷却时间，App 被动同步
           //   old: manualCooldownMs 本地持久化 → 多个手机可能不一致
           //   new: 仅从设备 FF02 同步 → 所有手机看到同一值
-          console.log('[Store] 配置已恢复 (' + source + '):', JSON.stringify(saved))
+          //   ★ 2026-07-25 收敛日志：旧版全局配置在每次进出配置页都会恢复（active 翻转触发），
+          //     重复打印无意义且会淹没真实日志；仅首次打印，后续静默恢复。
+          if (source !== '旧版全局' || !this._globalRestoreLogged) {
+            console.log('[Store] 配置已恢复 (' + source + '):', JSON.stringify(saved))
+            if (source === '旧版全局') this._globalRestoreLogged = true
+          }
         } else {
           console.log('[Store] 使用默认配置 (unlock=-45 lock=-65 uc=3 lc=5 interval=800)')
         }
