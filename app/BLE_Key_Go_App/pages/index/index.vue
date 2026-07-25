@@ -1,16 +1,5 @@
 <template>
   <view class="page-index" :class="themeClass">
-    <!-- ★ 蓝牙关闭横幅（模仿 nRF Connect）：系统弹窗期间保持红色 -->
-    <view class="bt-off-banner" v-if="!bleStore.connected && bleStore.btState === 'off'">
-      <text class="bt-off-icon">🔴</text>
-      <text class="bt-off-text">蓝牙已关闭</text>
-      <button class="bt-enable-btn" @tap="handleEnableBluetooth">开启</button>
-    </view>
-    <!-- ★ 绿色"正在开启"横幅：与底部系统弹窗同步出现/消失，模仿 nRF Connect -->
-    <view class="bt-on-banner" v-if="!bleStore.connected && bleStore.btState === 'just_enabled'">
-      <text class="bt-on-icon">🟢</text>
-      <text class="bt-on-text">正在开启蓝牙...</text>
-    </view>
 
     <!-- ★ 顶部状态卡片 -->
     <view class="status-card" :class="{
@@ -35,7 +24,7 @@
         <text class="status-sub" v-else-if="bleStore.reconnectMode === 'paused'">第 {{ bleStore.reconnectAttempt }} 次重连失败，稍后自动重试</text>
         <text class="status-sub" v-else>扫描下方设备进行连接</text>
       </view>
-      <view class="status-rssi" v-if="bleStore.connected">
+      <view class="status-rssi" v-show="bleStore.connected">
         <text class="rssi-value">{{ bleStore.displayRssi > -999 ? bleStore.displayRssi : '---' }}</text>
         <text class="rssi-unit">dBm</text>
       </view>
@@ -47,7 +36,7 @@
     </view>
 
     <!-- ★ 信号强度条 -->
-    <view class="signal-section" v-if="bleStore.connected">
+    <view class="signal-section" v-show="bleStore.connected">
       <view class="signal-header">
         <text class="signal-label">信号强度</text>
         <text class="signal-dist">{{ bleStore.rssiDistance }}</text>
@@ -66,7 +55,7 @@
     <!-- ★ v3.36.1: 连接页补充 — 芯片温度（信号强度下方，与控制页同源）；电池已移至「已连接」框下方 -->
     <!-- ★ 2026-07-19: 温度遥测本就是连接态数据，必须 connected 才显示；断连后即便 deviceTempC
          因时序残留旧值也不应再显示，故加 bleStore.connected 守卫（与断连置 null 双保险）。 -->
-    <view class="conn-extra" v-if="bleStore.connected && bleStore.deviceTempC !== null">
+    <view class="conn-extra" v-show="bleStore.connected && bleStore.deviceTempC !== null">
       <view class="temp-card" v-if="bleStore.connected && bleStore.deviceTempC !== null" :class="tempClass">
         <view class="temp-head">
           <text class="temp-icon">🌡️</text>
@@ -86,7 +75,7 @@
     </view>
 
     <!-- ★ v3.31 方案B-修正②: 开关打开即「始终显示」进度卡片（解锁区/锁车区/中间区都显示），deviceUc<1(旧固件/未同步)不显示 -->
-    <view class="progress-card" v-if="bleStore.connected && bleStore.showProgressCard && bleStore.deviceUc >= 1">
+    <view class="progress-card" v-show="bleStore.connected && bleStore.showProgressCard && bleStore.deviceUc >= 1">
       <!-- 自动锁关闭（手动模式）→ 直接说明为什么不会自动锁车，这是「没法锁车」最常见原因 -->
       <text class="progress-tip" v-if="bleStore.autoLockEnabled === 0">
         ⚠️ 自动锁已关闭（手动模式），RSSI 不会自动解锁/锁车，请用手动按键
@@ -136,7 +125,7 @@
     </view>
 
     <!-- ★ v3.25: 极速模式距离显示（仅 speed 模式 + 未连接 + 有停车位置时显示） -->
-    <view class="geofence-card" v-if="!bleStore.connected && bleStore.autoReconnectMode === 'speed' && bleStore.parkingLocation">
+    <view class="geofence-card" v-show="!bleStore.connected && bleStore.autoReconnectMode === 'speed' && bleStore.parkingLocation">
       <view class="geofence-header">
         <text class="geofence-icon">🅿️</text>
         <text class="geofence-title">停车位置</text>
@@ -167,18 +156,40 @@
       </view>
     </view>
 
-    <!-- ★ 2026-07-22: 手动断开后"重新连接"入口（已知设备记忆驱动，OS 占用也能接管 ACL） -->
-    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDeviceId">
-      <view class="reconnect-info">
-        <text class="reconnect-label">已知设备</text>
-        <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
-        <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
-      </view>
-      <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
+    <!-- ★ 2026-07-22/23: 手动断开后"重新连接"入口（knownDevicesList 驱动，多设备展开为列表） -->
+    <view class="reconnect-card" v-show="!bleStore.connected && bleStore.knownDevicesList.length">
+      <!-- 多设备：展开为可滚动列表 -->
+      <template v-if="bleStore.knownDevicesList.length > 1">
+        <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
+        <scroll-view class="known-list" scroll-y>
+          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac">
+            <view class="reconnect-info">
+              <text class="reconnect-name">{{ d.displayName }}</text>
+              <text class="reconnect-mac">{{ d.mac }}</text>
+              <text v-if="d.customName" class="device-alias-tag">已命名</text>
+              <text v-if="d.isDefault" class="device-default-tag">默认</text>
+            </view>
+            <view class="known-item-actions">
+              <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
+              <button v-if="!d.isDefault" class="default-btn" @tap="handleSetDefault(d.mac)">默认</button>
+            </view>
+          </view>
+        </scroll-view>
+      </template>
+      <!-- 单设备：维持原单卡 -->
+      <template v-else>
+        <view class="reconnect-info">
+          <text class="reconnect-label">已知设备</text>
+          <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
+          <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+          <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
+        </view>
+        <button class="reconnect-btn" @tap="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
+      </template>
     </view>
 
     <!-- 设备扫描区域 -->
-    <view class="section" v-if="!bleStore.connected">
+    <view class="section" v-show="!bleStore.connected">
       <view class="section-header">
         <text class="section-title">附近设备</text>
         <button class="btn-scan" @tap="handleScanToggle">
@@ -195,9 +206,11 @@
         <view class="device-item" v-for="device in bleStore.devices" :key="device.deviceId"
           :class="{ active: bleStore.deviceId === device.deviceId }" @tap="handleConnect(device)">
           <view class="device-info">
-            <text class="device-name">{{ device.name }}</text>
+            <text class="device-name">{{ deviceDisplayName(device) }}</text>
             <text class="device-id">{{ device.deviceId }}</text>
             <text v-if="device.nameIsFallback" class="device-occupied-tag">⚠ 设备占用中</text>
+            <text v-if="bleStore.customNameForMac(device.deviceId)" class="device-alias-tag">已命名</text>
+            <text v-if="bleStore.isPairedDevice(device.deviceId)" class="device-paired-tag">✓ 已配对</text>
           </view>
           <view class="device-rssi">
             <text class="device-rssi-val">{{ device.RSSI }}</text>
@@ -363,10 +376,10 @@ watch(() => bleStore.needsRebind, (v) => {
 })
 
 onShow(async () => {
-  // ★ v3.31.0 / 2026-07-13: 方案 B —— 回前台【保留】后台持续平滑出来的旧 RSSI 值，
-  //   不再清零成 ---。原因：displayRssi 已被 EMA 平滑 + 500ms 节流（见 stores/ble.js），
-  //   后台噪值「回放/狂跳」的根因已消除，保留旧值视觉更连续；下一个节流刻度（≤500ms）
-  //   会静默刷新为最新平滑值，期间不跳。
+  // ★ 2026-07-24: 回前台立即提交显示暂存（staging），保证第一帧即显示当前真实态，
+  //   且【不回放】后台/重连积压的历史包（burst 已合并为最新一次）。旧注释（EMA+500ms 节流）
+  //   已随「入口流合并」方案退役：现在后台每包只覆盖非响应式 _stagedDisplay，合并提交 → 无回放。
+  bleStore.flushStagedDisplay()
   themeStore.applyNavBar()
 
   // ★ 冷启动修复：先确保蓝牙适配器已打开（仅 openBluetoothAdapter，不申请权限、BT 已开无弹窗），
@@ -432,100 +445,8 @@ onShow(async () => {
 
 // ==================== 扫描 & 连接 ====================
 
-// ★ 防止用户在模拟器里死递归弹 Modal
-let _enableBluetoothLocked = false
-
-async function handleEnableBluetooth() {
-  if (_enableBluetoothLocked) {
-    console.log('[UI] enableBluetooth 防抖，跳过重复调用')
-    return
-  }
-
-  // #ifdef APP-PLUS
-  // ★ App 平台：先申请运行时权限
-  if (typeof plus !== 'undefined' && plus.os.name === 'Android') {
-    console.log('[UI] ★★★ App-Plus Android，先申请权限 ★★★')
-    const perms = ['android.permission.ACCESS_FINE_LOCATION', 'android.permission.ACCESS_COARSE_LOCATION']
-    try {
-      const VERSION = plus.android.importClass('android.os.Build$VERSION')
-      if (VERSION.SDK_INT >= 31) {
-        perms.push('android.permission.BLUETOOTH_SCAN', 'android.permission.BLUETOOTH_CONNECT')
-      }
-    } catch(e) {}
-
-    const permResult = await new Promise((resolve) => {
-      plus.android.requestPermissions(perms, resolve, (err) => {
-        console.error('[UI] requestPermissions 异常:', JSON.stringify(err))
-        resolve({ granted: [], deniedAlways: perms, deniedPresent: [] })
-      })
-    })
-    const denied = (permResult.deniedAlways || []).concat(permResult.deniedPresent || [])
-    if (denied.length > 0) {
-      uni.showModal({
-        title: '需要授予权限',
-        content: 'BLE车钥匙需要「位置信息」权限才能扫描蓝牙设备。\n\n请前往系统设置中开启定位权限。',
-        confirmText: '去设置',
-        cancelText: '取消',
-        success: (res) => {
-          if (res.confirm) {
-            const Intent = plus.android.importClass('android.content.Intent')
-            const Settings = plus.android.importClass('android.provider.Settings')
-            const Uri = plus.android.importClass('android.net.Uri')
-            const main = plus.android.runtimeMainActivity()
-            const intent = new Intent()
-            intent.setAction(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-            intent.setData(Uri.parse('package:' + main.getPackageName()))
-            main.startActivity(intent)
-          }
-        }
-      })
-      return
-    }
-    console.log('[UI] 权限已通过 ✓')
-  }
-  // #endif
-
-  // ★ 模仿 nRF Connect: 不显示 loading toast，让系统蓝牙弹窗直接弹出
-  //   用户看到的是: 红色 banner → 点击"开启" → 蓝色"正在开启"banner → 系统底窗
-  //   不做任何中间提示，不遮挡系统弹窗
-  try {
-    const ok = await bleStore.enableBluetooth()
-    if (ok) {
-      if (!bleStore.connected) {
-        bleStore.tryAutoConnect()
-      }
-    } else {
-      // btState 已经反映真实状态，banner 会自然切换，不额外 toast
-    }
-  } catch (err) {
-    const msg = String(err?.errMsg || err?.message || err || '')
-    const code = err?.code ?? err?.errCode
-
-    // #ifdef APP-PLUS
-    // ★ code=10001: 原生弹窗被拒绝/超时 → btState 已是 'off'，红 banner 自然保持，不弹额外 Modal
-    if (code === 10001 || msg.includes('not available')) {
-      // 静默：btState 已经是 'off'，红色 banner 会保持显示，不打扰用户
-    } else if (msg.includes('timeout') || msg.includes('超时')) {
-      toast.info('操作超时，请检查蓝牙后重试')
-    } else if (code === 'PERMISSION_DENIED') {
-      uni.showModal({
-        title: '权限不足',
-        content: 'BLE车钥匙需要「位置信息」权限。\n\n请到系统设置中授权后重新打开 App。',
-        confirmText: '知道了'
-      })
-    } else {
-      toast.error('蓝牙开启失败: ' + (msg || code))
-    }
-    // #endif
-    // #ifndef APP-PLUS
-    if (code === 10001 || msg.includes('not available')) {
-      // 静默：btState 已经是 'off'，红色 banner 保持显示
-    } else {
-      toast.error('蓝牙开启失败')
-    }
-    // #endif
-  }
-}
+// ★ v3.36.3fix11.3: handleEnableBluetooth（含权限申请）已迁至全局组件 BtStateBanner.vue，
+//   连接页横幅改为在 main.vue 统一渲染，此处不再保留重复实现。
 
 async function handleScanToggle() {
   if (bleStore.scanning) {
@@ -593,13 +514,13 @@ async function handleDisconnect() {
   }
 }
 
-// ★ 2026-07-22: 手动断开后一键重新连接（OS 占用时也能接管 ACL；connect 会清回 active 并重写 ble_device_id）
-async function handleReconnect() {
-  const id = bleStore.knownDeviceId
+// ★ 2026-07-22/23: 手动断开后一键重新连接（OS 占用时也能接管 ACL；可指定 targetMac 用于多设备列表）
+async function handleReconnect(targetMac) {
+  const id = targetMac || bleStore.knownDeviceId
   if (!id) return
   uni.showLoading({ title: '连接中...', mask: true })
   try {
-    await bleStore.connect(id, bleStore.deviceName || 'KeyGo')
+    await bleStore.connect(id, bleStore._resolveFactoryName(id))
     uni.hideLoading()
     toast.success('连接成功')
     bleStore.devices = []
@@ -607,6 +528,20 @@ async function handleReconnect() {
     uni.hideLoading()
     toast.error('连接失败，请重试')
   }
+}
+
+// ★ 2026-07-23 ④: 把指定设备设为默认(在重连列表中置顶)
+function handleSetDefault(mac) {
+  if (!mac) return
+  bleStore.setDefaultDevice(mac)
+  toast.success('已设为默认设备')
+}
+
+// ★ 2026-07-23: 扫描列表展示名，有自定义名时组合为「自定义名 ( 出厂名 )」，否则出厂名
+function deviceDisplayName(device) {
+  const custom = bleStore.customNameForMac(device.deviceId)
+  const factory = device.name || (device.deviceId ? bleStore._resolveFactoryName(device.deviceId) : '') || 'KeyGo'
+  return bleStore._formatDisplayName(custom, factory)
 }
 
 // ==================== 车辆控制 ====================
@@ -686,9 +621,15 @@ function showNameDialog() {
     toast.info('请先连接设备')
     return
   }
+  if (!bleStore.isBound) {
+    toast.info('请先绑定设备后再设置名称')
+    return
+  }
   pwModal.mode = 'setName'
   pwModal.title = '设置设备名称'
-  pwModal.hint = '给设备起个名字，如车牌号、车型等'
+  pwModal.hint = bleStore.customDeviceName
+    ? '清空输入框并保存可恢复为出厂名称'
+    : '给设备起个名字，如车牌号、车型等'
   pwModal.placeholder = '设备名称（最长20字符，支持中文）'
   pwModal.value = bleStore.customDeviceName || ''
   pwModal.showDefaultHint = false
@@ -699,94 +640,36 @@ function showNameDialog() {
   pwModal.visible = true
 }
 
+// ★ 恢复默认名称 = 在名称弹窗里清空输入框并保存（handleSetName 已支持空名，
+//   经 setDeviceName('') 同步清空 SN + MAC 两份本地存储，见 ble.js）
+
 async function handleSetName() {
   const name = pwModal.value.trim()
-  if (!name) {
-    toast.info('请输入设备名称')
-    return
-  }
+  const isRestore = !name
   pwModal.visible = false
-  uni.showLoading({ title: '保存中...', mask: true })
+  uni.showLoading({ title: isRestore ? '恢复中...' : '保存中...', mask: true })
   try {
     await bleStore.setDeviceName(name)
     uni.hideLoading()
-    toast.success('设备名称已更新')
+    toast.success(isRestore ? '已恢复默认名称' : '设备名称已更新')
   } catch (err) {
     uni.hideLoading()
-    toast.error(err.message || '保存失败')
+    toast.error(err.message || '操作失败')
   }
 }
 
 </script>
 
 <style scoped>
+/* ★ v3.36.3fix11.4 (2026-07-25) Problem B: 页根 100vh→100%，精确贴合 scroll-view 可视区，
+   消除未连接时“死滚动”（详见 stores/ble.js APP_VERSION 注释）。 */
 .page-index {
-  min-height: 100vh;
+  min-height: 100%;
+  box-sizing: border-box; /* v3.36.3fix11.4 补充: border-box 使 min-height:100% 已含纵向 padding，消除 padding 造成的残余死滚 */
   background: var(--bg-page);
   color: var(--text-primary);
   padding: 30rpx 30rpx 30rpx;
   transition: background-color 0.3s, color 0.3s;
-}
-
-/* ===== 蓝牙关闭横幅（模仿 nRF Connect） ===== */
-.bt-off-banner {
-  background: #FFF3F3;
-  border: 1rpx solid #FFCDD2;
-  border-radius: 12rpx;
-  padding: 20rpx 24rpx;
-  display: flex;
-  align-items: center;
-  gap: 12rpx;
-  margin-bottom: 20rpx;
-  min-height: 72rpx;
-  box-sizing: border-box;
-}
-
-.bt-off-icon { font-size: 28rpx; }
-
-.bt-off-text {
-  flex: 1;
-  font-size: 26rpx;
-  color: #D32F2F;
-  font-weight: 500;
-}
-
-.bt-enable-btn {
-  background: #D32F2F;
-  color: #fff;
-  font-size: 24rpx;
-  padding: 8rpx 28rpx;
-  border-radius: 20rpx;
-  border: none;
-}
-
-/* 绿色成功 banner — 用户允许开启蓝牙后短暂显示，1.5s 后自动消失 */
-.bt-on-banner {
-  background: #E8F5E9;
-  border: 1rpx solid #A5D6A7;
-  border-radius: 12rpx;
-  padding: 20rpx 24rpx;
-  display: flex;
-  align-items: center;
-  gap: 12rpx;
-  margin-bottom: 20rpx;
-  min-height: 72rpx;
-  box-sizing: border-box;
-  animation: bt-on-fadein 0.3s ease;
-}
-
-@keyframes bt-on-fadein {
-  from { opacity: 0; transform: translateY(-8rpx); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-.bt-on-icon { font-size: 28rpx; }
-
-.bt-on-text {
-  flex: 1;
-  font-size: 26rpx;
-  color: #2E7D32;
-  font-weight: 600;
 }
 
 /* ===== 状态卡片 ===== */
@@ -1069,6 +952,39 @@ async function handleSetName() {
 }
 .reconnect-btn:active { opacity: 0.7; }
 
+/* ★ 2026-07-23 ②④: 多设备重连列表 */
+.known-list { max-height: 320rpx; margin-top: 10rpx; }
+.known-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18rpx 0;
+  border-top: 1rpx solid var(--border);
+}
+.known-item:first-child { border-top: none; }
+.known-item-actions { display: flex; align-items: center; flex: 0 0 auto; margin-left: 16rpx; }
+.default-btn {
+  margin-left: 12rpx;
+  width: auto;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1rpx solid var(--border);
+  border-radius: 20rpx;
+  padding: 12rpx 20rpx;
+  font-size: 22rpx;
+}
+.default-btn:active { opacity: 0.7; }
+.device-default-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  margin-left: 8rpx;
+  font-size: 18rpx;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+
 .section-header {
   display: flex;
   justify-content: space-between;
@@ -1167,6 +1083,29 @@ async function handleSetName() {
 
 .device-rssi-unit { font-size: 18rpx; color: var(--text-muted); }
 .device-arrow { font-size: 36rpx; color: var(--text-muted); }
+
+/* ★ v3.36.3-fix5: 「已命名」徽章（设备已设自定义名），扫描列表/重连卡通用 */
+.device-alias-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  font-size: 18rpx;
+  color: var(--accent);
+  background: var(--alpha-12);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+
+/* ★ 2026-07-23: 「已配对」徽章（本机连过的设备），绿色，扫描列表防误连陌生人设备 */
+.device-paired-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  margin-left: 8rpx;
+  font-size: 18rpx;
+  color: #2ecc71;
+  background: rgba(46, 204, 113, 0.14);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
 
 .empty-state {
   display: flex;

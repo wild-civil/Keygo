@@ -99,7 +99,17 @@ import {
 //   自定义码统一走 SETCODE 通道（先 AUTH 证明持有旧码）。
 //   继承 v3.33.0/3.33.1：手动模式前台自动连 + fwsec 能力协商 + T4 回推修复 + AUTH 握手互斥锁 +
 //   长按恢复出厂 + FF01 长写重组 + 配置下发去重 + 重绑信任态保持 + 恢复出厂绑码核验 + 复位后回首绑。
-export const APP_VERSION = 'v3.36.2'   // ★ v3.36.2 (2026-07-19): 与固件 KEYGO_FW_VERSION 对齐；此前滞后于固件（3.33.4），本次一并校准
+// ★ v3.36.3fix11.4 (2026-07-25) —— Problem B 修正
+//   死滚动根因：4 个 tab 页根原 min-height:100vh，但真实滚动容器 main.vue 的 scroll-view
+//   高度 = 100vh − 顶部 BtStateBanner − 底部 custom-tabbar，页内容永远比可视区高
+//   banner+tabbar≈100~150px 的“可滚动空白”（未连接时内容短，用户下滑滑的就是这段背景）。
+//   fix11.3 把 banner 从 index.vue 内联提到 main.vue 固定头后，banner≈50px 不再参与滚动，
+//   反而使该空白翻倍（≈100px+），连/控两页下滑空白感更明显（属 fix11.3 回归，本提交补回）。
+//   修法：index/control/config/help 4 个页根 min-height:100vh → 100%，并设 box-sizing:border-box 使 100% 已含纵向 padding，
+//   可视区：内容短=零死滚，内容长=正常滚；不动 scroll-y、不动 swiper 手势，低风险。
+//   ★ ② 诊断日志保留 v3.36.3fix11.4-DIAG（用户决策：不随本次顺延，仅作 ② 复现定位用）。
+//   命名规则：fix 系列按 v3.36.3fix11.(x+1) 递增。
+export const APP_VERSION = 'v3.36.3fix11.4'   // ★ v3.36.3fix11.4 (2026-07-25): Problem B 死滚动修正(4页根 100vh→100%) + 补回 fix11.3 banner 回归
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 原生前台服务 kill-switch（长期安全开关，非临时止血）：
@@ -131,6 +141,12 @@ import { throwError, ERROR_MSGS } from '@/utils/readable-errors.js'
 // ★ ②: 绑定层模块级状态（提取到 stores/ble-binding.js，通过 B 命名空间对象访问）
 import { B, _waitFor, _resolveWaiter, _acquireBindLock, _acquireAuthLock, _waitBind, BIND_DISCONNECTED, _flushBindWaiters } from './ble-binding.js'
 
+// ★ 2026-07-24: 显示流合并（staging）——非响应式暂存，避免后台/重连 burst 逐包直写导致回放/狂跳。
+//   仅「显示字段」暂存；连接态/命令确认/绑定对账/无App模式/电量等控制流副作用仍即时（见 _parseSingleStatus）。
+let _stagedDisplay = null        // 最新一包解析出的显示字段（last-value-wins 覆盖）
+const _DISPLAY_COMMIT_TICK = 100 // 合并提交节拍(ms)：≤100ms 内提交最新值 → burst 自动合并为 1 次渲染
+let _displayCoalescer = null     // setInterval 句柄（懒启动，常驻，无包时 no-op）
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -158,11 +174,13 @@ export const useBleStore = defineStore('ble', {
     devices: [],
 
     // 设备状态（从 FF02 Notify 接收）
-    deviceState: 'LOCKED',        // LOCKED / UNLOCKED / ACTION
+    deviceState: 'LOCKED',        // LOCKED / UNLOCKED / RIDE / ACTION
     deviceMode: 'car',            // ★ Phase 2: 设备模式 'car' / 'ebike'（权威来自设备状态 m，本地缓存兜底）
     rssi: -999,
     filteredRssi: -999,
     displayRssi: -999,            // ★ v3.31.0 / 2026-07-13: 平滑+节流后的显示用 RSSI（UI 绑定此值，杜绝后台噪值狂跳）
+    rawRssiDisplay: -999,         // ★ 2026-07-24: 受节流的「原始 RSSI」展示副本（=固件上报 r），与 displayRssi 同节流窗口。
+                                    //   仅用于 info-grid 诊断展示，避免每条 FF02 直写导致控制页高频重渲染、destabilize swiper 手势（晃动）。
     rssiEma: -999,                // ★ 内部：displayRssi 的 EMA 累加器（仅 >-900 时视为有效）
     batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
     autoLockEnabled: -1,          // ★ v3.24-fixb: 固件自动锁使能状态(FF02 al 字段)，-1=未知/未同步，0=关闭(手动模式)，1=开启
@@ -191,7 +209,10 @@ export const useBleStore = defineStore('ble', {
     unlockProgress: 0,            // 当前解锁进度计数（连续几次滤波 RSSI 在解锁区）
     lockProgress: 0,              // 当前锁车进度计数
     thresholdZone: 0,             // 当前区间：0 中性 / 1 解锁区 / 2 锁车区
-    showProgressCard: true,       // ★ v3.31 方案B-修正: 连接页是否显示「确认进度」卡片（手机端偏好，不下发设备）
+    showProgressCard: false,      // ★ v3.31 方案B-修正: 连接页是否显示「确认进度」卡片（手机端偏好，不下发设备）
+                                     //   2026-07-24 改为默认 false：首次安装/清存储的用户默认【不显示】进度卡片，
+                                     //   避免一进连接页就被进度条/诊断信息占据。已手动开启过的用户由
+                                     //   ble.js:564（saved.showProgressCard !== undefined）恢复其偏好，不受影响。
 
     // ★ 2026-07-15: passkey 系统配对偏好（全局，手机端保存，不入下发配置）
     //   开启=舒适进入/无 App 也能解锁（需自定义基座+原生插件）；关闭(默认)=明文最大兼容
@@ -278,6 +299,21 @@ export const useBleStore = defineStore('ble', {
     _reconnectGuard: 0,            // 重连会话锁，蓝牙关闭时递增
     _bondingInProgress: false,     // ★ 2026-07-16: 配对(_triggerBond)期间断开 GATT 让 OS 配对，抑制 store 自动重连
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
+    _customNamesByMac: (() => { try { return uni.getStorageSync('ble_device_custom_names') || {} } catch (e) { return {} } })(), // ★ v3.36.3-fix5: 按 MAC 索引的本机自定义名副本(由 customDeviceName 持久化而来)，供断连后的扫描列表/重连卡统一显示
+    _advertisedNames: (() => { try { return uni.getStorageSync('ble_advertised_names') || {} } catch (e) { return {} } })(), // ★ 2026-07-23: 设备真实广播名(扫描拿到)按 MAC 持久化，作为出厂名"真相"(与手机蓝牙列表一致)
+    knownDevices: (() => {  // ★ 2026-07-23 ②: 所有连过的设备集合 { [cleanMac]: { mac, lastConnectedAt } }，持久化 ble_known_devices
+      try {
+        const map = uni.getStorageSync('ble_known_devices') || {}
+        // 兼容旧数据：升级前只记了单值 ble_last_device_id，补入集合，避免老用户"已知设备"空列表
+        const legacy = uni.getStorageSync('ble_last_device_id') || ''
+        if (legacy) {
+          const k = legacy.replace(/:/g, '').toUpperCase()
+          if (!map[k]) map[k] = { mac: legacy, lastConnectedAt: 0 }
+        }
+        return map
+      } catch (e) { return {} }
+    })(),
+    defaultDeviceId: (() => { try { return uni.getStorageSync('ble_default_device_id') || '' } catch (e) { return '' } })(), // ★ 2026-07-23 ④: 用户标记默认设备(cleanMac)，持久化 ble_default_device_id
     /* ★ v3.15: 脏标记 — serial 未就绪时用户改了配置，等 serial 到达后自动补持久化
      *   解决：连接后用户改 kalmanR/阈值太快，序列号还没读到就写了，配置丢失 */
     _configDirty: false,
@@ -309,7 +345,7 @@ export const useBleStore = defineStore('ble', {
 
   getters: {
     stateText: (state) => {
-      const map = { 'LOCKED': '已锁车', 'UNLOCKED': '已解锁', 'ACTION': '执行中...' }
+      const map = { 'LOCKED': '已锁车', 'UNLOCKED': '已解锁', 'RIDE': '骑行模式', 'ACTION': '执行中...' }
       return map[state.deviceState] || state.deviceState
     },
 
@@ -340,12 +376,86 @@ export const useBleStore = defineStore('ble', {
       return this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
     },
 
-    // ★ 2026-07-22: 已知设备展示名，与扫描列表完全一致（KeyGo- + MAC 末6位），便于识别
+    // ★ 2026-07-23 ②: 已知设备列表（用于"重新连接"卡片，多设备展开为列表）。
+    //   排序：默认设备置顶(④) > 最近连接时间倒序。每项含展示名/自定义名/MAC/是否默认。
+    //   单设备时返回长度为 1，UI 退化为单卡(与现状一致)；≥2 台展开为可滚动列表。
+    knownDevicesList() {
+      const arr = Object.keys(this.knownDevices || {}).map(k => {
+        const d = this.knownDevices[k]
+        const custom = this.customNameForMac(d.mac)
+        const factory = this._resolveFactoryName(d.mac)
+        return {
+          mac: d.mac,
+          customName: custom,
+          displayName: custom || factory,
+          lastConnectedAt: d.lastConnectedAt || 0,
+          isDefault: (this.defaultDeviceId || '').replace(/:/g, '').toUpperCase() === k,
+        }
+      })
+      const def = (this.defaultDeviceId || '').replace(/:/g, '').toUpperCase()
+      arr.sort((a, b) => {
+        if (a.mac.replace(/:/g, '').toUpperCase() === def) return -1
+        if (b.mac.replace(/:/g, '').toUpperCase() === def) return 1
+        return b.lastConnectedAt - a.lastConnectedAt
+      })
+      return arr
+    },
+
+    // ==================== 2026-07-23 设备命名 / 出厂名 / 已配对 功能组 ====================
+    // 【背景】固件 peripheral.c 用 g_deviceMac[3..5] 生成广播名 "KeyGo-XXXXXX"，而 GetMACAddress 从
+    //   WCH ROM 读出的是【小端】MAC（[0]=末字节 … [5]=首字节），故 [3][4][5] = 公网 MAC 前 3 字节反转。
+    //   例: 公网 MAC 0C:3D:5E:A6:5F:90 → 广播名 KeyGo-5E3D0C（与手机蓝牙列表一致）。
+    //   旧代码用 macClean.slice(-6)（末 3 字节）得到 A65F90，与固件/手机蓝牙列表错位，本次修正。
+    // 【本组包含】
+    //   ① knownDeviceName / connectedDisplayName —— 重连卡/连接态展示名，格式「自定义名 ( 出厂名 )」
+    //   ② controlTopName —— 控制页车辆大卡顶部专用，只显示自定义名(不带括号)，未命名回退出厂名
+    //   ③ _factoryNameForMac / _resolveFactoryName —— 由 MAC 推算/解析出厂名，与固件公式一致
+    //   ④ _advertisedNames + _rememberAdvertisedName —— 扫描时记忆真实广播名(按 MAC 持久化)
+    //   ⑤ _formatDisplayName —— 组合「自定义名 ( 出厂名 )」
+    //   ⑥ isPairedDevice —— 本机已配对(连过)设备判定，供扫描列表「✓ 已配对」徽章
+
+    // 已知设备展示名：优先自定义名 > 出厂名，组合为「自定义名 ( 出厂名 )」（用于重连卡）
     knownDeviceName() {
-      const id = this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || ''
+      const id = this.knownDeviceId
       if (!id) return ''
-      const clean = id.replace(/:/g, '').toUpperCase()
-      return 'KeyGo-' + clean.slice(-6)
+      const custom = this.customNameForMac(id)
+      const factory = this._resolveFactoryName(id)
+      return this._formatDisplayName(custom, factory)
+    },
+
+    // 按 MAC 查本机自定义名(由 customDeviceName 持久化而来)；返回函数供模板传参，供扫描列表/重连卡/"已命名"徽章统一使用
+    customNameForMac: (state) => (mac) => {
+      if (!mac) return ''
+      const key = mac.replace(/:/g, '').toUpperCase()
+      return state._customNamesByMac[key] || ''
+    },
+
+    // 本机已配对(曾连接/使用)设备判定，供扫描列表「✓ 已配对」徽章。
+    // 以 knownDeviceId(本机连过的设备) 为准——与 OS 绑定意涵一致，且避免把扫到的陌生设备误标。
+    // ★ 优化：复用 knownDeviceId getter，避免重复读 storage。
+    isPairedDevice: (state) => (mac) => {
+      if (!mac) return false
+      const key = String(mac).replace(/:/g, '').toUpperCase()
+      const known = (state.knownDeviceId || '').replace(/:/g, '').toUpperCase()
+      return !!known && key === known
+    },
+
+    // 连接态展示名：有自定义名 → 「自定义名 ( 出厂名 )」；否则出厂名（用于连接态顶部/扫描列表等）
+    connectedDisplayName() {
+      if (this.customDeviceName) {
+        const factory = this.deviceName || (this.deviceId ? this._resolveFactoryName(this.deviceId) : '')
+        return this._formatDisplayName(this.customDeviceName, factory)
+      }
+      if (this.deviceName) return this.deviceName
+      if (this.deviceId) return this._resolveFactoryName(this.deviceId)
+      return ''
+    },
+
+    // 控制页车辆大卡顶部专用名：只显示自定义名(不带「( 出厂名 )」后缀)，未命名时回退出厂名。
+    // 与 connectedDisplayName 的区别：大卡顶部空间紧凑，不重复展示出厂名，避免信息冗余。
+    controlTopName() {
+      if (this.customDeviceName) return this.customDeviceName
+      return this.connectedDisplayName
     },
 
     // ★ v3.25: 到停车点的距离文字（极速模式实时显示）
@@ -367,7 +477,7 @@ export const useBleStore = defineStore('ble', {
       return `${(state.geofenceDistance / 1000).toFixed(1)}km${errSuffix}`
     },
 
-    isUnlocked: (state) => state.connected && state.deviceState === 'UNLOCKED',
+    isUnlocked: (state) => state.connected && (state.deviceState === 'UNLOCKED' || state.deviceState === 'RIDE'),
 
     // ★ Phase 2: 双模式派生状态
     isEbike: (state) => state.deviceMode === 'ebike',
@@ -477,7 +587,12 @@ export const useBleStore = defineStore('ble', {
           //   设备通过 FF02 Notify 上报当前冷却时间，App 被动同步
           //   old: manualCooldownMs 本地持久化 → 多个手机可能不一致
           //   new: 仅从设备 FF02 同步 → 所有手机看到同一值
-          console.log('[Store] 配置已恢复 (' + source + '):', JSON.stringify(saved))
+          //   ★ 2026-07-25 收敛日志：旧版全局配置在每次进出配置页都会恢复（active 翻转触发），
+          //     重复打印无意义且会淹没真实日志；仅首次打印，后续静默恢复。
+          if (source !== '旧版全局' || !this._globalRestoreLogged) {
+            console.log('[Store] 配置已恢复 (' + source + '):', JSON.stringify(saved))
+            if (source === '旧版全局') this._globalRestoreLogged = true
+          }
         } else {
           console.log('[Store] 使用默认配置 (unlock=-45 lock=-65 uc=3 lc=5 interval=800)')
         }
@@ -798,6 +913,7 @@ export const useBleStore = defineStore('ble', {
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 断连重置签名会话态
       this.filteredRssi = -999
       this.displayRssi = -999
+      this.rawRssiDisplay = -999   // ★ 2026-07-24: 断连同步清零受节流展示副本
       this.rssiEma = -999
       this.statusStale = false
       this.reconnectMode = 'paused'
@@ -953,6 +1069,17 @@ export const useBleStore = defineStore('ble', {
             this.btState = 'on'
           }
         } else if (this.btState !== 'just_enabled') {
+          // ★★★ v3.36.3fix11.4 临时诊断日志（待②复现确认后删除）★★★
+          // 目的：坐实 ② 根因——available=false 把原生 STATE_ON 已置的 'on' 盖回 'off'（红 banner 误复现）。
+          // 若真机红 banner 误复现且此日志打印 → 100% 确认走此路径。
+          // 后续修复（v3.36.3fix11.4）：在下面 this.btState='off' 之前加一行
+          //   if (this.btState === 'on' && this._nativeBtFired) return   // 信任原生广播开启态，不被延迟 available=false 覆盖
+          // 删除本段（含下方 console.warn）即可落地修复；本次仅加日志，不改行为。
+          if (this.btState === 'on') {
+            console.warn('[Store][v3.36.3fix11.4-DIAG] ⚠ btState on→off 翻转！available=' + state.available +
+              ' _nativeBtFired=' + this._nativeBtFired +
+              ' → 疑似②(延迟 available=false 覆盖原生 on)。若同时红 banner 误复现即坐实')
+          }
           this.btState = 'off'
         }
       } catch (e) {
@@ -1144,6 +1271,7 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.31.0 / 2026-07-13: 清掉 RSSI 看门狗并重置显示态（避免残留 stale 显示）
       this._clearRssiStaleWatchdog()
       this.displayRssi = -999
+      this.rawRssiDisplay = -999   // ★ 2026-07-24: 重置同步清零受节流展示副本
       this.rssiEma = -999
       if (this._disconnectRssiClearTimer) clearTimeout(this._disconnectRssiClearTimer)
       this._disconnectRssiClearTimer = setTimeout(() => {
@@ -1491,6 +1619,7 @@ export const useBleStore = defineStore('ble', {
               // ★ 标记发现 → 停止当前扫描后期会连接
               this._dormantFound = true
               this._dormantFoundDevice = device
+              this._rememberAdvertisedName(device.deviceId, device.name)
             }
           },
           5 // 5 秒超时
@@ -1667,9 +1796,9 @@ export const useBleStore = defineStore('ble', {
               this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置（防止沿用上一连接的去重标志）
               this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 亮屏修复连上后重置 RSSI 显示态
               this.lastDeviceId = targetId
+              this._rememberAdvertisedName(targetId, device.name)
               if (!this.deviceName) {
-                const macClean = targetId.replace(/:/g, '')
-                this.deviceName = 'KeyGo-' + macClean.slice(-6).toUpperCase()
+                this.deviceName = this._resolveFactoryName(targetId, device.name)
               }
               stopScan().catch(() => {})
               this.scanning = false
@@ -1823,10 +1952,9 @@ export const useBleStore = defineStore('ble', {
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
+      this._touchKnownDevice(deviceId) // ★ 2026-07-23 ②: 记录到已知设备集合
       if (!this.deviceName) {
-        const macClean = this.deviceId.replace(/:/g, '')
-        const macSuffix = macClean.slice(-6).toUpperCase()
-        this.deviceName = 'KeyGo-' + macSuffix
+        this.deviceName = this._resolveFactoryName(this.deviceId)
       }
           this._resetReconnectCounters()
           this._stopDormantPoll()
@@ -1994,6 +2122,7 @@ export const useBleStore = defineStore('ble', {
     /**
      * ★ v3.14: GATT Read 读取电池电量（独立数据源，不依赖扫描缓存）
      *   连接建立后非阻塞调用，覆盖手动连接 + 自动重连两条路径。
+     * ★ 2026-07-24 (v3.36.3-fixApp-batt): 读取改为「重试 3 次退避」，消除「一次性读失败就永久 ---」的脆弱。
      */
     async _fetchBatteryLevel(deviceId) {
       if (!deviceId) return
@@ -2002,17 +2131,35 @@ export const useBleStore = defineStore('ble', {
       //   路径，与 App 无关）。App 侧 readBLECharacteristicValue 偶发 property not support，疑似手机 GATT 缓存
       //   对该特征缺 READ 位（同「缓存过期」类），故改为「仅当 Notify/广播未送达电量时」才兜底读取。
       //   ★ 注意：电量并不在 FF02 status JSON 里（该 JSON 无电池字段），不要误以为来自 FF02 Notify。
+      //   ★ 2026-07-24 修复策略（开发修复指南）：
+      //     当前在「先扫后连」场景靠扫描缓存拿到电量；但前台服务/已知设备直接重连无新鲜扫描时，
+      //     若本次 GATT Read 失败则 batteryLevel 恒为 -1 → 控制页永久显示 "---"。故此处加重试。
+      //     ⚠ 固件侧「连接建立即主动推送当前电量 (Battery_UpdateLevel()+Battery_Notify())」的修复
+      //       【刻意推迟到「外部 ADC 采集真实电池」那一轮固件改动一起 bump】（避免同一 battery_service.c 刷两次固件）。
+      //       届时外部 ADC 电平会变化 → 变化 Notify 才生效；但重连后电平≈上次值仍会长时间不推，
+      //       故那轮务必把连接即推送一并做掉。详见 docs/03-复盘与问题分析/4-硬件与专项分析/
+      //       KeyGo_电量长时间不显示_根因分析.md §3.1。
       await new Promise(r => setTimeout(r, 2500)) // 先等状态 Notify 把电量送上来
       if (this.deviceId !== deviceId || !this.connected) return
       if (this.batteryLevel >= 0) return // Notify/广播已覆盖，跳过冗余读
-      try {
-        const level = await readBatteryLevel(deviceId, 5000)
-        if (level >= 0 && level <= 100) {
-          this.batteryLevel = level
-          console.log('[Store] GATT 电池电量(兜底):', level + '%')
+
+      // ★ 2026-07-24: 重试 3 次（退避 800ms），覆盖手机 GATT 缓存瞬态缺 READ 位导致的偶发失败
+      const MAX_RETRY = 3
+      for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+        if (this.batteryLevel >= 0) break // 重试途中被 Notify/广播补到，提前退出
+        try {
+          const level = await readBatteryLevel(deviceId, 5000)
+          if (level >= 0 && level <= 100) {
+            this.batteryLevel = level
+            console.log('[Store] GATT 电池电量(兜底, 第' + attempt + '次):', level + '%')
+            break
+          }
+        } catch (e) {
+          console.log('[Store] GATT 电池电量兜底读取失败(第' + attempt + '/' + MAX_RETRY + '次):', e.message)
+          if (attempt < MAX_RETRY) {
+            await new Promise(r => setTimeout(r, 800)) // 退避后重试
+          }
         }
-      } catch (e) {
-        console.log('[Store] GATT 电池电量兜底读取失败（已依赖 Notify）:', e.message)
       }
     },
 
@@ -2283,6 +2430,31 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ v3.36.3-fix5: 把自定义名按 MAC 持久化一份，供断连后的扫描列表/重连卡/"已命名"徽章显示
+     * @param {string} mac 设备 MAC
+     * @param {string} name 自定义名
+     */
+    _seedCustomNameByMac(mac, name) {
+      if (!mac) return
+      const key = mac.replace(/:/g, '').toUpperCase()
+      const next = { ...this._customNamesByMac }
+      // ★ 恢复默认名：空名 = 删除 MAC 副本（而非跳过），否则断连态仍显旧名 + 「已命名」徽章
+      if (name) {
+        if (next[key] === name) return
+        next[key] = name
+      } else {
+        if (!(key in next)) return
+        delete next[key]
+      }
+      this._customNamesByMac = next
+      try {
+        uni.setStorageSync('ble_device_custom_names', next)
+      } catch (e) {
+        console.warn('[Store] 按 MAC 持久化设备名失败:', e)
+      }
+    },
+
+    /**
      * ★ v3.8: 根据序列号恢复设备自定义名称
      * 连接成功后调用（SN 读取完成时 / 重连成功时）
      * @param {string} sn 设备序列号（FF04）
@@ -2298,15 +2470,77 @@ export const useBleStore = defineStore('ble', {
         this.customDeviceName = entry.name
         entry.lastSeen = Date.now()
         this._saveDeviceNames()
+        this._seedCustomNameByMac(this.deviceId, entry.name) // ★ v3.36.3-fix5: 同步到 MAC 索引，供断连后展示
         console.log('[Store] 设备名称已从本地恢复:', entry.name, '(SN:', sn, ')')
       } else if (this.customDeviceName) {
         // 本地无记录，但 d2 已从 NotifyStatus 读回 → 用 d2 作为初始名并记录
         this._deviceNames[sn] = { name: this.customDeviceName, lastSeen: Date.now() }
         this._saveDeviceNames()
+        this._seedCustomNameByMac(this.deviceId, this.customDeviceName) // ★ v3.36.3-fix5
         console.log('[Store] 首次记录设备名称（来自固件 d2）:', this.customDeviceName, '(SN:', sn, ')')
       }
-      // else: 本地无记录 + 无 d2 → 保持默认名（KeyGo-XXXXXX）
-    },
+        // else: 本地无记录 + 无 d2 → 保持默认名（KeyGo-XXXXXX）
+      },
+
+      // 由 MAC 推算出厂广播名，与固件 peripheral.c 完全一致。
+      //   固件: snprintf("KeyGo-%02X%02X%02X", g_deviceMac[3], g_deviceMac[4], g_deviceMac[5])
+      //   其中 g_deviceMac 为 ROM MAC 的【小端】存储([0]=末字节…[5]=首字节)，故 [3][4][5] = 公网 MAC 前 3 字节反转。
+      //   例: 公网 MAC 0C:3D:5E:A6:5F:90 → 广播名 KeyGo-5E3D0C（与手机蓝牙列表一致）。
+      //   ★ 兼容性：MAC 不足 12 位(旧数据/截断)时退化为旧逻辑 slice(-6)，避免崩溃。
+      _factoryNameForMac(mac) {
+        const clean = String(mac || '').replace(/:/g, '').toUpperCase()
+        if (clean.length < 12) return 'KeyGo-' + clean.slice(-6)
+        const first3 = clean.slice(0, 6)            // 公网 MAC 前 3 字节 M0M1M2
+        const reversed = first3.slice(4, 6) + first3.slice(2, 4) + first3.slice(0, 2) // M2M1M0
+        return 'KeyGo-' + reversed
+      },
+
+      // 解析出厂展示名：优先级 真实广播名(扫描拿到的 device.name) > 持久化广播名(_advertisedNames) > MAC 推导。
+      //   这样即使某次扫描没拿到 name，也能用历史记忆或 MAC 推算出正确出厂名，始终与手机蓝牙列表一致。
+      _resolveFactoryName(mac, scanName) {
+        if (scanName && String(scanName).startsWith('KeyGo')) return scanName
+        const key = String(mac || '').replace(/:/g, '').toUpperCase()
+        const adv = this._advertisedNames && this._advertisedNames[key]
+        if (adv) return adv
+        return this._factoryNameForMac(mac)
+      },
+
+      // 扫描时记忆设备真实广播名，按 MAC 持久化，作为出厂名"真相"(与手机蓝牙列表一致)。
+      //   仅接受以 "KeyGo" 开头的名(过滤脏数据)；值未变则跳过写 storage(减少无意义 IO)。
+      _rememberAdvertisedName(mac, name) {
+        if (!mac || !name || !String(name).startsWith('KeyGo')) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        if (this._advertisedNames && this._advertisedNames[key] === name) return
+        if (!this._advertisedNames) this._advertisedNames = {}
+        this._advertisedNames[key] = name
+        try { uni.setStorageSync('ble_advertised_names', this._advertisedNames) } catch (e) {}
+      },
+
+      // ★ 2026-07-23 ②: 记录一台"连过的设备"到 knownDevices 集合(多设备记忆)。
+      //   仅成功连接(_finalizeConnection)时调用；陌生设备永不进集合。
+      _touchKnownDevice(mac) {
+        if (!mac) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        const next = { ...(this.knownDevices || {}) }
+        next[key] = { mac, lastConnectedAt: Date.now() }
+        this.knownDevices = next
+        try { uni.setStorageSync('ble_known_devices', next) } catch (e) {}
+      },
+
+      // ★ 2026-07-23 ④: 把某台设为默认设备(在重连列表中置顶)。
+      setDefaultDevice(mac) {
+        if (!mac) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        this.defaultDeviceId = key
+        try { uni.setStorageSync('ble_default_device_id', key) } catch (e) {}
+      },
+
+      // 自定义名 + 出厂名组合显示，例如「爱车 ( KeyGo-5E3D0C )」。
+      //   仅当两者都存在且不同才加括号；否则回退单个值(避免「爱车 ( 爱车 )」这类冗余)。
+      _formatDisplayName(custom, factory) {
+        if (custom && factory && custom !== factory) return custom + ' ( ' + factory + ' )'
+        return custom || factory || ''
+      },
 
     // ==================== 扫描 ====================
 
@@ -2357,6 +2591,7 @@ export const useBleStore = defineStore('ble', {
               this.devices[idx] = { ...this.devices[idx], RSSI: Math.max(this.devices[idx].RSSI, device.RSSI) }
             } else {
               this.devices.push(device)
+              this._rememberAdvertisedName(device.deviceId, device.name)
             }
           },
           timeout
@@ -2451,7 +2686,7 @@ export const useBleStore = defineStore('ble', {
 
         await this._connectWithResetFallback(deviceId)
         this.deviceId = deviceId
-        this.deviceName = deviceName || 'KeyGo'
+        this.deviceName = this._resolveFactoryName(deviceId, deviceName)
         this.connected = true
         this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
         this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 手动连上后重置 RSSI 显示态
@@ -2645,7 +2880,8 @@ export const useBleStore = defineStore('ble', {
       // 确保前台服务存活（后台自动连需要，且已在后台时不被系统查杀）
       this._ensureForegroundService()
       try {
-        await initBluetooth()   // 打开适配器 + 申请权限（仅 BT 关闭时才弹系统框）
+        // ★ fix11.1: 自动连准备路径传 autoEnable:false → BT 关时不弹系统框（由红 banner 引导），避免冷启动双弹
+        await initBluetooth({ autoEnable: false })   // 打开适配器 + 申请权限
         this._adapterReady = true
         // ★ 冷启动修复：适配器已开，用实时状态校正 btState（BT 已开→'on'，否则回落），
         //   避免 onShow 里 _forceRefreshBluetoothState 读到过期的 "not init" 误判为 off。
@@ -2750,6 +2986,7 @@ export const useBleStore = defineStore('ble', {
         const idx = found.findIndex(d => d.deviceId === device.deviceId)
         if (idx >= 0) found[idx] = device
         else found.push(device)
+        this._rememberAdvertisedName(device.deviceId, device.name)
         console.log('[Store] autoConnectBest 发现已知设备:', device.name, 'RSSI:', device.RSSI)
       }
       try {
@@ -2802,9 +3039,39 @@ export const useBleStore = defineStore('ble', {
     _clearRssiStaleWatchdog() {
       if (this._rssiStaleWatchdog) { clearInterval(this._rssiStaleWatchdog); this._rssiStaleWatchdog = null }
     },
+    // ★ 2026-07-24: 显示流合并（staging）相关 action
+    startDisplayCoalescer() {
+      // 懒启动：首次连接时调用一次，之后常驻（无包时 no-op，开销可忽略）
+      if (_displayCoalescer) return
+      const store = this
+      _displayCoalescer = setInterval(() => {
+        if (_stagedDisplay) store._commitStagedDisplay()
+      }, _DISPLAY_COMMIT_TICK)
+    },
+    _commitStagedDisplay() {
+      if (!_stagedDisplay) return
+      // ★ 断连后丢弃暂存，避免显示陈旧值（disconnect 已将 rssi/deviceTempC 重置为 -999/null）
+      if (!this.connected) { _stagedDisplay = null; return }
+      const s = _stagedDisplay
+      _stagedDisplay = null
+      if (s.r !== undefined) {
+        this.rssi = s.r
+        this.rawRssiDisplay = s.r   // ★ 原始 RSSI 展示副本随合并提交（不再每条重渲染）
+      }
+      if (s.f !== undefined) {
+        this.filteredRssi = s.f
+        this.displayRssi = s.f      // 显示用 Kalman 滤波值（与区间判定同源，不二次平滑）
+      }
+      if (s.t !== undefined) this.deviceTempC = s.t
+    },
+    // ★ 回前台立即提交最新暂存，保证第一帧即显示当前真实态（不回放历史）
+    flushStagedDisplay() {
+      this._commitStagedDisplay()
+    },
     // ★ v3.31.0 / 2026-07-13: 每次（重）连接时重置 RSSI 显示态 + 启动看门狗
     _resetRssiDisplay() {
       this.displayRssi = -999
+      this.rawRssiDisplay = -999   // ★ 2026-07-24: 重连重置同步清零
       this.rssiEma = -999
       this._lastFf02Ms = 0
       this._lastRssiDisplayMs = 0
@@ -2866,29 +3133,20 @@ export const useBleStore = defineStore('ble', {
           this._disconnectRssiClearTimer = null
         }
         this.connected = data.c === 1
+        if (this.connected) this.startDisplayCoalescer()   // ★ 懒启动合并提交（仅启动一次，常驻）
       }
 
-      // RSSI（先更新原始值，后续校验要用）
-      if (data.r !== undefined && data.r > -999) this.rssi = data.r
-      // ★ v3.31.0 / 2026-07-13: 显示用 RSSI 经 EMA 平滑 + 节流写入 displayRssi。
-      //   后台累积的噪值被 EMA 抹平 → 回前台不会「疯狂跳跃/回放」。
-      //   raw/filteredRssi 仍保留供其他逻辑使用，仅 UI 改绑 displayRssi。
-      //   ★ 节流窗口 = rssiReadPeriodMs（与固件采样间隔【同源】）：手机改 RSSI 采样间隔会同步改这里，
-      //     避免显示刷新比固件采样还快（徒增跳动）。注意：FF02 通知周期(~1s)独立于此，故显示实际
-      //     最多每 1s 跳一次（除非固件 FF02 周期也跟随 interval）。
+      // ★ 2026-07-24: 显示字段走「非响应式暂存 + 合并提交」(staging)，根治后台/重连 burst 回放/狂跳。
+      //   每条包只覆盖 _stagedDisplay（last-value-wins），由 _displayCoalescer 每 ~100ms 提交最新值一次
+      //   → N 条积压包合并为 1 次渲染，显示延迟 ≤100ms。控制流副作用(connected/st/绑定/无App模式/电量)即时，不走暂存。
+      if (data.r !== undefined && data.r > -999) {
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.r = data.r
+      }
       if (data.f !== undefined && data.f > -999) {
-        this.filteredRssi = data.f
-        this._lastFf02Ms = Date.now()
-        // ★ 2026-07-13 修正: 显示 RSSI 直接用固件 Kalman 滤波值 f（与区间判定 th/ucnt/lcnt
-        //   同源），**不再叠加 EMA 二次平滑**。原 EMA(0.7/0.3, 新值权重仅0.3) 让显示值严重滞后
-        //   于 f：走近时 f 已过 -40 触发解锁但 EMA 仍显示 -42；走远时 f 已回中性但 EMA 仍 -39。
-        //   改直接显示 f 后大数字与区间判定一致。f 本身已是 Kalman 平滑值，无需再叠一层；
-        //   节流(rssiReadPeriodMs)仅控刷新率，避免高于固件采样频率的徒增跳动。
-        const _now = Date.now()
-        if (_now - this._lastRssiDisplayMs >= this.rssiReadPeriodMs) {
-          this.displayRssi = data.f
-          this._lastRssiDisplayMs = _now
-        }
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.f = data.f
+        this._lastFf02Ms = Date.now()   // ★ 看门狗用「真实包到达时刻」，保持即时（不随提交延迟）
       }
 
       if (data.st !== undefined) {
@@ -3051,7 +3309,11 @@ export const useBleStore = defineStore('ble', {
 
       // ★ v3.36.1: 内部芯片温度遥测（t 字段，摄氏度整数，固件 TSENSE 采样，5s 节流）。
       //   固件 v3.36.1 起上报；旧固件无此字段 → deviceTempC 保持 null，UI 不显示温度。
-      if (data.t !== undefined) this.deviceTempC = Number(data.t)
+      // ★ 2026-07-24: 温度同样进暂存（5s 才变一次，burst 内同值，合并不影响精度）
+      if (data.t !== undefined) {
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.t = Number(data.t)
+      }
 
       // ★ v3.15-#13: 每次收到有效 Status 后重置看门狗
       this._resetStatusStaleTimer()
@@ -4192,15 +4454,24 @@ export const useBleStore = defineStore('ble', {
 
       this.customDeviceName = name
 
-      // ★ 本地存储（按序列号索引）
+      // ★ v3.36.3-fix5: 同时按 MAC 持久化一份自定义名，供断连后的扫描列表/重连卡统一显示
+      if (this.deviceId) {
+        this._seedCustomNameByMac(this.deviceId, name)
+      }
+
+      // ★ 本地存储（按序列号索引）；恢复默认名时删除条目而非存空串
       if (this.serialNumber) {
         this._loadDeviceNames()
-        this._deviceNames[this.serialNumber] = {
-          name: name,
-          lastSeen: Date.now()
+        if (name) {
+          this._deviceNames[this.serialNumber] = {
+            name: name,
+            lastSeen: Date.now()
+          }
+        } else {
+          delete this._deviceNames[this.serialNumber]
         }
         this._saveDeviceNames()
-        console.log('[Store] 设备名称已保存到本地 (SN:', this.serialNumber, '):', name)
+        console.log('[Store] 设备名称已保存到本地 (SN:', this.serialNumber, '):', name || '(已恢复默认名)')
       } else {
         console.warn('[Store] 设备序列号尚未就绪，名称仅暂存内存，断开后将丢失')
       }

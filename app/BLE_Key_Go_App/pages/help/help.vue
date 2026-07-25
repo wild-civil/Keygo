@@ -259,8 +259,10 @@ function handleBatteryOpt() {
 </script>
 
 <style scoped>
+/* ★ v3.36.3fix11.4 (2026-07-25) Problem B: 页根 100vh→100%，消除死滚动（详见 ble.js 注释）。 */
 .login-container {
-  min-height: 100vh;
+  min-height: 100%;
+  box-sizing: border-box; /* v3.36.3fix11.4 补充: border-box 使 min-height:100% 已含纵向 padding，消除 padding 残余死滚 */
   background: var(--login-bg);
   color: var(--text-primary);
   display: flex;

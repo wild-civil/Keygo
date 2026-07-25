@@ -1,35 +1,88 @@
 <template>
   <view class="page-control" :class="themeClass">
     <!-- ★ 连接状态提示 -->
-    <view class="conn-warning" v-if="!bleStore.connected">
+    <!-- ★ 2026-07-24 修复(晃动根因·关键)：原用 v-if 切换「断连提示」与「控制 UI」两棵大树。
+         重连风暴期间 connected 在 false↔true 间翻转 → 整棵控制 UI 子树被反复挂载/卸载 →
+         父 swiper(swiper-item) 内部 DOM 节点被摘除/重建 → 滑动手势追踪被打断 →
+         「左右滑动拉扯 / 屏幕不受控制」。改为 v-show（仅切换 display，不挂载/卸载节点），
+         swiper-item 内容 DOM 结构全程稳定 → 手势不再被打断。 -->
+    <view class="conn-warning" v-show="!bleStore.connected">
       <text v-if="bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused'">🔄 设备离线，正在自动重连中...</text>
       <text v-else>⚠️ 设备未连接</text>
       <!-- ★ 2026-07-22: 手动断开后"重新连接"按钮（已知设备记忆驱动，OS 占用也能接管 ACL） -->
-      <view class="reconnect-block" v-if="bleStore.knownDeviceId">
-        <view class="reconnect-info">
-          <text class="reconnect-label">已知设备</text>
-          <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
-          <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
-        </view>
-        <button class="reconnect-btn" @tap="handleReconnect">重新连接</button>
+      <view class="reconnect-block" v-if="bleStore.knownDevicesList.length">
+        <!-- 多设备：展开为可滚动列表 -->
+        <template v-if="bleStore.knownDevicesList.length > 1">
+          <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
+          <scroll-view class="known-list" scroll-y>
+            <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac">
+              <view class="reconnect-info">
+                <text class="reconnect-name">{{ d.displayName }}</text>
+                <text class="reconnect-mac">{{ d.mac }}</text>
+                <text v-if="d.customName" class="device-alias-tag">已命名</text>
+                <text v-if="d.isDefault" class="device-default-tag">默认</text>
+              </view>
+              <view class="known-item-actions">
+                <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
+                <button v-if="!d.isDefault" class="default-btn" @tap="handleSetDefault(d.mac)">默认</button>
+              </view>
+            </view>
+          </scroll-view>
+        </template>
+        <!-- 单设备：维持原单卡 -->
+        <template v-else>
+          <view class="reconnect-info">
+            <text class="reconnect-label">已知设备</text>
+            <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
+            <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+            <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
+          </view>
+          <button class="reconnect-btn" @tap="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
+        </template>
       </view>
     </view>
 
-    <template v-else>
+    <!-- ★ 2026-07-24: 控制 UI 用 v-show 切换(非 v-if)，重连时子树不卸载 → 不打断 swiper 手势 -->
+    <view v-show="bleStore.connected" class="control-body">
+      <!-- ★ 2026-07-23: 设备身份移到车辆大卡顶部(car-identity)，不再单独显示 MAC 行/已命名徽章 -->
       <!-- ★ v3.15-#21: Status Notify 过期警告 — 设备连接中但推送超时（静默断连） -->
-      <view class="stale-warning" v-if="bleStore.statusStale">
+      <!-- ★ 2026-07-24: 改用 v-show，避免重连期间小节点挂载/卸载（次要，防御性） -->
+      <view class="stale-warning" v-show="bleStore.statusStale">
         <text>⚠️ 设备状态已过期，连接可能已中断</text>
       </view>
 
       <!-- ★ 车辆状态大卡 -->
       <view class="car-card" :class="{ unlocked: bleStore.isUnlocked }">
-        <view class="car-icon">{{ carIcon }}</view>
-        <view class="car-status">
-          <text class="car-state-text">{{ bleStore.stateText }}</text>
-          <text class="car-rssi">信号: {{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi + ' dBm' : '---' }}</text>
+      <view class="car-icon">{{ carIcon }}</view>
+      <!-- ★ 2026-07-23: 设备身份(自定义名/出厂名)下移到图标下方，与锁车状态同行(标题栏：左名右状态) -->
+      <view class="car-head">
+        <text class="car-identity" v-if="bleStore.deviceId">{{ bleStore.controlTopName }}</text>
+        <text class="car-state-text">{{ bleStore.stateText }}</text>
+      </view>
+      <view class="car-status">
+        <!-- ★ 2026-07-24 修复：控制页头条「信号」由未节流的 filteredRssi 改为受节流的 displayRssi
+             解决的问题：
+               原绑定 filteredRssi（每条 FF02 报文直写、零节流）。
+               后台锁屏回前台 / GATT 上下文重建期间，FF02 暂停后重建会产生 RSSI 过渡噪声，
+               被逐条反映 → 数字狂跳。此问题是「数字乱跳」的真因，已真机证实(连接页因绑 displayRssi 而稳)。
+             改动效果：
+               displayRssi 直接取固件 Kalman 滤波值 f（本身已平滑），并受 rssiReadPeriodMs
+               节流（节流窗口 = 固件采样间隔，默认 500ms；设 200/300ms 即跟随），
+               与连接页大号 RSSI 同节奏、同平滑源，后台噪值被抹平。
+             可能的影响（均已评估，无功能丢失）：
+               1. 刷新频率由「每条 FF02」降为「小于等于每 rssiReadPeriodMs 一次」，比 raw 慢，
+                  但仍是平滑值；连接页本就如此，显示一致性更好。
+               2. 同源修复：info-grid「原始 RSSI / 滤波 RSSI」也已改为受节流的 rawRssiDisplay / displayRssi
+                  （见下方 info-grid），降低控制页 re-render 频率，缓解 connected 稳定时的轻微抖动。
+                  ★ 但「重连期间左右滑动拉扯」的真正主因并非 RSSI 重渲染，而是下方顶层
+                  v-if(connected)/v-else 子树反复挂载/卸载（打断父 swiper 手势），已改为 v-show 根治。
+               3. filteredRssi / rssi 仍照常每条 FF02 更新供内部逻辑使用，仅 UI 展示层改绑节流值。
+               4. 占位判定（大于 -999）与 displayRssi / rawRssiDisplay 初值(-999)一致，未连接/无值时仍显示占位符。 -->
+        <text class="car-rssi">信号: {{ bleStore.displayRssi > -999 ? bleStore.displayRssi + ' dBm' : '---' }}</text>
           <!-- ▼ ★ v3.15: 电池电量 — 默认 emoji 图标
                如需切换为 CSS 电池组件，注释下面 18 行，取消注释 19~24 行 -->
-          <view class="car-battery" :class="bleStore.batteryColor" v-if="bleStore.batteryLevel >= 0">
+          <!-- ★ 2026-07-24: 改 v-show，避免重连期间电量从-1→100 时块状节点挂载打断 swiper 手势 -->
+          <view class="car-battery" :class="bleStore.batteryColor" v-show="bleStore.batteryLevel >= 0">
             <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
             <text class="batt-text">{{ bleStore.batteryText }}</text>
           </view>
@@ -52,12 +105,15 @@
       <!-- ★ RSSI 实时信息 -->
       <view class="info-grid">
         <view class="info-item">
+          <!-- ★ 2026-07-24 修复（同源）：原始 RSSI 改用受节流的 rawRssiDisplay（=固件上报 r），不再绑每条 FF02 直写的 rssi。
+               保留 raw vs filtered 诊断差异，但刷新受 rssiReadPeriodMs 节流，杜绝高频重渲染打断 swiper 手势。 -->
           <text class="info-label">原始 RSSI</text>
-          <text class="info-value">{{ bleStore.rssi > -999 ? bleStore.rssi : '---' }} dBm</text>
+          <text class="info-value">{{ bleStore.rawRssiDisplay > -999 ? bleStore.rawRssiDisplay : '---' }} dBm</text>
         </view>
         <view class="info-item">
+          <!-- ★ 2026-07-24 修复（同源）：滤波 RSSI 改用受节流的 displayRssi（=固件 Kalman 滤波 f），与头条同源同节奏。 -->
           <text class="info-label">滤波 RSSI</text>
-          <text class="info-value">{{ bleStore.filteredRssi > -999 ? bleStore.filteredRssi : '---' }} dBm</text>
+          <text class="info-value">{{ bleStore.displayRssi > -999 ? bleStore.displayRssi : '---' }} dBm</text>
         </view>
         <view class="info-item">
           <text class="info-label">解锁阈值</text>
@@ -156,7 +212,8 @@
            固件 RSSI 状态机驱动「靠近自动解锁」；开启后靠近即通电骑行(而非仅解锁)。
            偏好存固件 DataFlash(经 EPRX 命令下发)，无App模式(手机 App 不在场)也生效。详见设计文档。
            v3.36.2 起下方「仅解锁 / 直接骑行」双选项由纵向改为横向并排（更贴合电瓶车双档直觉）。 -->
-      <view class="prox-ride-section" v-if="bleStore.deviceMode === 'ebike'" style="margin-top:30rpx;">
+      <!-- ★ 2026-07-24: 改 v-show，避免重连期间 deviceMode 生效时整段挂载打断 swiper 手势 -->
+      <view class="prox-ride-section" v-show="bleStore.deviceMode === 'ebike'" style="margin-top:30rpx;">
         <view class="section-title">🛵 靠近进入模式（电瓶车专属）</view>
         <view class="config-desc">靠近解锁由设备按信号强度自动触发。选择靠近时设备的行为：</view>
         <!-- ★ v3.36.2: 横向排布容器（mode-cards--row）；设备模式切换卡保持纵向不受影响 -->
@@ -182,7 +239,7 @@
         </view>
         <view class="config-desc" style="color:var(--accent-orange);margin-top:10rpx;" v-if="!bleStore.connected">⚠️ 需先连接设备才能切换（设置由设备实时回灌）。</view>
       </view>
-    </template>
+    </view>
   </view>
 </template>
 
@@ -200,6 +257,7 @@ const themeClass = computed(() => themeStore.themeClass)
 
 onShow(() => {
   themeStore.applyNavBar()
+  bleStore.flushStagedDisplay()   // ★ 2026-07-24: 回前台立即提交最新暂存显示，避免回放历史
 })
 
 async function handleUnlock() {
@@ -262,19 +320,26 @@ async function handleStatus() {
   }
 }
 
-// ★ 2026-07-22: 手动断开后一键重新连接（OS 已占用同 ACL 时也能接管，connect 不受 dormant 门控）
-async function handleReconnect() {
-  const id = bleStore.knownDeviceId
+// ★ 2026-07-22/23: 手动断开后一键重新连接（可指定 targetMac 用于多设备列表）
+async function handleReconnect(targetMac) {
+  const id = targetMac || bleStore.knownDeviceId
   if (!id) return
   uni.showLoading({ title: '连接中...', mask: true })
   try {
-    await bleStore.connect(id, bleStore.deviceName || 'KeyGo')
+    await bleStore.connect(id, bleStore._resolveFactoryName(id))
     uni.hideLoading()
     toast.success('连接成功')
   } catch (e) {
     uni.hideLoading()
     toast.error('连接失败，请重试')
   }
+}
+
+// ★ 2026-07-23 ④: 把指定设备设为默认(在重连列表中置顶)
+function handleSetDefault(mac) {
+  if (!mac) return
+  bleStore.setDefaultDevice(mac)
+  toast.success('已设为默认设备')
 }
 
 async function setRSSI(value) {
@@ -329,8 +394,10 @@ async function onToggleProxRide(v) {
 </script>
 
 <style scoped>
+/* ★ v3.36.3fix11.4 (2026-07-25) Problem B: 页根 100vh→100%，消除死滚动（详见 ble.js 注释）。 */
 .page-control {
-  min-height: 100vh;
+  min-height: 100%;
+  box-sizing: border-box; /* v3.36.3fix11.4 补充: border-box 使 min-height:100% 已含纵向 padding，消除 padding 残余死滚 */
   background: var(--bg-page);
   color: var(--text-primary);
   padding: 30rpx 30rpx 30rpx;
@@ -378,6 +445,68 @@ async function onToggleProxRide(v) {
 }
 .reconnect-btn:active { opacity: 0.7; }
 
+/* ★ 2026-07-23 ②④: 多设备重连列表 */
+.known-list { max-height: 320rpx; margin-top: 10rpx; }
+.known-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18rpx 0;
+  border-top: 1rpx solid var(--border);
+}
+.known-item:first-child { border-top: none; }
+.known-item-actions { display: flex; align-items: center; flex: 0 0 auto; margin-left: 16rpx; }
+.default-btn {
+  margin-left: 12rpx;
+  width: auto;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1rpx solid var(--border);
+  border-radius: 20rpx;
+  padding: 12rpx 20rpx;
+  font-size: 22rpx;
+}
+.default-btn:active { opacity: 0.7; }
+.device-default-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  margin-left: 8rpx;
+  font-size: 18rpx;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+
+/* ★ v3.36.3-fix5: 「已命名」徽章（设备已设自定义名），重连卡/连接态设备名条通用 */
+.device-alias-tag {
+  align-self: flex-start;
+  margin-top: 4rpx;
+  font-size: 18rpx;
+  color: var(--accent);
+  background: var(--alpha-12);
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+/* ★ 2026-07-23: 车辆大卡标题栏（图标下方：自定义名 + 空格 + 锁车状态，整体居中） */
+.car-head {
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 16rpx; /* ★ 自定义名 与 锁车状态 之间的空格 */
+  margin-bottom: 14rpx;
+}
+
+.car-identity { 
+  color: var(--accent);
+  font-weight: bold;
+  font-size: 32rpx; /* ★ 自定义名字体大小 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
 
 /* ★ v3.15-#21: Status 过期警告 — 比断连警告更严重（无声中断） */
 .stale-warning {
@@ -411,10 +540,9 @@ async function onToggleProxRide(v) {
 .car-icon { font-size: 80rpx; margin-bottom: 16rpx; }
 
 .car-state-text {
-  font-size: 36rpx;
+  font-size: 32rpx; /* ★ 控制页面 锁车状态 字体大小 */
   font-weight: 700;
   color: var(--text-primary);
-  display: block;
 }
 
 .car-rssi {
