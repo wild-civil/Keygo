@@ -2854,7 +2854,8 @@ export const useBleStore = defineStore('ble', {
       // 确保前台服务存活（后台自动连需要，且已在后台时不被系统查杀）
       this._ensureForegroundService()
       try {
-        await initBluetooth()   // 打开适配器 + 申请权限（仅 BT 关闭时才弹系统框）
+        // ★ fix11.1: 自动连准备路径传 autoEnable:false → BT 关时不弹系统框（由红 banner 引导），避免冷启动双弹
+        await initBluetooth({ autoEnable: false })   // 打开适配器 + 申请权限
         this._adapterReady = true
         // ★ 冷启动修复：适配器已开，用实时状态校正 btState（BT 已开→'on'，否则回落），
         //   避免 onShow 里 _forceRefreshBluetoothState 读到过期的 "not init" 误判为 off。

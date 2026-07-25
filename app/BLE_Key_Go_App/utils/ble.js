@@ -222,6 +222,9 @@ function requestAndroidPermissions() {
  *
  * @param {Object} [options]
  * @param {Function} [options.onAllowing] 用户点「允许」时立即回调（不等适配器就绪）
+ * @param {boolean} [options.autoEnable=true] true=蓝牙未开时自动弹系统「开启蓝牙」框；
+ *        false=不弹框，直接 reject（code=10001），由调用方显示红 banner 引导用户点「开启」。
+ *        启动/自动连准备路径传 false，避免冷启动两条路径叠加连弹两次开启框（见 fix11.1）。
  */
 export function initBluetooth(options = {}) {
   return new Promise((resolve, reject) => {
@@ -252,6 +255,14 @@ export function initBluetooth(options = {}) {
 
           // code=10001 系统蓝牙未开启
           if (code === 10001) {
+            // ★ fix11.1: 启动/自动连准备路径传 autoEnable:false → 不弹系统框，直接 reject，
+            //   由调用方显示红 banner 引导用户点「开启」（避免冷启动自动连弹两次开启框）。
+            //   默认 autoEnable:true（红 banner 点击路径）仍弹一次系统框。
+            if (options.autoEnable === false) {
+              console.warn('[BLE] 系统蓝牙未开启 (code=10001)，autoEnable=false → 不弹系统框，由红 banner 引导')
+              reject(err)
+              return
+            }
             console.warn('[BLE] 系统蓝牙未开启 (code=10001)，尝试原生弹窗...')
 
             // #ifdef APP-PLUS

@@ -167,15 +167,10 @@ onLaunch(() => {
     }
   })
 
-  // ★ v3.11-fix3: 初始化蓝牙适配器，传入 onAllowing 回调
-  //   当蓝牙关闭时自动弹出系统弹窗，用户点「允许」→ 立即亮绿 banner（与 nRF Connect 一致）
-  initBluetooth({
-    onAllowing: () => {
-      bleStore.btState = 'just_enabled'
-      console.log('[App] ⚡ onAllowing → 绿 banner（与系统弹窗同步）')
-    }
-  }).catch(() => {
-    // code=10001（系统蓝牙未开启）时静默，让 index 页横幅引导用户
+  // ★ fix11.1: 启动路径不自动弹「开启蓝牙」系统框（避免与 prepareForAutoConnect 叠加双弹）。
+  //   autoEnable:false → BT 关时直接 reject（不弹框），由原生广播 STATE_OFF 驱动红 banner 引导用户点「开启」。
+  initBluetooth({ autoEnable: false }).catch(() => {
+    // code=10001（系统蓝牙未开启）时静默，让 index 页红 banner 引导用户点「开启」
   })
 
   // ★ v3.22: 电池优化豁免检测（延迟 2.5s 执行，不阻塞启动流程）
