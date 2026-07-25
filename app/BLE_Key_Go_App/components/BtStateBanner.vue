@@ -1,13 +1,19 @@
 <template>
   <view class="bt-banner-root">
     <!-- ★ 蓝牙关闭横幅（模仿 nRF Connect）：系统弹窗期间保持红色 -->
-    <view class="bt-off-banner" v-show="!bleStore.connected && bleStore.btState === 'off'">
+    <!-- ★ 2026-07-25 修复(MP 红绿同显根因): 原 v-show="..." 在自定义组件里被编译为 hidden 属性，
+         而微信小程序自定义组件不支持 hidden → v-show 完全失效，红绿 banner 始终渲染。
+         改 v-if 彻底从 DOM 移除。App 端 v-show 也兼容（互斥条件本就满足）。 -->
+    <view class="bt-off-banner" v-if="!bleStore.connected && bleStore.btState === 'off'">
       <text class="bt-off-icon">🔴</text>
       <text class="bt-off-text">蓝牙已关闭</text>
       <button class="bt-enable-btn" @tap="handleEnableBluetooth">开启</button>
     </view>
-    <!-- ★ 绿色"正在开启"横幅：与底部系统弹窗同步出现/消失，模仿 nRF Connect -->
-    <view class="bt-on-banner" v-show="!bleStore.connected && bleStore.btState === 'just_enabled'">
+    <!-- ★ 绿色"正在开启"横幅：与底部系统弹窗同步出现/消失，模仿 nRF Connect。
+         ★ App 与小程序都保留渲染（用户要求双端启用）。just_enabled 仅由 Android 原生广播 /
+         requestEnableBluetoothAndroid 赋值（见 stores/ble.js ①+② 运行时门控：非 Android 环境
+         绝不设置 just_enabled），故小程序/iOS 下不会误触发，无"红绿同显"风险，不影响功能。 -->
+    <view class="bt-on-banner" v-if="!bleStore.connected && bleStore.btState === 'just_enabled'">
       <text class="bt-on-icon">🟢</text>
       <text class="bt-on-text">正在开启蓝牙...</text>
     </view>
@@ -18,15 +24,27 @@
 // ★ 原连接页内联横幅抽出的全局组件（方案1，v3.36.3fix11.3）。
 // 仅由 main.vue 在「连接页(0) / 控制页(1)」渲染，配置页/帮助页不显示。
 // 自身按 btState + connected 决定红/绿/无，开启逻辑与原 index.vue 完全一致。
+import { watch } from 'vue'
 import { useBleStore } from '@/stores/ble.js'
 import { toast } from '@/utils/toast.js'
 
 const bleStore = useBleStore()
 
+// ★ [A1-DIAG] 绿 banner 渲染侧诊断：一旦 btState===just_enabled 立即打印（含 plus 信息），
+//   用来判定纯 MP 是否真的走到绿 banner，以及此时 plus 是否意外存在。
+watch(() => bleStore.btState, (nv) => {
+  if (nv === 'just_enabled') {
+    console.log('[A1-DIAG][BtBanner] 绿banner渲染 | btState=just_enabled | plus=' + (typeof plus) +
+      ' os=' + (typeof plus !== 'undefined' && plus.os ? plus.os.name : '?'))
+  }
+})
+
 // ★ 防止用户在模拟器里死递归弹 Modal
 let _enableBluetoothLocked = false
 
 async function handleEnableBluetooth() {
+  // ★ [A1-DIAG] 点击「开启」按钮的入口诊断：确认真机点按钮时 plus 是否存在（区分纯 MP / 基座）
+  console.log('[A1-DIAG][BtBanner] 点击开启按钮 | plus=' + (typeof plus) + ' os=' + (typeof plus !== 'undefined' && plus.os ? plus.os.name : '?'))
   if (_enableBluetoothLocked) {
     console.log('[BtBanner] enableBluetooth 防抖，跳过重复调用')
     return

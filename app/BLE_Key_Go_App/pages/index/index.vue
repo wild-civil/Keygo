@@ -156,8 +156,11 @@
       </view>
     </view>
 
-    <!-- ★ 2026-07-22/23: 手动断开后"重新连接"入口（knownDevicesList 驱动，多设备展开为列表） -->
-    <view class="reconnect-card" v-show="!bleStore.connected && bleStore.knownDevicesList.length">
+    <!-- ★ 2026-07-22/23: 手动断开后"重新连接"入口（knownDevicesList 驱动，多设备展开为列表）
+         ★ v3.36.3fix11.6: v-show→v-if，防御 MP 上 connected 过渡态时卡片残余（_onUniBtAdapterStateChange
+         在设 btState='off' 与 _handleBtOff→connected=false 之间,DOM 可能暂存 v-show 的 display:none 未刷）。
+         v-if 在 connected 变为 truthy 时将卡片彻底从 DOM 移除，消除跨端渲染不一致。 -->
+    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDevicesList.length">
       <!-- 多设备：展开为可滚动列表 -->
       <template v-if="bleStore.knownDevicesList.length > 1">
         <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
@@ -239,8 +242,12 @@
           </view>
           <view class="mgmt-row" @tap="openBindModal">
             <text class="mgmt-label">设备绑定 🔐 </text>
-            <text class="mgmt-val" v-if="bleStore.isBound">{{ bindLabel }}</text>
-            <text class="mgmt-val name-hint" v-else>未绑定·点击绑定</text>
+            <text class="mgmt-val" v-if="bleStore.sessionAuthed">已验证</text>
+            <text class="mgmt-val name-hint" v-else-if="!bleStore.isBound">未绑定·点击绑定</text>
+            <!-- ★ B1 修复(v3.36.3fix11.6): 验证失败不再用浅色小字，
+                 改用红色徽章醒目提示用户"需立即处理"，并提供"重绑"暗示。 -->
+            <text class="mgmt-val bind-failed-badge" v-else-if="bleStore._autoAuthState === 'failed'">⚠ 验证失败（点击重绑）</text>
+            <text class="mgmt-val" v-else>{{ bindLabel }}</text>
             <text class="mgmt-arrow">›</text>
           </view>
         </view>
@@ -1142,6 +1149,16 @@ async function handleSetName() {
 .mgmt-label { flex: 1; font-size: 26rpx; color: var(--text-secondary); }
 .mgmt-val { font-size: 24rpx; color: var(--mgmt-val); margin-right: 12rpx; }
 .mgmt-val.name-hint { color: var(--text-muted); font-size: 24rpx; }
+
+/* ★ B1 修复(v3.36.3fix11.6): 验证失败红色徽章，醒目提示用户 */
+.bind-failed-badge {
+  color: #D32F2F;
+  font-weight: 700;
+  background: rgba(211, 47, 47, 0.12);
+  padding: 6rpx 18rpx;
+  border-radius: 14rpx;
+  font-size: 18rpx; /* 之前是24rpx 我觉得有点大调小了 */
+}
 .mgmt-arrow { font-size: 28rpx; color: var(--text-muted); }
 
 /* ===== 快捷操作 ===== */

@@ -107,9 +107,11 @@ import {
 //   反而使该空白翻倍（≈100px+），连/控两页下滑空白感更明显（属 fix11.3 回归，本提交补回）。
 //   修法：index/control/config/help 4 个页根 min-height:100vh → 100%，并设 box-sizing:border-box 使 100% 已含纵向 padding，
 //   可视区：内容短=零死滚，内容长=正常滚；不动 scroll-y、不动 swiper 手势，低风险。
-//   ★ ② 诊断日志保留 v3.36.3fix11.4-DIAG（用户决策：不随本次顺延，仅作 ② 复现定位用）。
-//   命名规则：fix 系列按 v3.36.3fix11.(x+1) 递增。
-export const APP_VERSION = 'v3.36.3fix11.4'   // ★ v3.36.3fix11.4 (2026-07-25): Problem B 死滚动修正(4页根 100vh→100%) + 补回 fix11.3 banner 回归
+// ★ ② 诊断日志保留 v3.36.3fix11.4-DIAG（用户决策：不随本次顺延，仅作 ② 复现定位用）。
+//   命名规则：fix 系列按 v3.36.3fix11.(x+1) 递增。fix11.5 预留给未做的 ② reconcile(btState on→off 被覆盖)。
+//   fix11.6 (2026-07-25, 未commit): P0+A1 红绿 banner 同显 ①+② 运行时门控 + A2 已知设备卡 v-show→v-if +
+//   B1 设备绑定验证失败红色徽章。纯 JS/CSS 改动，未升 manifest versionCode。
+export const APP_VERSION = 'v3.36.3fix11.6'   // ★ v3.36.3fix11.6 (2026-07-25)
 console.log('[KeyGo] App version', APP_VERSION)
 
 // ★ 原生前台服务 kill-switch（长期安全开关，非临时止血）：
@@ -615,8 +617,12 @@ export const useBleStore = defineStore('ble', {
       this._connHandler = onBLEConnectionStateChange((connected, deviceId) => {
         if (deviceId !== this.deviceId) return
         if (!connected) {
-          console.log('[Store] 设备断开连接（全局监听器）')
-          this._handleDisconnect()
+          console.log('[Store] 收到断连事件（全局监听器），系统级确认是否真断连')
+          // ★ 2026-07-25 修复（MP/Android 假断连）：BLE 栈在连上后/锁屏后可能多发一次 false 事件，
+          //   但 GATT 实际仍活（控件仍可用、RSSI 仍显示）。若直接 _handleDisconnect 会立即把
+          //   connected 翻 false → 控制页"已知设备"卡重现、deviceState 被误复位、状态错乱。
+          //   故先系统级确认设备真不在已连接列表，才执行真正断连；否则判定为假断连忽略。
+          this._verifyThenDisconnect(deviceId)
         } else if (!this.connected) {
           // ★ fix: 连接已建立但 store 状态未同步（如 _doReconnect guard 失效导致跳过回写）。
           //   底层 BLE 连接已活，但 store 未设置 connected=true，notify 未注册，RSSI 不会显示。
@@ -735,6 +741,9 @@ export const useBleStore = defineStore('ble', {
       if (this._nativeBtMonitorActive) {
         // 初始化 btState 为当前系统真实状态
         this.btState = this._mapNativeState(nativeState)
+        // ★ [A1-DIAG] 诊断：确认 MP 上 _nativeBtMonitorActive 是否意外为 true（nativeState=11→just_enabled）
+        console.log('[A1-DIAG] 原生广播初始化 btState | nativeState=' + nativeState + ' → ' + this.btState + ' | plus=' + (typeof plus))
+        if (this.btState === 'just_enabled') console.log('[A1-DIAG][STACK] 739 设 just_enabled\n' + new Error().stack)
         console.log('[Store] 原生广播已注册，初始 btState=' + this.btState)
       }
 
@@ -815,8 +824,15 @@ export const useBleStore = defineStore('ble', {
       console.log(`[Store] ⚡ 原生广播: ${this.btState} → ${next} (state=${state})`)
 
       if (state === 11) {
+        // ★ [A1-DIAG] 诊断：坐实 state=11 是否在真机被触发、plus 是否存在
+        console.log('[A1-DIAG] _onNativeBtStateChange state=11 触发 | plus=' + (typeof plus) + ' os=' + (typeof plus!=='undefined'&&plus.os?plus.os.name:'?'))
         // ★ STATE_TURNING_ON: 用户刚点"允许"，系统正在开启蓝牙 → 绿色 banner
+        // ★ MP/非 Android 纵深防御：此回调仅 Android 原生广播可达，纯小程序(iOS/微信)
+        //   理论上不会进入；但真机 MP 曾误触发导致绿 banner 与红 banner 同显。
+        //   运行时门控：非 Android 环境直接 return，绝不设置 just_enabled。
+        if (typeof plus === 'undefined' || plus.os.name !== 'Android') return
         this.btState = 'just_enabled'
+        console.log('[A1-DIAG][STACK] 829 设 just_enabled\n' + new Error().stack)
       } else if (state === 12) {
         // ★ STATE_ON: 蓝牙完全开启 → 无 banner，尝试重连
         this.btState = 'on'
@@ -847,6 +863,8 @@ export const useBleStore = defineStore('ble', {
      * ★ v3.11: Uni-APP 适配器状态回调（iOS 主驱 / Android 不会调用）
      */
     _onUniBtAdapterStateChange(available, _discovering) {
+      // ★ [A1-DIAG] 诊断：坐实 MP 上真正的 btState 驱动路径（Uni 事件）及其 available 值
+      console.log('[A1-DIAG] Uni 适配器事件 | available=' + available + ' 当前btState=' + this.btState + ' | plus=' + (typeof plus))
       const next = available ? 'on' : 'off'
       if (this.btState === next) return
 
@@ -1184,7 +1202,14 @@ export const useBleStore = defineStore('ble', {
       try {
         await initBluetooth({
           onAllowing: () => {
+            // ★ [A1-DIAG] 诊断：坐实 onAllowing 是否在真机被触发、plus 是否存在
+            console.log('[A1-DIAG] onAllowing 回调触发 | plus=' + (typeof plus) + ' os=' + (typeof plus!=='undefined'&&plus.os?plus.os.name:'?'))
+            // ★ MP/非 Android 纵深防御：onAllowing 仅应由 Android 原生
+            //   requestEnableBluetoothAndroid(#ifdef APP-PLUS)触发；但真机 MP 曾误触发
+            //   导致绿 banner 与红 banner 同显。运行时门控杜绝此路径。
+            if (typeof plus === 'undefined' || plus.os.name !== 'Android') return
             // ★★ 用户点「允许」的瞬间 → 立即亮绿 banner
+            console.log('[A1-DIAG][STACK] 1207 设 just_enabled\n' + new Error().stack)
             //   此时系统「正在开启蓝牙…」弹窗也在显示，二者同步
             this.btState = 'just_enabled'
             console.log('[Store] ⚡ onAllowing → 绿 banner（与系统弹窗同步）')
@@ -1408,6 +1433,86 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ 2026-07-25: 断连事件二次确认（防假断连误翻状态）
+     *
+     * 背景：微信小程序 / Android 的 BLE 栈在「连上后瞬间」「锁屏 / Doze」时，可能多发一次
+     * onBLEConnectionStateChange(false) 事件，但 GATT 实际仍活（WRITE 仍成功、FF02 仍送达、
+     * RSSI 仍显示）。若此时直接 _handleDisconnect() 会立即把 connected 置 false，副作用极大：
+     *   ① 控制页"已知设备"卡（v-if="!connected && 已知设备"）重现；
+     *   ② deviceState 被误复位为 LOCKED、displayRssi 立即清零；
+     *   ③ _flushBindWaiters(false) 误杀正在进行的鉴权。
+     * 故在真正断连前做系统级确认真断连。
+     *
+     * ★ 2026-07-25 修复(MP 假断连误判): 原仅用 uni.getConnectedBluetoothDevices 系统级确认。
+     *   该 API 在微信小程序(mp-weixin)上极不可靠——已连接的设备常返回空列表(漏报)，
+     *   使"假断连保护"反而把 GATT 仍活的设备判成真断连 → connected 翻 false → 控制页卡重现，
+     *   与本意(挡掉假断连)完全相反。修复策略：
+     *   - getConnectedBluetoothDevices 命中(Android 可靠) → 立判假断连，忽略（快速路径）；
+     *   - 查不到 / 查询失败 → 不据此判连，改用 GATT 活性探针(getBLEDeviceServices 短超时)二次确认：
+     *       探针成功(GATT 仍活) → 假断连，忽略；探针失败(真断连) → 执行 _handleDisconnect。
+     *   副作用：真断连检测延迟 ≈ GATT 探针超时(1.5s)，可接受（优先避免误判）。
+     *
+     * 仅用于全局监听器路径；用户主动断开 / _verifyConnection 已验真失效等路径仍直接走 _handleDisconnect。
+     *
+     * @param {string} deviceId 触发事件的设备 id（已通过 deviceId===this.deviceId 过滤）
+     */
+    async _verifyThenDisconnect(deviceId) {
+      // ① 系统级确认（Android 可靠；mp-weixin 可能漏报，故仅作"快速放行"信号，不作为"已断连"唯一证据）
+      try {
+        const devices = await new Promise((resolve, reject) => {
+          uni.getConnectedBluetoothDevices({
+            services: [BLE_CONFIG.serviceUUID],
+            success: (res) => resolve(res.devices || []),
+            fail: (err) => reject(err)
+          })
+        })
+        if (devices.some(d => d.deviceId === deviceId)) {
+          // 设备仍在系统已连接列表 → 假断连，忽略（GATT 自愈，不翻 connected）
+          console.log('[Store] ⚠ 断连事件但设备仍在系统已连接列表，判定为假断连，忽略（不翻 connected）')
+          return
+        }
+      } catch (e) {
+        // 查询失败：不据此判连，交下方 GATT 探针兜底
+        console.warn('[Store] _verifyThenDisconnect: 系统级确认失败，转 GATT 探针:', e?.message || e)
+      }
+      // ② 系统列表查不到：可能真断连，也可能 mp-weixin getConnectedBluetoothDevices 漏报 → GATT 探针二次确认
+      const alive = await this._isGattAlive(deviceId)
+      if (alive) {
+        console.log('[Store] ⚠ 系统列表漏报但 GATT 仍活 → 假断连，忽略（不翻 connected）')
+        return
+      }
+      // 系统列表 + GATT 均确认已断连 → 执行真正断连
+      console.log('[Store] 系统列表与 GATT 均确认设备已断连 → 执行真正断连')
+      this._handleDisconnect()
+    },
+
+    /**
+     * ★ 2026-07-25: GATT 活性探针。对已连接设备做 getBLEDeviceServices，
+     *   连上后服务已发现 → 正常 ~200ms 返回；真断连 → 超时失败。
+     *   比 getConnectedBluetoothDevices 更可靠（后者在 mp-weixin 上漏报）。
+     *   @returns {Promise<boolean>} true=GATT 仍活
+     */
+    async _isGattAlive(deviceId) {
+      if (!deviceId) return false
+      let timer
+      try {
+        // ★ 给 GATT 探针加 .catch 吞掉其"最终"的 rejection（真断连时 uni 的 getBLEDeviceServices
+        //   会在数秒后 reject），避免 Promise.race 孤儿 promise 变成 UnhandledPromiseRejection 噪声；
+        //   同时在 finally 清定时器，避免超时 reject 落到已 settle 的 race 上。
+        const gattProbe = getBLEDeviceServices(deviceId).catch(() => {})
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('GATT_PROBE_TIMEOUT')), 1500)
+        })
+        await Promise.race([gattProbe, timeout])
+        return true
+      } catch (e) {
+        return false
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+
+    /**
      * ★ v3.14-bugfix: 轻量连接验证（App 从后台切回时使用）
      *
      *   通过 getBLEDeviceServices 做一次真实的 GATT 交互验证 BLE 连接是否仍然存活。
@@ -1460,8 +1565,18 @@ export const useBleStore = defineStore('ble', {
           this._enableStatusNotify()
           return true
         }
-        // 设备不在系统已连接列表 → 连接已失效
-        console.log('[Store] _verifyConnection: 设备不在已连接列表，连接已失效')
+        // ★ 2026-07-25 修复(MP 漏报): 系统列表查不到，可能 mp-weixin getConnectedBluetoothDevices 漏报。
+        //   先用 GATT 活性探针二次确认，避免把 GATT 仍活的设备误判失效（否则 onShow 即翻 connected=false → 卡重现）。
+        console.log('[Store] _verifyConnection: 系统列表漏报，转 GATT 探针确认...')
+        const alive = await this._isGattAlive(this.deviceId)
+        if (alive) {
+          console.log('[Store] _verifyConnection: GATT 仍活，连接正常')
+          this._resetStatusStaleTimer()
+          this._enableStatusNotify()
+          return true
+        }
+        // 设备不在系统已连接列表且 GATT 已死 → 连接已失效
+        console.log('[Store] _verifyConnection: 设备不在已连接列表且 GATT 已死，连接已失效')
         this._handleDisconnect()
         return false
       } catch (e) {
@@ -2072,8 +2187,13 @@ export const useBleStore = defineStore('ble', {
       }
 
       // ★ v3.6-fixB: 重连前先断开可能残留的旧连接句柄
+      // ★ 2026-07-25: uni.closeBLEConnection 无 success/fail 回调时返回 Promise，
+      //   未连接报错(errCode 10006 no connection)会 reject 成 UnhandledPromiseRejection；
+      //   外层 try/catch 只抓同步异常、抓不到异步 reject，故用 complete 回调收口（与 1852/3428/3863 一致）。
       try {
-        uni.closeBLEConnection({ deviceId: this.deviceId })
+        await new Promise((resolve) => {
+          uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => resolve() })
+        })
         console.log('[Store] _doReconnect: 已清理旧连接句柄')
       } catch (e) {
         // 断开失败无所谓
@@ -2675,8 +2795,11 @@ export const useBleStore = defineStore('ble', {
         try { uni.removeStorageSync('keygo_unbound_kicked') } catch {}
 
         // ★ 预清理旧连接句柄（和 _doReconnect 同样的保护）
+        // ★ 2026-07-25: 同上，用 complete 回调收口避免 UnhandledPromiseRejection(10006 no connection)
         try {
-          uni.closeBLEConnection({ deviceId })
+          await new Promise((resolve) => {
+            uni.closeBLEConnection({ deviceId, complete: () => resolve() })
+          })
           console.log('[Store] connect: 已预清理旧连接句柄')
         } catch (e) { /* ignore */ }
         await new Promise(r => setTimeout(r, 300))

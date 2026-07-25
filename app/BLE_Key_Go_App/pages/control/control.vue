@@ -5,8 +5,14 @@
          重连风暴期间 connected 在 false↔true 间翻转 → 整棵控制 UI 子树被反复挂载/卸载 →
          父 swiper(swiper-item) 内部 DOM 节点被摘除/重建 → 滑动手势追踪被打断 →
          「左右滑动拉扯 / 屏幕不受控制」。改为 v-show（仅切换 display，不挂载/卸载节点），
-         swiper-item 内容 DOM 结构全程稳定 → 手势不再被打断。 -->
-    <view class="conn-warning" v-show="!bleStore.connected">
+         swiper-item 内容 DOM 结构全程稳定 → 手势不再被打断。
+         ★ 2026-07-25 修复(MP 失效)：v-show 在 mp-weixin 编译后实际不切 display（连 page 内的 view 也失效），
+           控制页出现"断连提示卡"与"已连接 UI"同时显示的矛盾。改用 :style="{display: ...}"
+           直接写内联 style="display:none" → DOM 树不动（保留 v-show 的子树不卸载优点，手势不受影响），
+           但 display 真切换。-->
+    <!-- ★ 2026-07-25 修复(MP 渲染): 先试 :style="{display:...}" 在 mp-weixin 上仍不可靠，
+         改用 :class 切 display:none（元素仍挂载，保留 swiper 手势稳定，避开 v-if 卸载陷阱）。 -->
+    <view class="conn-warning" :class="{ 'is-hidden': bleStore.connected }">
       <text v-if="bleStore.reconnectMode === 'active' || bleStore.reconnectMode === 'paused'">🔄 设备离线，正在自动重连中...</text>
       <text v-else>⚠️ 设备未连接</text>
       <!-- ★ 2026-07-22: 手动断开后"重新连接"按钮（已知设备记忆驱动，OS 占用也能接管 ACL） -->
@@ -42,8 +48,9 @@
       </view>
     </view>
 
-    <!-- ★ 2026-07-24: 控制 UI 用 v-show 切换(非 v-if)，重连时子树不卸载 → 不打断 swiper 手势 -->
-    <view v-show="bleStore.connected" class="control-body">
+    <!-- ★ 2026-07-24: 控制 UI 用 v-show 切换(非 v-if)，重连时子树不卸载 → 不打断 swiper 手势
+         ★ 2026-07-25 修复(MP 失效): v-show 在 mp-weixin 上不切 display → 与断连提示卡同显。改 :style。 -->
+    <view :class="{ 'is-hidden': !bleStore.connected }" class="control-body">
       <!-- ★ 2026-07-23: 设备身份移到车辆大卡顶部(car-identity)，不再单独显示 MAC 行/已命名徽章 -->
       <!-- ★ v3.15-#21: Status Notify 过期警告 — 设备连接中但推送超时（静默断连） -->
       <!-- ★ 2026-07-24: 改用 v-show，避免重连期间小节点挂载/卸载（次要，防御性） -->
@@ -419,6 +426,11 @@ async function onToggleProxRide(v) {
   gap: 16rpx;
   margin-bottom: 24rpx;
 }
+
+/* ★ 2026-07-25 修复(MP 渲染): v-show/:style 在 mp-weixin 上 display 切换均不可靠，
+   统一用 class 切 display:none。元素仍挂载(不破坏 swiper 手势)，仅隐藏渲染。 */
+.conn-warning.is-hidden,
+.control-body.is-hidden { display: none; }
 
 /* ★ 2026-07-22: 手动断开后"重新连接"块 — 置于连接警告框内，信息左/按钮右，与连接页等宽对齐 */
 .reconnect-block {

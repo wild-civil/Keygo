@@ -29,6 +29,7 @@
 | 2026-07-22 | `codebuddy` 分支起 | 多设备管理首版 P0（平行别名体系，后弃） | `02/4/多设备管理与已知设备展示方案.md` |
 | 2026-07-23 | 多设备管理落地 + 控制页居中 | ①②③④ 纯前端落地（fix `02a538c`/`cce2d6d`）；控制页自定义名与锁车状态同行居中（fix7 `273bd07`）；骑行态显示设计；电量长时间不显示根因分析 | `02/4/多设备管理与已知设备展示方案.md`、`02/4/KeyGo_骑行态显示与状态报文设计v1.0.0.md`、`03/4/KeyGo_电量长时间不显示_根因分析.md` |
 | 2026-07-24 | **v3.36.3-fix8 / fix9** | 骑行态 `KSTATE_RIDE`（固件+App，显示「骑行模式」）；电量 App GATT 读取重试（固件推送推迟到外部 ADC 轮） | 提交 `7d3746d`（fix8）/`1b15893`（fix9） |
+| 2026-07-25 | **v3.36.3fix11.6**（MP 状态错乱修复） | 4 类 MP 问题：①红绿 banner 同显 ②控制页/连接页 connected 不一致 ③控制页已知设备卡连接后仍显示 ④验证失败不醒目。根因：Pinia 多实例（main.js globalThis+setActivePinia 单例）+ v-show 与 `:style{display}` 在 mp-weixin 均失效（BtStateBanner v-show→v-if、control.vue v-show→`:class`+CSS `display:none`，兼顾 swiper 手势）+ `getConnectedBluetoothDevices` 在 mp-weixin 漏报（ble.js `_verifyThenDisconnect`/`_verifyConnection` 改 GATT 活性探针 `_isGattAlive`）+ index.vue 验证失败红徽章(B1)。纯 JS/CSS，未升 versionCode | `2026-07-25_mp-weixin_v-show失效与Pinia多实例修复.md` |
 
 ---
 
