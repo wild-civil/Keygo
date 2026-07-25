@@ -4,7 +4,7 @@
     <view class="login-header">
       <text class="login-logo">🔑</text>
       <text class="login-title">KeyGo·钥启程</text>
-      <text class="login-subtitle">使用帮助 · v3.36.2</text>
+      <text class="login-subtitle">使用帮助 · v3.36.3</text>
     </view>
 
     <!-- ★ v3.32.2-fix: 快速上手 + 首次绑定向导 合并为一张卡 -->
@@ -48,7 +48,12 @@
           <text class="step-num">5</text>
           <view class="step-content">
             <text class="step-title">当钥匙用</text>
-            <text class="step-desc">返回「控制」页解锁 / 锁车。重连策略有三档（「我的」→ 重连模式）：舒适（亮屏自动连，默认）/ 极速（GPS+运动感知，通勤无感）/ 手动（纯手动，不自动连）。开启「无App模式」后，即使 App 没运行，手机走近也会由设备自动解锁。</text>
+            <text class="step-desc">「连接」「控制」页均可解锁 / 锁车。</text>
+			<text class="step-desc step-desc--lead">重连策略有三档（「配置」页 → 智能重连模式）：</text>
+			<text class="step-desc step-desc--item">·舒适（亮屏自动连，默认）</text>
+			<text class="step-desc step-desc--item">·手动（纯手动，不自动连）</text>
+			<text class="step-desc step-desc--item">·极速（GPS+运动感知，通勤无感)</text>
+			<text class="step-desc step-desc--lead">开启「Beta ·无App模式」后，即使 App 没运行，手机走近也会由设备自动解锁。</text>
           </view>
         </view>
       </view>
@@ -147,6 +152,7 @@
       </view>
     </view>
 
+
     <!-- ★ Phase 2: 常见错误排查 -->
     <view class="login-card" style="margin-top: 24rpx;">
       <text class="card-title">🛠 常见错误排查</text>
@@ -154,7 +160,7 @@
         <view class="info-row"><text class="info-label">操作太频繁</text><text class="info-val">连点触发，稍候 1~2 秒再试</text></view>
         <view class="info-row"><text class="info-label">指令冲突</text><text class="info-val">蓝牙瞬时写冲突，重试一次即可</text></view>
         <view class="info-row"><text class="info-label">设备未绑定</text><text class="info-val">前往「配置」页绑定，默认码 123456</text></view>
-        <view class="info-row"><text class="info-label">验证失败</text><text class="info-val">绑定关系异常，请重新绑定</text></view>
+        <view class="info-row"><text class="info-label">验证失败</text><text class="info-val">绑定关系异常或密钥失效。控制页/连接页会显示红色「⚠ 验证失败（点击重绑）」徽章，点击后重新绑定即可（默认码 123456）</text></view>
         <view class="info-row"><text class="info-label">发送失败</text><text class="info-val">检查蓝牙是否仍连接，或重连设备</text></view>
         <view class="info-row"><text class="info-label">模式不支持</text><text class="info-val">当前设备模式不支持该操作（如汽车模式点「骑行」）</text></view>
       </view>
@@ -206,7 +212,7 @@
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
-        <text class="tip-text">配置(uc/lc/阈值)断电持久化一致性（当前仅 cooldown 变化才落盘，重启可能回退）</text>
+        <text class="tip-text">为保证per-phone设计，不配置(uc/lc/阈值)设备的断电持久化（当前仅 cooldown 变化才落盘，重启可能回退）</text>
       </view>
       <view class="info-tip">
         <text class="tip-icon">🔲</text>
@@ -216,7 +222,7 @@
 
     <!-- 底部 -->
     <view class="login-footer">
-      <text class="footer-text">BLE KeyGo v3.36.2 · 纯本地 · 安全可靠</text>
+      <text class="footer-text">BLE KeyGo v3.36.3 · 纯本地 · 安全可靠</text>
       <text class="footer-ver">Built on uni-app</text>
     </view>
   </view>
@@ -311,7 +317,9 @@ function handleBatteryOpt() {
 
 .step-content { flex: 1; }
 .step-title { font-size: 26rpx; font-weight: 600; color: var(--login-step-title); display: block; margin-bottom: 4rpx; }
-.step-desc { font-size: 22rpx; color: var(--login-step-desc); line-height: 1.5; }
+.step-desc { font-size: 22rpx; color: var(--login-step-desc); line-height: 1.5; display: block; } /* display: block; 可以让 step-desc 成为块级元素，使三行各自换行显示  */
+.step-desc--lead { padding-left: 2em; text-indent: -1em; } /* 列表引导行，如"重连策略有三档…" */
+.step-desc--item { padding-left: 3em; text-indent: -1em; } /* 悬挂缩进的列表项（·舒适 / ·手动 / ·极速） */
 .highlight { color: var(--accent); font-weight: 700; }
 
 /* ---- Info Rows ---- */
