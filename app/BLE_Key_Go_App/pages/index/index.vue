@@ -28,8 +28,8 @@
         <text class="rssi-value">{{ bleStore.displayRssi > -999 ? bleStore.displayRssi : '---' }}</text>
         <text class="rssi-unit">dBm</text>
       </view>
-      <!-- ★ v3.36.1: 电池电量 — 缩小整行，置于「已连接」框(🔗)内底部；断开后 batteryLevel 重置为 -1 自动隐藏 -->
-      <view class="card-batt" v-if="bleStore.batteryLevel >= 0" :class="bleStore.batteryColor">
+      <!-- ★ v3.36.1: 电池电量 — 缩小整行，置于「已连接」框(🔗)内底部；断开后 batteryLevel 重置为 -1 自动隐藏 --> <!-- 2026-07-25: 电池卡加 connected 守卫(bleStore.connected)，未连接不再显示旧电量 -->
+      <view class="card-batt" v-if="bleStore.connected && bleStore.batteryLevel >= 0" :class="bleStore.batteryColor"> 
         <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
         <text class="batt-text">{{ bleStore.batteryText }}</text>
       </view>

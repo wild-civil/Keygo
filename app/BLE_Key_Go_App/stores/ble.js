@@ -927,6 +927,8 @@ export const useBleStore = defineStore('ble', {
       this.connected = false
       this._connFinalizedFor = null   // ★ 方案A (2026-07-18): 断连重置初始化幂等守卫，允许重连重新初始化一次
       this.deviceState = 'LOCKED'
+      this.batteryLevel = -1           // ★ 对称性修复：蓝牙关闭时也要清零电量（_handleDisconnect 已重置，此处补齐，避免未连接仍显示旧电量）
+      this.deviceTempC = null          // ★ 对称性修复：同步清零芯片温度（与 _handleDisconnect 对齐）
       this.rssi = -999
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 断连重置签名会话态
       this.filteredRssi = -999
