@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix12"  /* ★ v3.36.3-fix12 (2026-07-30): P1+P2 低功耗——config.h 开启 HAL_SLEEP(TRUE)，休眠由 BLE 库 cfg.sleepCB=CH58X_LowPower 驱动（TMOS_SystemProcess 无任务时自动调用），主循环无需改。断连后状态机/RSSI/周期事件已停、KEY_POWER 已断电(KeyGo_ResetState)，设备仅保持广播→深度睡眠只在广播包之间，大幅省电；连接态周期任务仍运行(不牺牲自动解锁响应，P3 未做)。GPIO 输出锁存保电平安全；软看门狗因持续广播(<2.5s 唤醒)不误复位。前序 fix11 修 RIDE LED 永久常亮。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix13"  /* ★ v3.36.3-fix13 (2026-07-30): 修无App模式"骑走自动退出骑行"锁车被取消——断连时 KeyGo_ResetState 不再清零 g_rideExitStep、Peripheral_LinkTerminated 不再 stop SBP_RIDE_EXIT_LOCK_EVT，使"先解锁→2s→锁车"的锁车在手机已远离(连接必断)时仍可靠触发；KeyGo_RideExitLockHandler 的 g_rideExitStep!=2 闸门防误锁。另：OBS 无App重连3闪 LED 让位给进行中脉冲(!g_actionActive)，避免与锁车脉冲抢蓝 LED。LED 闪3下本身是无App OS重连指示(LINK_ENCRYPTED 上升沿)，非多执行的锁车。前序 fix12 开 HAL_SLEEP 低功耗。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

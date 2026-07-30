@@ -704,43 +704,54 @@ function clearTimeoutSafe() {
  */
 export function connectDevice(deviceId) {
   return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (fn) => { if (!settled) { settled = true; clearTimeout(hardTimer); fn() } }
+    /* ★ 硬超时兜底（2026-07-30）：部分 Android 在「蓝牙开关循环」后，uni.createBLEConnection 的
+     *   timeout 选项不生效——既不 success 也不 fail，Promise 永久不 settle → 调用方(_doReconnect 重连循环
+     *   / 手动连接 uni.showLoading)卡死，只能重启 App 恢复。这里强制 12s 后 reject，确保无论链路状态
+     *   如何都能收口，让上层重试或收起 loading。12s > 平台 10s，正常超时仍由 fail 优先处理。 */
+    const hardTimer = setTimeout(() => {
+      console.warn('[BLE] createBLEConnection 硬超时(12s)，强制收口', deviceId)
+      finish(() => reject(new Error('CONNECT_HARD_TIMEOUT')))
+    }, 12000)
     stopScan()
       .catch(() => {})  // ★ v3.6: 防止 stopScan reject 导致 Promise 链断裂
       .then(() => {
-      uni.createBLEConnection({
-        deviceId,
-        timeout: 10000,
-        success: () => {
-          console.log('[BLE] 连接成功', deviceId)
-          _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE   // ★ 连接后 10007 宽限期（加密握手窗口）
-          setTimeout(() => {
-            uni.setBLEMTU({
-              deviceId,
-              mtu: 512,
-              success: (res) => {
-                console.log('[BLE] MTU 设置成功:', res.mtu)
-              },
-              fail: (err) => {
-                console.warn('[BLE] MTU 设置失败（可能使用默认20字节）:', err.errMsg)
-              },
-              complete: () => resolve()
-            })
-          }, 500)
-        },
-        fail: (err) => {
-          const msg = String(err?.errMsg || '')
-          // ★ v3.6-fixG: "already connect" → Android GATT 句柄僵死
-          //   抛出让 Store 层接管适配器重置（Store 需要用 _adapterResetting 标记压制状态事件）
-          if (msg.includes('already connect')) {
-            console.warn('[BLE] already connect → 交 Store 层处理适配器重置')
-            reject(new Error('ALREADY_CONNECT_STALE'))
-            return
+        if (settled) return  // ★ 已硬超时收口，不再发起连接
+        uni.createBLEConnection({
+          deviceId,
+          timeout: 10000,
+          success: () => {
+            console.log('[BLE] 连接成功', deviceId)
+            _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE   // ★ 连接后 10007 宽限期（加密握手窗口）
+            setTimeout(() => {
+              uni.setBLEMTU({
+                deviceId,
+                mtu: 512,
+                success: (res) => {
+                  console.log('[BLE] MTU 设置成功:', res.mtu)
+                },
+                fail: (err) => {
+                  console.warn('[BLE] MTU 设置失败（可能使用默认20字节）:', err.errMsg)
+                },
+                complete: () => finish(() => resolve())
+              })
+            }, 500)
+          },
+          fail: (err) => {
+            const msg = String(err?.errMsg || '')
+            // ★ v3.6-fixG: "already connect" → Android GATT 句柄僵死
+            //   抛出让 Store 层接管适配器重置（Store 需要用 _adapterResetting 标记压制状态事件）
+            if (msg.includes('already connect')) {
+              console.warn('[BLE] already connect → 交 Store 层处理适配器重置')
+              finish(() => reject(new Error('ALREADY_CONNECT_STALE')))
+              return
+            }
+            console.error('[BLE] 连接失败', err)
+            finish(() => reject(err))
           }
-          console.error('[BLE] 连接失败', err)
-          reject(err)
-        }
+        })
       })
-    })
   })
 }
 
@@ -804,6 +815,24 @@ export function getBLEDeviceServices(deviceId) {
       success: (res) => {
         resolve(res.services)
       },
+      fail: (err) => reject(err)
+    })
+  })
+}
+
+/**
+ * ★ 2026-07-30: 读取设备 RSSI（强制走无线电层，不读 GATT 缓存）。
+ *   用于"假断连"判定：链路真正断开（设备重启/走远）时 readRemoteRssi 会立即失败；
+ *   链路活着时秒回。与 getBLEDeviceServices 不同——后者在 Android 上对陈旧 GATT
+ *   会从缓存秒回 services，无法反映链路真实存活，会误判重启设备为"仍活"。
+ * @param {string} deviceId
+ * @returns {Promise<number>}
+ */
+export function getBLEDeviceRSSI(deviceId) {
+  return new Promise((resolve, reject) => {
+    uni.getBLEDeviceRSSI({
+      deviceId,
+      success: (res) => resolve(res.rssi),
       fail: (err) => reject(err)
     })
   })

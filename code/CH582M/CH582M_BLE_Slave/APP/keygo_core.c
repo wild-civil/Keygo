@@ -636,7 +636,12 @@ void KeyGo_ResetState(void)
     g_pulsePinMask    = 0;
     g_actionStartMs   = 0;   // ★ v3.15-#16: 看门狗时间戳清零
     g_manualCooldown  = 0;
-    g_rideExitStep    = 0;   // ★ 骑行退出链式上锁：断连/重连清理中间态
+    /* ★ 骑行退出链式上锁：此处【不再】清零 g_rideExitStep。
+     *   原因：无App模式"骑走自动退出骑行"时手机已远离→连接必断→本函数被 Peripheral_LinkTerminated
+     *   调用。若在此清零 + SBP_RIDE_EXIT_LOCK_EVT 又被停，则"先解锁、2s 后锁车"的锁车永远不触发→
+     *   车辆不锁。正确做法：保留 g_rideExitStep(=2 表示解锁已完成、锁车事件已挂起)，由
+     *   KeyGo_RideExitLockHandler 触发锁车后自行清零(一次性)。Peripheral_LinkTerminated 也不再 stop
+     *   该事件。g_rideExitStep!=2 的闸门保证不会误锁(重连后该值仍由 handler 归零)。 */
     g_rideStep        = 0;   // ★ 双脉冲序列：SBP_GPIO_RIDE_EVT 可能在断连时被 stop 而中途退出，必须清零，否则下一轮 RIDE 被 if(g_rideStep!=0) 拦截
     /* ★ LED 跟随脉冲：断连/重连时蓝 LED 直接灭（无脉冲即不亮） */
     GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
@@ -742,7 +747,7 @@ void KeyGo_ProcessStateMachine(void)
 
         /* LED 提示驱动：OS 重连后闪几下蓝 LED 提示（不占 TMOS 事件位，走状态机轮询）。
          *   结束直接灭（平时不亮，LED 仅跟随脉冲 / 重连提示） */
-        if (g_obsBlinkLeft > 0 && Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
+        if (g_obsBlinkLeft > 0 && !g_actionActive && Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
             if (g_obsBlinkOn) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
             else              GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
             g_obsBlinkOn   = g_obsBlinkOn ? 0 : 1;

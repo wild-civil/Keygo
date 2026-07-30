@@ -39,6 +39,7 @@ import {
   getBluetoothAdapterState,
   openBluetoothAdapterOnly,       // ★ 冷启动修复：仅打开适配器（不申请权限）
   getBLEDeviceServices,          // ★ used by _verifyConnection
+  getBLEDeviceRSSI,               // ★ 2026-07-30: 无线电层实时探活（假断连判定）
   onBluetoothAdapterStateChange,
   startScan,
   stopScan,
@@ -299,6 +300,7 @@ export const useBleStore = defineStore('ble', {
     _notifyBuffer: '',
     _notifyTimer: null,
     _reconnectGuard: 0,            // 重连会话锁，蓝牙关闭时递增
+    _reconnecting: false,          // ★ 2026-07-30: 重连并发守卫，防止多条重连路径同时进入踩状态
     _bondingInProgress: false,     // ★ 2026-07-16: 配对(_triggerBond)期间断开 GATT 让 OS 配对，抑制 store 自动重连
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
     _customNamesByMac: (() => { try { return uni.getStorageSync('ble_device_custom_names') || {} } catch (e) { return {} } })(), // ★ v3.36.3-fix5: 按 MAC 索引的本机自定义名副本(由 customDeviceName 持久化而来)，供断连后的扫描列表/重连卡统一显示
@@ -328,11 +330,13 @@ export const useBleStore = defineStore('ble', {
     //   期间若收到 FF02(c:1) 自愈则取消清零（见 _parseSingleStatus）。
     _disconnectRssiClearTimer: null,
     _connectedAtMs: 0,            // ★ 2026-07-17 诊断埋点：本次连接建立时刻（断连时算会话存活时长，区分「秒断」与「久连后掉」）
-    _lastFf02Ms: 0,               // ★ v3.31.0 / 2026-07-13: 最近一次收到含 RSSI 的 FF02 时间戳（连续无包判 stale 用）
+    _lastFf02AnyMs: 0,            // ★ v3.31.0 / 2026-07-13(2026-07-30 改名): 最近一次收到任意 FF02 包的时间戳（连续无包判 stale / 断连活性判别用，每包刷新）
     _lastRssiDisplayMs: 0,        // ★ v3.31.0 / 2026-07-13: 最近一次写入 displayRssi 的时间（节流用）
     _rssiStaleWatchdog: null,     // ★ v3.31.0 / 2026-07-13: 连续无 FF02 看门狗定时器
     // ★ v3.25-fix2: GATT 上下文重建中标志，防止看门狗与重连逻辑并发触发多次重建
     _repairing: false,
+    _disconnectProbing: false,     // ★ 2026-07-30: 断连事件后「FF02 活性缓刑」进行中
+    _disconnectProbeTimer: null,   // ★ 2026-07-30: 活性缓刑定时器
 
     // ★ 方案A（2026-07-12）：未绑定连接超时强断标记。收到固件 BIND:TIMEOUT 后置 true，
     //   _handleDisconnect 据此抑制自动重连（含原生扫描），避免被踢后反复重连刷占连接槽。
@@ -901,6 +905,10 @@ export const useBleStore = defineStore('ble', {
      * ★ v3.11: 蓝牙关闭时的统一处理
      */
     _handleBtOff() {
+      // ★ 2026-07-30: 防御性收起可能残留的"连接中..." loading——蓝牙关闭瞬间若正有连接进行中，
+      //   createBLEConnection 可能长时间不回调，手动连接页的 showLoading 会卡住。由 connectDevice
+      //   的硬超时(12s)最终也会 reject 收口，这里立即清掉避免视觉卡死。
+      try { uni.hideLoading() } catch (e) {}
       this._reconnectGuard++
       console.log(`[Store] ⛧ 重连锁递增 → ${this._reconnectGuard}`)
 
@@ -1456,9 +1464,13 @@ export const useBleStore = defineStore('ble', {
      *   使"假断连保护"反而把 GATT 仍活的设备判成真断连 → connected 翻 false → 控制页卡重现，
      *   与本意(挡掉假断连)完全相反。修复策略：
      *   - getConnectedBluetoothDevices 命中(Android 可靠) → 立判假断连，忽略（快速路径）；
-     *   - 查不到 / 查询失败 → 不据此判连，改用 GATT 活性探针(getBLEDeviceServices 短超时)二次确认：
-     *       探针成功(GATT 仍活) → 假断连，忽略；探针失败(真断连) → 执行 _handleDisconnect。
-     *   副作用：真断连检测延迟 ≈ GATT 探针超时(1.5s)，可接受（优先避免误判）。
+     *   - 查不到 / 查询失败 → 不据此判连，进入「FF02 活性缓刑」(_startDisconnectProbation)二次确认：
+     *       缓刑窗口(2s)内收到 FF02(链接真活) → 假断连，忽略；窗口内无 FF02(真断连) → _handleDisconnect。
+     *   副作用：真断连检测延迟 ≈ 缓刑窗口(2s)，可接受（优先避免误判）。
+     *   ★ 2026-07-30: 二次确认由 RSSI 探针改为 FF02 流量判别。原因：实测设备重启后，Android 对
+     *     陈旧 GATT 会让 getBLEDeviceRSSI / getBLEDeviceServices 从缓存秒回成功(链路实际已死)，
+     *     RSSI 探针误判"仍活" → 真断连被忽略 20s+(用户两次复现)。FF02 是固件每 ~1s 的实时推送，
+     *     链接真活才持续到达，是最可靠的"链接真活"证据，且绝不走缓存。
      *
      * 仅用于全局监听器路径；用户主动断开 / _verifyConnection 已验真失效等路径仍直接走 _handleDisconnect。
      *
@@ -1466,7 +1478,14 @@ export const useBleStore = defineStore('ble', {
      */
     async _verifyThenDisconnect(deviceId, opts = {}) {
       const forceStale = !!opts.forceStale
-      // ① 系统级确认（Android 可靠；mp-weixin 可能漏报，故仅作"快速放行"信号，不作为"已断连"唯一证据）
+      // ★ forceStale（FF02 静默>20s 看门狗）：链接对 App 已不可用，直接按真断连清理，
+      //   不再依赖 RSSI/GATT 探针（Android 缓存会误判"仍活"，见下方 ②）。
+      if (forceStale) {
+        console.log('[Store] forceStale：FF02 静默>20s，强制清理僵尸连接')
+        this._handleDisconnect()
+        return
+      }
+      // ① 系统级确认（Android 可靠；mp-weixin 可能漏报，仅作快速放行信号）
       try {
         const devices = await new Promise((resolve, reject) => {
           uni.getConnectedBluetoothDevices({
@@ -1476,55 +1495,78 @@ export const useBleStore = defineStore('ble', {
           })
         })
         if (devices.some(d => d.deviceId === deviceId)) {
-          if (!forceStale) {
-            // 设备仍在系统已连接列表 → 假断连，忽略（GATT 自愈，不翻 connected）
-            console.log('[Store] ⚠ 断连事件但设备仍在系统已连接列表，判定为假断连，忽略（不翻 connected）')
-            return
-          }
-          // ★ 僵尸连接：FF02 已静默>20s，系统列表"仍连"是 Android 未清理的 stale ACL handle，
-          //   不可采信 → 跳过短回路，继续走 GATT 探针。
-          console.log('[Store] ⚠ forceStale：系统列表仍含设备（疑似僵尸），不采信，继续 GATT 探针')
-        }
-      } catch (e) {
-        // 查询失败：不据此判连，交下方 GATT 探针兜底
-        console.warn('[Store] _verifyThenDisconnect: 系统级确认失败，转 GATT 探针:', e?.message || e)
-      }
-      // ② 系统列表查不到：可能真断连，也可能 mp-weixin getConnectedBluetoothDevices 漏报 → GATT 探针二次确认
-      const alive = await this._isGattAlive(deviceId)
-      if (alive) {
-        if (!forceStale) {
-          console.log('[Store] ⚠ 系统列表漏报但 GATT 仍活 → 假断连，忽略（不翻 connected）')
+          // 设备仍在系统已连接列表 → 链接真活 → 假断连，忽略（不翻 connected）
+          console.log('[Store] ⚠ 断连事件但设备仍在系统已连接列表 → 假断连（链接真活），忽略（不翻 connected）')
           return
         }
-        // ★ forceStale 且 GATT 探针仍"活"：Android 常从缓存秒回 services（链路实际已死），
-        //   FF02 已静默>20s 即"对 App 不可用"的确证 → 强制清理，避免卡在"信号--且连着"须重启。
-        console.warn('[Store] forceStale 且 GATT 探针仍"活"(疑似缓存) → 判定僵尸连接，强制清理')
-        this._handleDisconnect()
-        return
+      } catch (e) {
+        // 查询失败：不据此判连，转 FF02 活性缓刑兜底
+        console.warn('[Store] _verifyThenDisconnect: 系统级确认失败，转 FF02 活性缓刑:', e?.message || e)
       }
-      // 系统列表 + GATT 均确认已断连 → 执行真正断连
-      console.log('[Store] 系统列表与 GATT 均确认设备已断连 → 执行真正断连')
-      this._handleDisconnect()
+      // ② 系统列表查不到：可能真断连，也可能是锁屏/系统误报（链接真活且 FF02 持续推送）。
+      //   ★ 关键修正(2026-07-30)：Android 对"重启设备的陈旧 GATT"会让 getBLEDeviceRSSI /
+      //     getBLEDeviceServices 从缓存秒回(链路实际已死) → 探针误判"仍活" → 真断连被当假断连
+      //     忽略 20s+(用户两次复现)。故【不再用任何 GATT 缓存查询做活性判别】，改用最可靠的
+      //     "链接真活"证据——【FF02 实时流量】：固件每 ~1s 推一次 FF02，链接真活则持续到达。
+      //   进入「活性缓刑」窗口：期间收到 FF02 → 链接真活(假断连)忽略；窗口内无 FF02 → 真断连。
+      //   缓刑 2s(>固件 1s 推送周期)确保观察到断连事件「之后」是否有 FF02 续流，
+      //   既覆盖边界情况，又把真断连检出延迟压到 ~2s（远低于旧 20s+）。
+      this._startDisconnectProbation(deviceId)
     },
 
     /**
-     * ★ 2026-07-25: GATT 活性探针。对已连接设备做 getBLEDeviceServices，
-     *   连上后服务已发现 → 正常 ~200ms 返回；真断连 → 超时失败。
-     *   比 getConnectedBluetoothDevices 更可靠（后者在 mp-weixin 上漏报）。
-     *   @returns {Promise<boolean>} true=GATT 仍活
+     * ★ 2026-07-30: 断连事件后的「FF02 活性缓刑」。
+     *   系统已报 connected=false 且设备不在系统已连接列表，但链接仍可能真活
+     *   （锁屏/系统误报，FF02 仍在持续推送）。
+     *   不读 RSSI/GATT 缓存（Android 对重启设备的陈旧 GATT 会缓存秒回 → 误判"仍活"），
+     *   而是观察【断连事件之后】是否有 FF02 续流：
+     *     - 缓刑窗口(2s)内收到 FF02 → 链接真活 → 假断连，忽略本次事件（不翻 connected）；
+     *     - 窗口内无 FF02 → 链接确已死 → 真断连，执行清理。
+     *   窗口 > 固件 1s 推送周期，确保能观察到事件后的续流，覆盖"FF02 恰好在事件前到达"的边界。
      */
-    async _isGattAlive(deviceId) {
+    _startDisconnectProbation(deviceId) {
+      if (this._disconnectProbing) return   // 已有缓刑在跑，避免重复定时器
+      this._disconnectProbing = true
+      console.log('[Store] 系统列表无设备 → 进入 FF02 活性缓刑(2s) 判定真/假断连...')
+      this._disconnectProbeTimer = setTimeout(() => {
+        this._disconnectProbing = false
+        this._disconnectProbeTimer = null
+        if (deviceId !== this.deviceId) {
+          console.log('[Store] 活性缓刑超时，但当前设备已切换，跳过清理')
+          return
+        }
+        if (!this.connected) {
+          console.log('[Store] 活性缓刑超时，但已处于断开态，跳过')
+          return
+        }
+        console.log('[Store] 活性缓刑超时且无 FF02 续流 → 真断连，执行清理')
+        this._handleDisconnect()
+      }, 2000)
+    },
+
+    /**
+     * ★ 2026-07-30: 无线电层活性探针。对已连接设备做 getBLEDeviceRSSI（readRemoteRssi），
+     *   强制走空口、不读 GATT 缓存：链路真活 → 秒回；链路已死（设备走远/干净断开）→ 立即失败。
+     *   替代旧的 _isGattAlive(getBLEDeviceServices)：后者在 Android 上对「重启设备的陈旧 GATT」
+     *   会从缓存秒回 services → 误判"仍活"。
+     *   ⚠ 注意：本探针仍不可靠于「设备重启」场景——实测重启后 stale GATT 的 readRemoteRssi 也会
+     *   从缓存秒回成功（用户 2026-07-30 两次复现）。故前台断连判定已改用 FF02 活性缓刑
+     *   （_startDisconnectProbation），本探针仅保留给 _verifyConnection（App 从后台切回，
+     *   那时 stale handle 通常已被系统清理，RSSI 较能反映真实链路）。
+     *   @returns {Promise<boolean>} true=无线电层仍活
+     */
+    async _isRadioAlive(deviceId) {
       if (!deviceId) return false
       let timer
       try {
-        // ★ 给 GATT 探针加 .catch 吞掉其"最终"的 rejection（真断连时 uni 的 getBLEDeviceServices
-        //   会在数秒后 reject），避免 Promise.race 孤儿 promise 变成 UnhandledPromiseRejection 噪声；
+        // ★ 给探针加 .catch 吞掉其"最终"的 rejection（真断连时 getBLEDeviceRSSI 会 reject），
+        //   避免 Promise.race 孤儿 promise 变成 UnhandledPromiseRejection 噪声；
         //   同时在 finally 清定时器，避免超时 reject 落到已 settle 的 race 上。
-        const gattProbe = getBLEDeviceServices(deviceId).catch(() => {})
+        const rssiProbe = getBLEDeviceRSSI(deviceId).catch(() => {})
         const timeout = new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('GATT_PROBE_TIMEOUT')), 1500)
+          timer = setTimeout(() => reject(new Error('RSSI_PROBE_TIMEOUT')), 1500)
         })
-        await Promise.race([gattProbe, timeout])
+        await Promise.race([rssiProbe, timeout])
         return true
       } catch (e) {
         return false
@@ -1586,18 +1628,18 @@ export const useBleStore = defineStore('ble', {
           this._enableStatusNotify()
           return true
         }
-        // ★ 2026-07-25 修复(MP 漏报): 系统列表查不到，可能 mp-weixin getConnectedBluetoothDevices 漏报。
-        //   先用 GATT 活性探针二次确认，避免把 GATT 仍活的设备误判失效（否则 onShow 即翻 connected=false → 卡重现）。
-        console.log('[Store] _verifyConnection: 系统列表漏报，转 GATT 探针确认...')
-        const alive = await this._isGattAlive(this.deviceId)
+        // ★ 2026-07-30 修复: 系统列表查不到，可能 mp-weixin getConnectedBluetoothDevices 漏报。
+        //   先用 RSSI 无线电探针二次确认（强制走空口，不读缓存），避免把"陈旧 GATT 仍活"的设备误判失效。
+        console.log('[Store] _verifyConnection: 系统列表漏报，转 RSSI 探针确认...')
+        const alive = await this._isRadioAlive(this.deviceId)
         if (alive) {
-          console.log('[Store] _verifyConnection: GATT 仍活，连接正常')
+          console.log('[Store] _verifyConnection: RSSI 仍活，连接正常')
           this._resetStatusStaleTimer()
           this._enableStatusNotify()
           return true
         }
-        // 设备不在系统已连接列表且 GATT 已死 → 连接已失效
-        console.log('[Store] _verifyConnection: 设备不在已连接列表且 GATT 已死，连接已失效')
+        // 设备不在系统已连接列表且 RSSI 已死 → 连接已失效
+        console.log('[Store] _verifyConnection: 设备不在已连接列表且 RSSI 已死，连接已失效')
         this._handleDisconnect()
         return false
       } catch (e) {
@@ -2159,6 +2201,14 @@ export const useBleStore = defineStore('ble', {
      * ★ v3.6-fixD: 会话锁机制，防止蓝牙关闭后仍在执行的 _doReconnect 覆盖状态
      */
     async _doReconnect() {
+      // ★ 2026-07-30: 重连并发守卫——防止 forceStale 触发 + 心跳 tryAutoConnect 同时进入，
+      //   导致两个 connectDevice / 适配器重置并发、状态互相踩。已有重连进行时直接返回。
+      if (this._reconnecting) {
+        console.log('[Store] ⚠ _doReconnect 重入被拦（已有重连进行中）')
+        return
+      }
+      this._reconnecting = true
+      try {
       // ★ v3.6-fixD: 记录此轮重连的会话锁版本号
       const guard = this._reconnectGuard
       /** 检查会话锁是否失效（蓝牙是否在此期间被关闭） */
@@ -2174,11 +2224,22 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.6-fix1C: 确保蓝牙适配器已初始化（轻量版，不弹窗）
       if (this.btState !== 'enabling') {
         try {
+          // ★ 2026-07-30: 硬超时兜底，防止 openBluetoothAdapter 在异常栈上挂起（同 _resetBluetoothAdapter）。
+          //   超时则保守 resolve（不强求打开，后续 _checkBluetoothState 会兜底判断）。
           await new Promise((resolve) => {
+            let settled = false
+            const t = setTimeout(() => {
+              if (settled) return
+              settled = true
+              console.warn('[Store] ⛧ _doReconnect openBluetoothAdapter 超时(5s)，保守放行')
+              resolve()
+            }, 5000)
             uni.openBluetoothAdapter({
-              success: () => resolve(),
+              success: () => { if (settled) return; settled = true; clearTimeout(t); resolve() },
               fail: (err) => {
                 const msg = String(err?.errMsg || '')
+                if (settled) return
+                settled = true; clearTimeout(t)
                 if (msg.includes('already open')) { resolve(); return }
                 console.warn('[Store] _doReconnect: 适配器初始化跳过', msg)
                 resolve()
@@ -2258,6 +2319,9 @@ export const useBleStore = defineStore('ble', {
       if (!guardValid()) guardAbort('最终适配器确认后锁失效')
 
       this._finalizeConnection(this.deviceId)
+      } finally {
+        this._reconnecting = false
+      }
     },
 
     /**
@@ -2314,14 +2378,17 @@ export const useBleStore = defineStore('ble', {
       try {
         await connectDevice(targetId)
       } catch (e) {
-        if (e && e.message === 'ALREADY_CONNECT_STALE') {
+        // ★ 2026-07-30: ALREADY_CONNECT_STALE(GATT 僵死) 或 CONNECT_HARD_TIMEOUT(蓝牙开关循环后
+        //   createBLEConnection 平台超时失效、Promise 永久挂起) → 重置适配器并重试一次。
+        //   这等价于"重启 App"对适配器的重绑效果，免去用户手动重启。
+        if (e && (e.message === 'ALREADY_CONNECT_STALE' || e.message === 'CONNECT_HARD_TIMEOUT')) {
           // ★ v3.6-fixG v3: 若 btState 已为 off，说明适配器事件已到达，系统蓝牙确实关了
           //   此时重置适配器只会强行 btState='on' 造成错误 → 直接抛出让上层暂停重连
           if (this.btState === 'off') {
             console.log('[Store] ⛧ btState 已为 off，跳过适配器重置（系统蓝牙已关）')
             throw e
           }
-          console.log('[Store] ⛧ GATT 僵死，重置适配器...')
+          console.log('[Store] ⛧ ' + (e.message === 'CONNECT_HARD_TIMEOUT' ? '连接硬超时' : 'GATT 僵死') + '，重置适配器...')
           await this._resetBluetoothAdapter()
           console.log('[Store] 适配器重置完成，重试连接...')
           await connectDevice(targetId)
@@ -2344,16 +2411,21 @@ export const useBleStore = defineStore('ble', {
         console.log('[Store] 适配器已关闭，等待系统释放资源...')
         await new Promise(r => setTimeout(r, 800))
 
+        // ★ 2026-07-30: 硬超时兜底——异常路径（设备重启/僵尸清理后 close 再 open）下，
+        //   Android 的 openBluetoothAdapter 可能既不 success 也不 fail → Promise 永久不 settle →
+        //   _resetBluetoothAdapter 永远挂着 → _connectWithResetFallback → _doReconnect 永远不返回 →
+        //   外层 _scheduleReconnect 拿不到结果、永远排不出 #2 → 现象就是"一直连接中..."连不上。
+        //   强制 6s 收口并 reject，让调度器走指数退避。
         await new Promise((resolve, reject) => {
+          let settled = false
+          const done = (fn) => { if (!settled) { settled = true; clearTimeout(hardT); fn() } }
+          const hardT = setTimeout(() => {
+            console.warn('[Store] ⛧ openBluetoothAdapter 硬超时(6s)，强制收口')
+            done(() => reject(new Error('ADAPTER_OPEN_TIMEOUT')))
+          }, 6000)
           uni.openBluetoothAdapter({
-            success: () => {
-              console.log('[Store] 适配器重新打开成功')
-              resolve()
-            },
-            fail: (err) => {
-              console.error('[Store] 适配器重新打开失败', err?.errMsg)
-              reject(err)
-            }
+            success: () => { console.log('[Store] 适配器重新打开成功'); done(() => resolve()) },
+            fail: (err) => { console.error('[Store] 适配器重新打开失败', err?.errMsg); done(() => reject(err)) }
           })
         })
         // ★ v3.9.1: 验证适配器真实状态后再同步 btState。
@@ -3176,7 +3248,7 @@ export const useBleStore = defineStore('ble', {
       this._staleSinceMs = 0
       this._rssiStaleWatchdog = setInterval(() => {
         if (!this.connected) return
-        if (this._lastFf02Ms && Date.now() - this._lastFf02Ms > 4000) {
+        if (this._lastFf02AnyMs && Date.now() - this._lastFf02AnyMs > 4000) {
           this.displayRssi = -999
           // ★ 僵尸连接探测：FF02 长时间缺失，可能底层 GATT 已死(Android 未上报断连)。
           //   累计 20s 后主动做 GATT 探针(_verifyThenDisconnect 会先系统级+GATT 双重确认，
@@ -3228,7 +3300,7 @@ export const useBleStore = defineStore('ble', {
       this.displayRssi = -999
       this.rawRssiDisplay = -999   // ★ 2026-07-24: 重连重置同步清零
       this.rssiEma = -999
-      this._lastFf02Ms = 0
+      this._lastFf02AnyMs = 0
       this._lastRssiDisplayMs = 0
       this._staleSinceMs = 0
       this._startRssiStaleWatchdog()
@@ -3281,6 +3353,16 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
+      // ★ 2026-07-30: 每收到一包 FF02 即刷新「心跳」时间戳（用于断连活性判别）。
+      //   较旧实现(仅含 f 字段时刷新) 更稳——部分状态包无 f 会漏判。
+      this._lastFf02AnyMs = Date.now()
+      // 若正处于「断连事件后的活性缓刑」中，收到 FF02 即证明链接真活 → 假断连，撤销缓刑。
+      if (this._disconnectProbing) {
+        this._disconnectProbing = false
+        if (this._disconnectProbeTimer) { clearTimeout(this._disconnectProbeTimer); this._disconnectProbeTimer = null }
+        console.log('[Store] 活性缓刑期间收到 FF02 → 链接真活，判定为假断连，忽略')
+      }
+
       // 连接与车辆状态
       if (data.c !== undefined) {
         // ★ v3.25-fix: 收到 FF02(c:1) 即视为已连，取消"假断连"的延迟 RSSI 清零
@@ -3302,7 +3384,7 @@ export const useBleStore = defineStore('ble', {
       if (data.f !== undefined && data.f > -999) {
         if (!_stagedDisplay) _stagedDisplay = {}
         _stagedDisplay.f = data.f
-        this._lastFf02Ms = Date.now()   // ★ 看门狗用「真实包到达时刻」，保持即时（不随提交延迟）
+        this._lastFf02AnyMs = Date.now()   // ★ 看门狗用「真实包到达时刻」，保持即时（不随提交延迟）
       }
 
       if (data.st !== undefined) {

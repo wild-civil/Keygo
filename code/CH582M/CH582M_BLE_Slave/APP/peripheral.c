@@ -864,8 +864,11 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
         /* ★ 方案A（2026-07-12）：取消可能挂起的超时强断（已自然断连无需再踢） */
         tmos_stop_task(Peripheral_TaskID, SBP_UNBOUND_TIMEOUT_EVT);
-        /* ★ 骑行退出链式上锁：断连取消可能挂起的上锁事件，避免重连后误锁 */
-        tmos_stop_task(Peripheral_TaskID, SBP_RIDE_EXIT_LOCK_EVT);
+        /* ★ 骑行退出链式上锁：此处【不再】无条件取消挂起的上锁事件。
+         *   无App模式"骑走自动退出骑行"时连接必断，若取消该事件→车辆永不锁。
+         *   现保留：若 g_rideExitStep==2(解锁已完成、锁车已挂起) 断连后 2s 仍触发
+         *   KeyGo_RideExitLockHandler 输出锁车(可靠上锁)；若 g_rideExitStep!=2 则 handler
+         *   闸门直接返回，不会误锁。g_actionActive/控制脚由 KeyGo_ResetState 处理。 */
         advRestartRetryCount = 0;
 
         KeyGo_ResetState();
