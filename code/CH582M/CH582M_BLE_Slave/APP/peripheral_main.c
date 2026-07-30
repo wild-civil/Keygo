@@ -114,9 +114,10 @@ void WDOG_BAT_IRQHandler(void)
             {
                 /* ★ 复位前安全措施：拉低所有 GPIO 控制引脚
                  *   防止复位过程中引脚电平抖动 → 车锁误动作
-                 *   PA4/PA5/PA6/PA7 + PB4 是 KeyGo 的所有控制输出引脚 */
-                GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
-                GPIOB_ResetBits(GPIO_Pin_4);
+                 *   PB5/PB7/PB6/PB4(OTHER) 是 KeyGo 的按键输出引脚, PB0=KEY_POWER(供电)
+                 *   PB14=LED_B(蓝,常规), PB15=LED_R(红,重大) */
+                GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+                GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);   // ★ 双 LED 复位前灭
 
                 /* 执行软件复位 — 芯片完全重启，等效于上电复位 */
                 SYS_ResetExecute();
@@ -217,11 +218,11 @@ int main(void)
     WWDG_ITCfg(ENABLE);
     WWDG_SetCounter(26);
 
-    /* LED 最终同步：确保 LED 反映实际锁状态 */
+    /* LED 最终同步：确保 LED 反映实际锁状态 (LED 在 PB15, 非 PB4) */
     if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
-        GPIOB_SetBits(GPIO_Pin_4);     /* 解锁 → LED 亮 (高电平) */
+        GPIOB_SetBits(GPIO_Pin_15);    /* 解锁 → LED 亮 (高电平) */
     } else {
-        GPIOB_ResetBits(GPIO_Pin_4);   /* 锁车 → LED 灭 (低电平) */
+        GPIOB_ResetBits(GPIO_Pin_15);  /* 锁车 → LED 灭 (低电平) */
     }
 
     Main_Circulation();

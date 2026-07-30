@@ -483,6 +483,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         if (SBP_PERIODIC_EVT_PERIOD) {
             tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT, SBP_PERIODIC_EVT_PERIOD);
         }
+        KeyGo_KeyPowerCheck();          // ★ 自动电源管理: 空闲超时断电
         if (g_deviceConnected) {
             KeyGo_NotifyStatus();
         }
@@ -653,18 +654,16 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
             /* ★ v3.16-P1: 复位前将所有控制 GPIO 拉低
              *   问题：SYS_ResetExecute() → PFIC 系统复位 → 所有 GPIO 回退到
-             *         输入+内部上拉(弱高电平) → PA4~PA7 不确定、PB4 LED 短暂亮起
+             *         输入+内部上拉(弱高电平) → PB4~PB7 控制线不确定、PB15 LED 短暂亮起
              *   修复：提前将控制引脚拉低为输出低电平，确保复位窗口内输出安全状态
              *   ─────────────────────────────────────────────────────────────
-             *   引脚说明：
-             *     PA4 = UNLOCK 控制线,  PA5 = LOCK 控制线
-             *     PA6 = TRUNK 控制线,    PA7 = KEY_POWER 控制线
-             *     PB4 = LED 指示灯 (高电平=亮, 低电平=灭)
+             *   引脚说明 (自定义 PCB V03/V04)：
+             *     PB5 = UNLOCK, PB7 = LOCK, PB6 = TRUNK, PB4 = OTHER(喇叭/寻车)
+             *     PB0 = KEY_POWER(供电), PB14 = LED_B(蓝,常规), PB15 = LED_R(红,重大)
              *   ─────────────────────────────────────────────────────────────
-             *   GPIO_Pin_4/5/6/7 = (1<<4)~(1<<7) 在 PA 和 PB 端口上值是相同的，
-             *   所以可以直接用 GPIO_Pin_4 操作 PA4 和 PB4 */
-            GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
-            GPIOB_ResetBits(GPIO_Pin_4);
+             *   GPIO_Pin_4/5/6/7 = (1<<4)~(1<<7) 在 PA 和 PB 端口上值是相同的 */
+            GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+            GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);   // ★ 双 LED(PB14蓝/PB15红) 复位前灭
 
             SYS_ResetExecute();
         }

@@ -20,29 +20,45 @@
 #include "CH58x_common.h"
 
 /* ─────────────────────────────────────────────────────────────────
- * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件)
- *   参考 ESP32 映射: UNLOCK=2, LOCK=3, TRUNK=4, KEY_POWER=5, LED=8, BIND=9
- *   CH582M 使用 PB 端口对应关系:
- *     PB4  = LED (开发板丝印 PB4)
- *     PB22 = KEY1 (BIND 按键)
- *     PA4  = UNLOCK
- *     PA5  = LOCK
- *     PA6  = TRUNK
- *     PA7  = KEY_POWER
+ * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件) — 自定义 PCB V03/V04
+ *   Unlock=PB5, Lock=PB7, Trunk/Cycling=PB6, Other(喇叭/寻车)=PB4
+ *   KEY_POWER(给钥匙供电/驱动PMOS导通)=PB0
+ *   LED_R=PB15, LED_B=PB14
+ *   PB22 = BIND 按键, RST=PB23, BOOT=PB22(长按恢复出厂)
  * ───────────────────────────────────────────────────────────────── */
-#define PIN_UNLOCK_GPIO             GPIO_Pin_4   // PA4 → 解锁
-#define PIN_LOCK_GPIO               GPIO_Pin_5   // PA5 → 上锁
-#define PIN_TRUNK_GPIO              GPIO_Pin_6   // PA6 → 后备箱
-#define PIN_KEYPOWER_GPIO           GPIO_Pin_7   // PA7 → 钥匙电源
-/* ★ Phase 2: ebike RIDE 输出引脚。默认复用 TRUNK 脚(PA6)——电动车 PCB 应将
- *   RIDE 触发线接到此处；若硬件另有独立 RIDE 脚，改此宏即可。 */
-#define PIN_RIDE_GPIO               GPIO_Pin_6   // PA6 → 电瓶车 RIDE(快速双击)
+#define PIN_UNLOCK_GPIO             GPIO_Pin_5   // PB5 → 解锁
+#define PIN_LOCK_GPIO               GPIO_Pin_7   // PB7 → 上锁
+#define PIN_TRUNK_GPIO              GPIO_Pin_6   // PB6 → 后备箱/骑行
+#define PIN_OTHER_GPIO              GPIO_Pin_4   // PB4 → 第4键(喇叭/寻车)
+#define PIN_KEYPOWER_GPIO           GPIO_Pin_0   // PB0 → KEY_POWER(给钥匙供电, 驱动 PMOS 导通)
+/* ★ ebike RIDE 输出引脚。复用 TRUNK 脚(PB6)——电动车模式 RIDE 触发线接此处 */
+#define PIN_RIDE_GPIO               GPIO_Pin_6   // PB6 → 电瓶车 RIDE(快速双击)
 
-#define PIN_UNLOCK_PORT             GPIOA
-#define PIN_LOCK_PORT               GPIOA
-#define PIN_TRUNK_PORT              GPIOA
-#define PIN_KEYPOWER_PORT           GPIOA
-#define PIN_RIDE_PORT               GPIOA
+#define PIN_UNLOCK_PORT             GPIOB
+#define PIN_LOCK_PORT               GPIOB
+#define PIN_TRUNK_PORT              GPIOB
+#define PIN_OTHER_PORT              GPIOB
+#define PIN_KEYPOWER_PORT           GPIOB
+#define PIN_RIDE_PORT               GPIOB
+
+/* ★ 双 LED 指示: 蓝(PB14)=常规状态/命令反馈, 红(PB15)=重大提示(恢复出厂等) */
+#define PIN_LED_BLUE_GPIO           GPIO_Pin_14  // PB14 → 蓝色 LED (常规: 解锁亮/锁车灭, TRUNK/RIDE 闪烁, OS重连提示)
+#define PIN_LED_BLUE_PORT           GPIOB
+#define PIN_LED_RED_GPIO            GPIO_Pin_15  // PB15 → 红色 LED (重大: 长按恢复出厂)
+#define PIN_LED_RED_PORT            GPIOB
+
+/* ★ KEY_POWER(PB0) 有效电平: 1=高有效(经NPN反相驱动PMOS) / 0=低有效(直驱PMOS栅极)。
+ *   ★ 已确认(2026-07-29): 你的 PCB 为 PMOS 直驱栅极, 低有效 → 拉低 PB0 = 导通供电。 */
+#ifndef KEY_POWER_ACTIVE_LEVEL
+#define KEY_POWER_ACTIVE_LEVEL      0   // ★ 已确认: PMOS 直驱栅极, 低有效(拉低 PB0 = 导通)
+#endif
+/* ★ 自动电源管理: 收到命令→上电(等待 KEY_POWER_SETTLE_MS)→执行→空闲 KEY_POWER_HOLD_MS 后自动断电 */
+#ifndef KEY_POWER_SETTLE_MS
+#define KEY_POWER_SETTLE_MS         100   // 上电后等待钥匙 MCU 启动(POR)稳定
+#endif
+#ifndef KEY_POWER_HOLD_MS
+#define KEY_POWER_HOLD_MS           4000  // 末次命令后保持通电时长(ms), 到期自动断电省电
+#endif
 
 /* ─────────────────────────────────────────────────────────────────
  * 默认配置值 (可通过 MRS IDE 项目预处理覆盖)
@@ -53,7 +69,7 @@
 #define HAL_KEY                             TRUE
 #endif
 #ifndef HAL_LED
-#define HAL_LED                             FALSE   /* KeyGo 自行管理 PB4 LED，关闭 HAL LED 子系统以免极性冲突 */
+#define HAL_LED                             FALSE   /* KeyGo 自行管理 PB15 LED，关闭 HAL LED 子系统以免极性冲突 */
 #endif
 
 /* 【MAC】使用芯片出厂 MAC */
@@ -153,6 +169,30 @@
 
 extern uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
 extern const uint8_t MacAddr[6];
+
+/* ─────────────────────────────────────────────────────────────────
+ * ★ 电池电量采样 — 自定义 PCB (V03 / V04)
+ *   V03 (已焊): 无外部 ADC → 不定义 BOARD_HAS_EXT_BAT_ADC → 走内部 VBAT
+ *               (经 LDO 恒 3.3V, 显示~100%)。
+ *   V04 (在途): PB3=BAT_ADC_EN(闸门 GPIO 输出), PA3/AIN6=BAT_ADC(模拟输入)。
+ *   打 V04 板时, 在 MRS 预处理(或下方) #define BOARD_HAS_EXT_BAT_ADC 即启用外部采样。
+ * ───────────────────────────────────────────────────────────────── */
+//#define BOARD_HAS_EXT_BAT_ADC            /* ← V04 打板后取消注释启用 */
+
+#ifdef BOARD_HAS_EXT_BAT_ADC
+#define BAT_ADC_EN_PIN                  GPIO_Pin_3   // PB3 → BAT_ADC_EN (闸门输出)
+#define BAT_ADC_EN_ACTIVE_LEVEL         1            /* TODO: 1=高有效 / 0=低有效, 按原理图确认 */
+#define BAT_ADC_EN_SETTLE_MS            5            // 拉高 EN 后等待分压稳定(ms)
+#define BAT_ADC_AIN_PIN                 GPIO_Pin_3   // PA3 → AIN6 (BAT_ADC 模拟输入)
+#define BAT_ADC_CHANNEL                 CH_EXTIN_6   // PA3 对应 ADC 外部通道 6
+#define BAT_ADC_REF_MV                  1050         // CH582M 内部基准 1.05V
+#define BAT_ADC_PGA_DIV                 2            // ★ 10k/10k → 节点满电=4.2*(10/20)=2.1V = PGA_1_2(÷2)满量程2.1V → 量程利用率~28.6%(比PGA_1_4的14%翻倍)
+/* 分压: 上(R1,接Vbat)=10k, 下(R2,接GND)=10k → Vnode=Vbat*10/20=Vbat/2 → Vbat=Vnode*2
+ *   ADC 12-bit: batt_mV = adcVal*REF*PGA_DIV/4096 * (Vbat/Vnode) */
+#define BAT_ADC_VBAT_PER_VNODE_X1000   2000         // Vbat/Vnode 比值 ×1000 (10k/10k 分压 → Vbat=Vnode*2)
+#define BAT_ADC_FULL_MV                 4200         // 100% 对应电池电压(mV)
+#define BAT_ADC_EMPTY_MV                3000         // 0% 对应电池电压(mV)
+#endif
 
 #endif
 

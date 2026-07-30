@@ -51,7 +51,10 @@ void KeyGo_GPIO_Init(void);
 void KeyGo_Unlock(void);
 void KeyGo_Lock(void);
 void KeyGo_Trunk(void);
+void KeyGo_Other(void);                     // ★ PCB V04: 第4脉冲键(PB4=喇叭/寻车)
 void KeyGo_KeyPower(uint8_t on);
+void KeyGo_EnsureKeyPower(void);           // ★ 自动电源: 命令时按需上电
+void KeyGo_KeyPowerCheck(void);            // ★ 周期性: 空闲超时自动断电
 void KeyGo_GPIO_PulseEnd(void);    // TMOS 事件回调：结束当前 GPIO 脉冲
 /* [LED_BEGIN] 后备箱 LED 闪烁 TMOS 回调 (每 500ms 翻转 PB4, 共 5 次)
  *   低功耗: 去掉 LED 时注释掉此声明 [LED_END] */

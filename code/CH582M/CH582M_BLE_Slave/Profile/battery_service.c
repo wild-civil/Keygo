@@ -3,7 +3,9 @@
  * Author             : KeyGo v3.13
  * Date               : 2026/07/03
  * Description        : BLE Battery Service (0x180F) 实现
- *                      电量通过 CH582M 内部 VBAT ADC 通道读取，不需要外部引脚
+ *                      电量默认走内部 VBAT ADC(通道14, V03 经 LDO 显示~100%)；
+ *                      V04 起支持外部电池 ADC: PB3=BAT_ADC_EN(闸门)+PA3/AIN6=BAT_ADC(模拟输入)，
+ *                      由 BOARD_HAS_EXT_BAT_ADC 编译开关启用。
  *
  * GATT 属性表结构:
  *   [0] Service Declaration  (0x2800, UUID=0x180F)
@@ -15,6 +17,7 @@
 #include "CONFIG.h"
 #include "battery_service.h"
 #include "CH58x_adc.h"
+#include "CH58x_gpio.h"    // ★ V04: GPIOB_SetBits/ResetBits, GPIOA_ModeCfg (BAT_ADC_EN / BAT_ADC)
 
 #include <stdio.h>
 
@@ -151,13 +154,92 @@ void Battery_Notify(void)
     }
 }
 
+#ifdef BOARD_HAS_EXT_BAT_ADC
+/*******************************************************************************
+ * @fn      Battery_ADC_Init
+ *
+ * @brief   V04 外部电池 ADC GPIO 初始化: PB3=BAT_ADC_EN(闸门输出), PA3=BAT_ADC(模拟输入)
+ *
+ * @note    CH582M 无 GPIO_ModeAIN, 模拟输入用 GPIO_ModeIN_Floating(高阻)。
+ *          闸门默认关断(省电), 采样前再打开。
+ */
+void Battery_ADC_Init(void)
+{
+    GPIOB_ModeCfg(BAT_ADC_EN_PIN, GPIO_ModeOut_PP_5mA);
+#if (BAT_ADC_EN_ACTIVE_LEVEL == 1)
+    GPIOB_ResetBits(BAT_ADC_EN_PIN);   // 默认低 = 关断分压
+#else
+    GPIOB_SetBits(BAT_ADC_EN_PIN);     // 默认高 = 关断分压(低有效时)
+#endif
+    GPIOA_ModeCfg(BAT_ADC_AIN_PIN, GPIO_ModeIN_Floating);  // PA3 → AIN6 高阻输入
+}
+#endif
+
 void Battery_UpdateLevel(void)
 {
+#ifdef BOARD_HAS_EXT_BAT_ADC
+    uint16_t adcVal;
+    uint32_t adc_mV, batt_mV;
+    uint8_t  newLevel;
+
+    /* 1) 打开 BAT_ADC_EN 闸门 */
+#if (BAT_ADC_EN_ACTIVE_LEVEL == 1)
+    GPIOB_SetBits(BAT_ADC_EN_PIN);
+#else
+    GPIOB_ResetBits(BAT_ADC_EN_PIN);
+#endif
+    /* 2) 等待分压稳定 */
+    DelayMs(BAT_ADC_EN_SETTLE_MS);
+
+    /* 3) 采样外部通道 AIN6(PA3) — 外部单端
+     *    ★ 10k/10k 分压: 节点满电 4.2*(10/20)=2.1V = PGA_1_2(÷2)满量程2.1V → 量程利用率~28.6%(比PGA_1_4的14%翻倍, 精度更好) */
+    {
+        uint8_t savedChannel = R8_ADC_CHANNEL;
+        uint8_t savedCfg     = R8_ADC_CFG;
+
+        ADC_ExtSingleChSampInit(ADC_PGA_1_2, ADC_SampleFreq_3rd);
+        ADC_ChannelCfg(BAT_ADC_CHANNEL);
+        adcVal = ADC_ExcutSingleConver();
+
+        R8_ADC_CHANNEL = savedChannel;
+        R8_ADC_CFG     = savedCfg;
+    }
+
+    /* 4) 关闭闸门省电 */
+#if (BAT_ADC_EN_ACTIVE_LEVEL == 1)
+    GPIOB_ResetBits(BAT_ADC_EN_PIN);
+#else
+    GPIOB_SetBits(BAT_ADC_EN_PIN);
+#endif
+
+    /* 5) 换算 (ADC 12-bit, 基准 1.05V, PGA_1_4 → 输入=节点电压/4):
+     *    adc_mV   = adcVal * REF * PGA_DIV / 4096
+     *    batt_mV  = adc_mV * (Vbat/Vnode) = adc_mV * BAT_ADC_VBAT_PER_VNODE_X1000 / 1000 */
+    adc_mV  = (uint32_t)adcVal * BAT_ADC_REF_MV * BAT_ADC_PGA_DIV / 4096;
+    batt_mV = adc_mV * BAT_ADC_VBAT_PER_VNODE_X1000 / 1000;
+
+    /* 6) 电压 → 百分比 */
+    if (batt_mV >= BAT_ADC_FULL_MV) {
+        newLevel = 100;
+    } else if (batt_mV <= BAT_ADC_EMPTY_MV) {
+        newLevel = 0;
+    } else {
+        newLevel = (uint8_t)((batt_mV - BAT_ADC_EMPTY_MV) * 100 /
+                             (BAT_ADC_FULL_MV - BAT_ADC_EMPTY_MV));
+    }
+
+    if (newLevel != batteryLevel) {
+        batteryLevel = newLevel;
+        PRINT("[BATT] Level updated: %d%%  (VBAT=%d mV, ADC=%d)\n",
+              batteryLevel, batt_mV, adcVal);
+        Battery_Notify();
+    }
+#else
+    /* ── 内部 VBAT ADC 逻辑 (V03: 经 LDO 恒 3.3V → 显示~100%) ── */
     uint16_t adcVal;
     uint16_t vdd_mV;
     uint8_t  newLevel;
 
-    /* ── 读取内部 VBAT ADC (CH582M 内置通道 14) ── */
     {
         uint8_t savedChannel = R8_ADC_CHANNEL;
         uint8_t savedCfg     = R8_ADC_CFG;
@@ -165,7 +247,7 @@ void Battery_UpdateLevel(void)
         /* 内部 VBAT 通道配置: 上电 + 输入缓冲 + PGA -12dB(1/4) + 采样时钟 3
          * ★ 必须用 -12dB: CH582M ADC 基准=1.05V, VBAT通道=VDD/3,
          *   若用 0dB 则 VDD≥3.15V 时输入端超量程→ADC 饱和在 4095→电压读错 */
-        R8_ADC_CFG    = RB_ADC_POWER_ON | RB_ADC_BUF_EN | ADC_PGA_1_4 | (3 << 6);
+        R8_ADC_CFG    = RB_ADC_POWER_ON | RB_ADC_BUF_EN | ADC_PGA_1_2 | (3 << 6);
         R8_ADC_CHANNEL = 14;   // CH_INTE_VBAT
         R8_ADC_CONVERT = RB_ADC_START;
         while (R8_ADC_CONVERT & RB_ADC_START);
@@ -179,17 +261,9 @@ void Battery_UpdateLevel(void)
     /*
      * VBAT 内部通道: 电压 = VDD / 3，PGA = -12dB (1/4)，基准 = 1.05V bandgap
      * 所以: VDD(mV) = (adcVal * 1050 * 3 * 4) / 4096 = adcVal * 12600 / 4096
-     *
-     * 注: 此公式需要根据实际板子校准。不同芯片的 bandgap
-     *     和分压比有轻微差异，后续可用万用表实测校准。
      */
     vdd_mV = (uint32_t)adcVal * 1050 * 12 / 4096;
 
-    /* ── 电压 → 电量百分比 ──
-     * 简化线性映射: 3.0V → 0%, 4.2V → 100%
-     * 如果是通过 LDO 供电 (固定 3.3V), 则始终读不到 4.2V
-     * TODO: 以后直连电池时使用放电曲线查表
-     */
     if (vdd_mV >= 4200) {
         newLevel = 100;
     } else if (vdd_mV <= 3000) {
@@ -198,13 +272,13 @@ void Battery_UpdateLevel(void)
         newLevel = (uint8_t)((uint32_t)(vdd_mV - 3000) * 100 / 1200);
     }
 
-    /* ── 变化时更新 + 通知 ── */
     if (newLevel != batteryLevel) {
         batteryLevel = newLevel;
         PRINT("[BATT] Level updated: %d%%  (VDD=%d mV, ADC=%d)\n",
               batteryLevel, vdd_mV, adcVal);
         Battery_Notify();
     }
+#endif
 }
 
 /* ════════════════════════════════════════════════════════════════════════════

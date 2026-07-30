@@ -747,17 +747,28 @@ export function connectDevice(deviceId) {
 /**
  * 断开 BLE 连接
  * @param {string} deviceId 设备 ID
+ * ★ 健壮性修复：底层 GATT 已死(僵尸连接)时，uni.closeBLEConnection 既不 success 也不 fail，
+ *   用 success/fail 的 Promise 会永远不 settle → 调用方 showLoading 无限转圈。
+ *   改用 complete 回调 + 硬超时兜底，确保无论链路状态如何都能收口。
  */
 export function disconnectDevice(deviceId) {
-  return new Promise((resolve, reject) => {
-    uni.closeBLEConnection({
-      deviceId,
-      success: () => resolve(),
-      fail: (err) => {
-        console.error('[BLE] 断开连接失败', deviceId, err)
-        reject(err)
-      }
-    })
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => { if (!settled) { settled = true; resolve() } }
+    const hardTimer = setTimeout(() => {
+      console.warn('[BLE] closeBLEConnection 硬超时(3s)，强制收口断开流程', deviceId)
+      finish()
+    }, 3000)
+    try {
+      uni.closeBLEConnection({
+        deviceId,
+        complete: () => { clearTimeout(hardTimer); finish() }
+      })
+    } catch (e) {
+      clearTimeout(hardTimer)
+      console.warn('[BLE] closeBLEConnection 抛异常，强制收口', e)
+      finish()
+    }
   })
 }
 

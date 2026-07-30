@@ -3154,10 +3154,21 @@ export const useBleStore = defineStore('ble', {
     //   → 冻结 RSSI 显示，等 FF02 恢复再解冻，使「后台真断连」及时反映为无信号。
     _startRssiStaleWatchdog() {
       this._clearRssiStaleWatchdog()
+      this._staleSinceMs = 0
       this._rssiStaleWatchdog = setInterval(() => {
         if (!this.connected) return
         if (this._lastFf02Ms && Date.now() - this._lastFf02Ms > 4000) {
           this.displayRssi = -999
+          // ★ 僵尸连接探测：FF02 长时间缺失，可能底层 GATT 已死(Android 未上报断连)。
+          //   累计 20s 后主动做 GATT 探针(_verifyThenDisconnect 会先系统级+GATT 双重确认，
+          //   还活着=Doze 节流转前台则忽略，真死才清理)，避免一直卡在"信号--且连着"。
+          if (!this._staleSinceMs) this._staleSinceMs = Date.now()
+          else if (Date.now() - this._staleSinceMs > 20000 && this.deviceId) {
+            console.warn('[Store] FF02 静默 >20s，主动探测 GATT 是否为僵尸连接')
+            this._verifyThenDisconnect(this.deviceId)
+          }
+        } else {
+          this._staleSinceMs = 0
         }
       }, 1500)
     },
@@ -3200,6 +3211,7 @@ export const useBleStore = defineStore('ble', {
       this.rssiEma = -999
       this._lastFf02Ms = 0
       this._lastRssiDisplayMs = 0
+      this._staleSinceMs = 0
       this._startRssiStaleWatchdog()
     },
 

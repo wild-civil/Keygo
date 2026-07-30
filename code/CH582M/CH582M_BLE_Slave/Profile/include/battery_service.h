@@ -28,6 +28,9 @@ bStatus_t  Battery_AddService(void);
 void       Battery_UpdateLevel(void);
 uint8_t    Battery_GetLevel(void);
 void       Battery_Notify(void);           // 手动触发 Notify
+#ifdef BOARD_HAS_EXT_BAT_ADC
+void       Battery_ADC_Init(void);         // 外部电池 ADC GPIO 初始化 (V04: PB3 闸门 + PA3 模拟输入)
+#endif
 
 #ifdef __cplusplus
 }
