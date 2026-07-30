@@ -149,16 +149,13 @@ static uint8_t  g_spikeConsecutive  = 0;
 static float    g_lastRawRSSI       = RSSI_UNINITIALIZED_F;
 static uint8_t  g_rssiUpdated       = 0;    // ★ 新 Kalman 样本标记
 
-/* ── [OBS_BEGIN] 无App模式观测性（①）：加密链路上升沿检测 + LED 提示 + RSSI 节流打印 ──
+/* ── [OBS_BEGIN] 无App模式观测性（①）：加密链路上升沿检测 + RSSI 节流打印（仅日志，无 LED 提示）──
  *   - g_obsLinkEncrypted：上一拍 LINK_ENCRYPTED 状态，用于检测上升沿（OS bonded 自动重连的标志）
  *   - g_obsRssiTick：RSSI 节流计数器（每 8 拍≈1s 打印一次，仅无App模式）
- *   - g_obsBlink*：OS 加密重连时蓝 LED(PB14) 3 短闪（结束恢复锁态稳态），便于无 App 时肉眼判断重连
- *   低功耗/量产移除：搜索 [OBS_BEGIN]/[OBS_END] 删除相关代码块即可 — [OBS_END] */
+ *   说明：2026-07-30 用户要求移除 OS 重连的蓝 LED 3 短闪提示（与 APP 手动操作保持一致，避免观感混乱），
+ *        此处仅保留日志便于调试；LED 现在只在真实脉冲 / OTA 时亮。— [OBS_END] */
 static uint8_t  g_obsLinkEncrypted  = 0;
 static uint8_t  g_obsRssiTick       = 0;
-static uint8_t  g_obsBlinkLeft      = 0;    // 剩余半周期数（6 = 3 亮灭）
-static uint8_t  g_obsBlinkOn        = 0;    // 当前半周期应为亮=1
-static uint32_t g_obsBlinkNextMs    = 0;
 
 // 状态机
 static uint8_t  g_unlockCounter     = 0;
@@ -512,9 +509,10 @@ void KeyGo_RidePulseHandler(void)
  *   解锁脉冲结束(经 KeyGo_GPIO_PulseEnd 置 g_rideExitStep=2)后，由
  *   SBP_RIDE_EXIT_LOCK_EVT 延迟输出 LOCK 脉冲完成上锁（独立事件，时序确定、兼容 HAL_SLEEP）。
  *   忠实模拟真实电瓶车：骑行中直接锁无效，须先解锁退出骑行才能锁。
- *   手动 LOCK 与 RSSI 自动锁共用本逻辑。
+ *   手动 LOCK、RSSI 自动锁、断连兜底锁(SBP_DISCONNECT_LOCK_EVT)三者共用本逻辑
+ *  （fix14 起去 static 供 peripheral.c 调用：骑行态骤断连若裸发 LOCK 脉冲会被车辆忽略）。
  * ───────────────────────────────────────────────────────────────── */
-static void KeyGo_RideExitThenLock(void)
+void KeyGo_RideExitThenLock(void)
 {
     if (g_keyState != KSTATE_RIDE) return;
     g_keyState     = KSTATE_UNLOCKED;   // 先退出骑行态
@@ -705,14 +703,8 @@ void KeyGo_RssiProcess(int8_t rssi)
  * 状态机
  * ───────────────────────────────────────────────────────────────── */
 
-/* ── [OBS_BEGIN] 无App模式 OS 加密重连 LED 提示触发（仅无App模式，3 短闪）── [OBS_END] */
-static void KeyGo_ObsBlinkTrigger(void)
-{
-    if (!g_encRequired) return;   // 仅无App模式给 LED 提示，避免干扰普通模式锁态指示
-    g_obsBlinkLeft   = 6;         // 3×(ON+OFF)
-    g_obsBlinkOn     = 1;
-    g_obsBlinkNextMs = Peripheral_GetSystemMs();
-}
+/* ── [OBS_BEGIN] 无App模式 OS 加密重连 LED 提示：2026-07-30 已移除（用户要求，与 APP 手动操作一致）。
+ *   原 KeyGo_ObsBlinkTrigger() 蓝 LED 3 短闪逻辑整段删除，仅保留下方 RSSI/重连日志。— [OBS_END] */
 
 // ★ v3.36.3-fix8: 进近解锁动作封装 — 电瓶车且开启「靠近骑行」偏好时进入骑行, 否则普通解锁。
 //   骑行态由 KeyGo_Ride() 内部置 KSTATE_RIDE（=已解锁语义：离场锁车 / LED 亮 / 状态报文报 RIDE），
@@ -738,32 +730,14 @@ void KeyGo_ProcessStateMachine(void)
         uint8_t encNow = linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0;
         if (encNow && !g_obsLinkEncrypted) {
             PRINT("[OBS] LINK_ENCRYPTED (OS bonded reconnect — phone near & paired)\n");
-            KeyGo_ObsBlinkTrigger();
             Bonding_OnLinkEncrypted(peripheralConnList.connHandle);  /* ★ 2026-07-21 (v3.36.2-fix): 无 App 重连识别 owner，启用 per-phone 阈值 */
         } else if (!encNow && g_obsLinkEncrypted) {
             PRINT("[OBS] LINK_PLAIN (encryption dropped)\n");
         }
         g_obsLinkEncrypted = encNow;
 
-        /* LED 提示驱动：OS 重连后闪几下蓝 LED 提示（不占 TMOS 事件位，走状态机轮询）。
-         *   结束直接灭（平时不亮，LED 仅跟随脉冲 / 重连提示）。
-         *   ★ 修复：若动作脉冲(解锁/上锁等)已开始，直接【取消】重连提示而非暂停——
-         *     否则 OBS 3 闪会与解锁脉冲叠加(脉冲期间暂停、脉冲结束又续上)，造成「重连闪 4 下」的混乱观感。
-         *     动作脉冲自身（解锁=亮一下）即是最直观的「已连接且在范围内」反馈，无需再叠 OBS。 */
-        if (g_obsBlinkLeft > 0) {
-            if (g_actionActive) {
-                g_obsBlinkLeft = 0;   // 让位给动作脉冲（不操作 LED，亮灭由脉冲控制）
-            } else if (Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
-                if (g_obsBlinkOn) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
-                else              GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
-                g_obsBlinkOn   = g_obsBlinkOn ? 0 : 1;
-                g_obsBlinkLeft--;
-                g_obsBlinkNextMs = Peripheral_GetSystemMs() + 160;  // ~100ms 半周期
-                if (g_obsBlinkLeft == 0) {
-                    GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 提示结束灭
-                }
-            }
-        }
+        /* ★ 2026-07-30: 移除 OS 重连蓝 LED 3 短闪提示（用户要求，与 APP 手动操作保持一致）。
+         *   LED 现在只在真实脉冲(KeyGo_Unlock/Lock/Ride/...)与 OTA 时亮，无 App 重连仅靠下方 RSSI 日志观测。 */
 
         /* RSSI 节流打印（仅无App模式，≈1s 一次，便于调阈值/看重连后 RSSI） */
         if (g_encRequired) {

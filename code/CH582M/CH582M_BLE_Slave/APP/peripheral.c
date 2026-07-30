@@ -672,12 +672,21 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
          *  双重校验（+g_deviceConnected）防止极端竞态：
          *  取消指令发出前 TMOS 已调度此事件 → 仍会触发 → 但 g_deviceConnected==1 跳过 */
         if (!g_deviceConnected && (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE)) {
-            PRINT("[SAFETY] disconnect lock timer expired, locking\n");
-            KeyGo_Lock();
-            g_keyState = KSTATE_LOCKED;
-            /* ★ v3.16-#23: 断连状态下 NotifyStatus 无法发出（函数首行检查
-             *   !g_deviceConnected → 立即 return），此处不调用避免死代码。
-             *   锁车状态变更在下次重连后的首条周期性 Status Notify 中反映。 */
+            if (g_keyState == KSTATE_RIDE) {
+                /* ★ fix14: 骑行态不能裸发 LOCK 脉冲（电瓶车骑行中忽略锁车），
+                 *   必须走「先解锁退出骑行 → 2s → 锁车」链（KeyGo_RideExitThenLock，
+                 *   与手动 LOCK / RSSI 自动锁同一逻辑；fix13 已保证该链断连下可靠走完）。
+                 *   否则骤然断连(关蓝牙/信号骤失，RSSI 未及跌破锁车阈值)时车辆永远锁不上。 */
+                PRINT("[SAFETY] disconnect lock timer expired in RIDE, chain unlock->2s->lock\n");
+                KeyGo_RideExitThenLock();
+            } else {
+                PRINT("[SAFETY] disconnect lock timer expired, locking\n");
+                KeyGo_Lock();
+                g_keyState = KSTATE_LOCKED;
+                /* ★ v3.16-#23: 断连状态下 NotifyStatus 无法发出（函数首行检查
+                 *   !g_deviceConnected → 立即 return），此处不调用避免死代码。
+                 *   锁车状态变更在下次重连后的首条周期性 Status Notify 中反映。 */
+            }
         } else {
             PRINT("[SAFETY] disconnect lock timer expired, but device reconnected — skip\n");
         }

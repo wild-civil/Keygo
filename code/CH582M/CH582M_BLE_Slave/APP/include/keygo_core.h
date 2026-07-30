@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix13"  /* ★ v3.36.3-fix13 (2026-07-30): 修无App模式"骑走自动退出骑行"锁车被取消——断连时 KeyGo_ResetState 不再清零 g_rideExitStep、Peripheral_LinkTerminated 不再 stop SBP_RIDE_EXIT_LOCK_EVT，使"先解锁→2s→锁车"的锁车在手机已远离(连接必断)时仍可靠触发；KeyGo_RideExitLockHandler 的 g_rideExitStep!=2 闸门防误锁。另：OBS 无App重连3闪 LED 让位给进行中脉冲(!g_actionActive)，避免与锁车脉冲抢蓝 LED。LED 闪3下本身是无App OS重连指示(LINK_ENCRYPTED 上升沿)，非多执行的锁车。前序 fix12 开 HAL_SLEEP 低功耗。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix16"  /* ★ v3.36.3-fix16 (2026-07-30): 移除无App模式 OS 重连蓝 LED 3 短闪提示（用户要求，与 APP 手动操作保持一致，避免观感混乱）——删除 KeyGo_ObsBlinkTrigger 函数、其驱动循环、上升沿待判与 RSSI 决策块、g_obsBlink* 变量；保留 LINK_ENCRYPTED/RSSI 日志供调试。LED 现在只在真实脉冲/OTA 时亮。前序 fix14: 修骑行态骤然断连 SBP_DISCONNECT_LOCK_EVT 裸发 LOCK 被电瓶车忽略→锁不上，断连兜底锁 KSTATE_RIDE 改走 KeyGo_RideExitThenLock「先解锁→2s→锁车」链(去 static 导出)。前序 fix13: 修无App"骑走自动退出骑行"锁车被取消 + OBS 重连3闪与解锁脉冲叠加"闪4下"。前序 fix12 开 HAL_SLEEP 低功耗。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
@@ -204,5 +204,6 @@ void KeyGo_SaveEbikeProx(uint8_t v);       // ★ 2026-07-19: 持久化电瓶车
 void KeyGo_Ride(void);                      // ebike: 输出「快速双击」脉冲
 void KeyGo_RidePulseHandler(void);          // SBP_GPIO_RIDE_EVT 双脉冲序列回调
 void KeyGo_RideExitLockHandler(void);       // ★ SBP_RIDE_EXIT_LOCK_EVT 骑行退出链式上锁回调
+void KeyGo_RideExitThenLock(void);          // ★ fix14: 骑行态「先解锁→2s→锁车」链入口（手动/RSSI自动锁/断连兜底锁共用）
 
 #endif
