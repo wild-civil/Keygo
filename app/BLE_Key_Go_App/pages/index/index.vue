@@ -169,8 +169,10 @@
             <view class="reconnect-info">
               <text class="reconnect-name">{{ d.displayName }}</text>
               <text class="reconnect-mac">{{ d.mac }}</text>
-              <text v-if="d.customName" class="device-alias-tag">已命名</text>
-              <text v-if="d.isDefault" class="device-default-tag">默认</text>
+              <view v-if="d.customName || d.isDefault" class="device-tags">
+                <text v-if="d.customName" class="device-alias-tag">已命名</text>
+                <text v-if="d.isDefault" class="device-default-tag">默认</text>
+              </view>
             </view>
             <view class="known-item-actions">
               <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
@@ -212,8 +214,10 @@
             <text class="device-name">{{ deviceDisplayName(device) }}</text>
             <text class="device-id">{{ device.deviceId }}</text>
             <text v-if="device.nameIsFallback" class="device-occupied-tag">⚠ 设备占用中</text>
-            <text v-if="bleStore.customNameForMac(device.deviceId)" class="device-alias-tag">已命名</text>
-            <text v-if="bleStore.isPairedDevice(device.deviceId)" class="device-paired-tag">✓ 已配对</text>
+            <view v-if="bleStore.customNameForMac(device.deviceId) || bleStore.isPairedDevice(device.deviceId)" class="device-tags">
+              <text v-if="bleStore.customNameForMac(device.deviceId)" class="device-alias-tag">已命名</text>
+              <text v-if="bleStore.isPairedDevice(device.deviceId)" class="device-paired-tag">✓ 已配对</text>
+            </view>
           </view>
           <view class="device-rssi">
             <text class="device-rssi-val">{{ device.RSSI }}</text>
@@ -1091,6 +1095,23 @@ async function handleSetName() {
 .device-rssi-unit { font-size: 18rpx; color: var(--text-muted); }
 .device-arrow { font-size: 36rpx; color: var(--text-muted); }
 
+/* ★ 2026-07-30: 「已命名 / 默认 / 已配对」等徽章横向排布容器 */
+.device-tags {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8rpx;
+  margin-top: 6rpx;
+  min-height: 28rpx;
+}
+.device-tags .device-alias-tag,
+.device-tags .device-default-tag,
+.device-tags .device-paired-tag {
+  align-self: auto;
+  margin-top: 0;
+  margin-left: 0;
+}
 /* ★ v3.36.3-fix5: 「已命名」徽章（设备已设自定义名），扫描列表/重连卡通用 */
 .device-alias-tag {
   align-self: flex-start;

@@ -301,6 +301,7 @@ export const useBleStore = defineStore('ble', {
     _notifyTimer: null,
     _reconnectGuard: 0,            // 重连会话锁，蓝牙关闭时递增
     _reconnecting: false,          // ★ 2026-07-30: 重连并发守卫，防止多条重连路径同时进入踩状态
+    _reconnectPromise: null,       // ★ 2026-07-30: 进行中的重连 Promise（重入时复用，避免假成功/重复连接）
     _bondingInProgress: false,     // ★ 2026-07-16: 配对(_triggerBond)期间断开 GATT 让 OS 配对，抑制 store 自动重连
     _deviceNames: null,            // ★ v3.8: { [SN]: { name, lastSeen } } 设备名称本地缓存，null=未加载
     _customNamesByMac: (() => { try { return uni.getStorageSync('ble_device_custom_names') || {} } catch (e) { return {} } })(), // ★ v3.36.3-fix5: 按 MAC 索引的本机自定义名副本(由 customDeviceName 持久化而来)，供断连后的扫描列表/重连卡统一显示
@@ -1465,8 +1466,8 @@ export const useBleStore = defineStore('ble', {
      *   与本意(挡掉假断连)完全相反。修复策略：
      *   - getConnectedBluetoothDevices 命中(Android 可靠) → 立判假断连，忽略（快速路径）；
      *   - 查不到 / 查询失败 → 不据此判连，进入「FF02 活性缓刑」(_startDisconnectProbation)二次确认：
-     *       缓刑窗口(2s)内收到 FF02(链接真活) → 假断连，忽略；窗口内无 FF02(真断连) → _handleDisconnect。
-     *   副作用：真断连检测延迟 ≈ 缓刑窗口(2s)，可接受（优先避免误判）。
+     *       缓刑窗口(3s)内收到 FF02(链接真活) → 假断连，忽略；窗口内无 FF02(真断连) → _handleDisconnect。
+     *   副作用：真断连检测延迟 ≈ 缓刑窗口(3s)，可接受（优先避免误判，且远小于旧 24s）。
      *   ★ 2026-07-30: 二次确认由 RSSI 探针改为 FF02 流量判别。原因：实测设备重启后，Android 对
      *     陈旧 GATT 会让 getBLEDeviceRSSI / getBLEDeviceServices 从缓存秒回成功(链路实际已死)，
      *     RSSI 探针误判"仍活" → 真断连被忽略 20s+(用户两次复现)。FF02 是固件每 ~1s 的实时推送，
@@ -1509,7 +1510,7 @@ export const useBleStore = defineStore('ble', {
       //     忽略 20s+(用户两次复现)。故【不再用任何 GATT 缓存查询做活性判别】，改用最可靠的
       //     "链接真活"证据——【FF02 实时流量】：固件每 ~1s 推一次 FF02，链接真活则持续到达。
       //   进入「活性缓刑」窗口：期间收到 FF02 → 链接真活(假断连)忽略；窗口内无 FF02 → 真断连。
-      //   缓刑 2s(>固件 1s 推送周期)确保观察到断连事件「之后」是否有 FF02 续流，
+      //   缓刑 3s(>固件 1s 推送周期，含 >30% 余量应对偶发丢包)确保观察到断连事件「之后」是否有 FF02 续流，
       //   既覆盖边界情况，又把真断连检出延迟压到 ~2s（远低于旧 20s+）。
       this._startDisconnectProbation(deviceId)
     },
@@ -1520,14 +1521,14 @@ export const useBleStore = defineStore('ble', {
      *   （锁屏/系统误报，FF02 仍在持续推送）。
      *   不读 RSSI/GATT 缓存（Android 对重启设备的陈旧 GATT 会缓存秒回 → 误判"仍活"），
      *   而是观察【断连事件之后】是否有 FF02 续流：
-     *     - 缓刑窗口(2s)内收到 FF02 → 链接真活 → 假断连，忽略本次事件（不翻 connected）；
+     *     - 缓刑窗口(3s)内收到 FF02 → 链接真活 → 假断连，忽略本次事件（不翻 connected）；
      *     - 窗口内无 FF02 → 链接确已死 → 真断连，执行清理。
      *   窗口 > 固件 1s 推送周期，确保能观察到事件后的续流，覆盖"FF02 恰好在事件前到达"的边界。
      */
     _startDisconnectProbation(deviceId) {
       if (this._disconnectProbing) return   // 已有缓刑在跑，避免重复定时器
       this._disconnectProbing = true
-      console.log('[Store] 系统列表无设备 → 进入 FF02 活性缓刑(2s) 判定真/假断连...')
+      console.log('[Store] 系统列表无设备 → 进入 FF02 活性缓刑(3s) 判定真/假断连...')
       this._disconnectProbeTimer = setTimeout(() => {
         this._disconnectProbing = false
         this._disconnectProbeTimer = null
@@ -1541,7 +1542,7 @@ export const useBleStore = defineStore('ble', {
         }
         console.log('[Store] 活性缓刑超时且无 FF02 续流 → 真断连，执行清理')
         this._handleDisconnect()
-      }, 2000)
+      }, 3000)
     },
 
     /**
@@ -2201,13 +2202,17 @@ export const useBleStore = defineStore('ble', {
      * ★ v3.6-fixD: 会话锁机制，防止蓝牙关闭后仍在执行的 _doReconnect 覆盖状态
      */
     async _doReconnect() {
-      // ★ 2026-07-30: 重连并发守卫——防止 forceStale 触发 + 心跳 tryAutoConnect 同时进入，
-      //   导致两个 connectDevice / 适配器重置并发、状态互相踩。已有重连进行时直接返回。
-      if (this._reconnecting) {
-        console.log('[Store] ⚠ _doReconnect 重入被拦（已有重连进行中）')
-        return
+      // ★ 2026-07-30: 重连并发守卫——防止 forceStale 触发 + 心跳 tryAutoConnect + 舒适模式扫描
+      //   同时进入，导致两个 connectDevice / 适配器重置并发、状态互相踩。
+      //   关键：重入时不再"裸 return"（会被调用方误判为成功），而是返回【进行中的同一次重连
+      //   Promise】，让所有入口(异常断连 / 心跳 / 扫描 / 手动点击)都 await 真实结果，避免
+      //   "重连成功！"的假成功，也避免重复发起连接互相踩。
+      if (this._reconnecting && this._reconnectPromise) {
+        console.log('[Store] ⚠ _doReconnect 重入：复用进行中的重连 Promise（避免假成功/重复连接）')
+        return this._reconnectPromise
       }
       this._reconnecting = true
+      this._reconnectPromise = (async () => {
       try {
       // ★ v3.6-fixD: 记录此轮重连的会话锁版本号
       const guard = this._reconnectGuard
@@ -2321,7 +2326,10 @@ export const useBleStore = defineStore('ble', {
       this._finalizeConnection(this.deviceId)
       } finally {
         this._reconnecting = false
+        this._reconnectPromise = null
       }
+      })()
+      return this._reconnectPromise
     },
 
     /**

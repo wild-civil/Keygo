@@ -152,7 +152,7 @@ static uint8_t  g_rssiUpdated       = 0;    // ★ 新 Kalman 样本标记
 /* ── [OBS_BEGIN] 无App模式观测性（①）：加密链路上升沿检测 + LED 提示 + RSSI 节流打印 ──
  *   - g_obsLinkEncrypted：上一拍 LINK_ENCRYPTED 状态，用于检测上升沿（OS bonded 自动重连的标志）
  *   - g_obsRssiTick：RSSI 节流计数器（每 8 拍≈1s 打印一次，仅无App模式）
- *   - g_obsBlink*：OS 加密重连时 PB4 指示灯 3 短闪（结束恢复锁态稳态），便于无 App 时肉眼判断重连
+ *   - g_obsBlink*：OS 加密重连时蓝 LED(PB14) 3 短闪（结束恢复锁态稳态），便于无 App 时肉眼判断重连
  *   低功耗/量产移除：搜索 [OBS_BEGIN]/[OBS_END] 删除相关代码块即可 — [OBS_END] */
 static uint8_t  g_obsLinkEncrypted  = 0;
 static uint8_t  g_obsRssiTick       = 0;
@@ -746,15 +746,22 @@ void KeyGo_ProcessStateMachine(void)
         g_obsLinkEncrypted = encNow;
 
         /* LED 提示驱动：OS 重连后闪几下蓝 LED 提示（不占 TMOS 事件位，走状态机轮询）。
-         *   结束直接灭（平时不亮，LED 仅跟随脉冲 / 重连提示） */
-        if (g_obsBlinkLeft > 0 && !g_actionActive && Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
-            if (g_obsBlinkOn) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
-            else              GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
-            g_obsBlinkOn   = g_obsBlinkOn ? 0 : 1;
-            g_obsBlinkLeft--;
-            g_obsBlinkNextMs = Peripheral_GetSystemMs() + 160;  // ~100ms 半周期
-            if (g_obsBlinkLeft == 0) {
-                GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 提示结束灭
+         *   结束直接灭（平时不亮，LED 仅跟随脉冲 / 重连提示）。
+         *   ★ 修复：若动作脉冲(解锁/上锁等)已开始，直接【取消】重连提示而非暂停——
+         *     否则 OBS 3 闪会与解锁脉冲叠加(脉冲期间暂停、脉冲结束又续上)，造成「重连闪 4 下」的混乱观感。
+         *     动作脉冲自身（解锁=亮一下）即是最直观的「已连接且在范围内」反馈，无需再叠 OBS。 */
+        if (g_obsBlinkLeft > 0) {
+            if (g_actionActive) {
+                g_obsBlinkLeft = 0;   // 让位给动作脉冲（不操作 LED，亮灭由脉冲控制）
+            } else if (Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
+                if (g_obsBlinkOn) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
+                else              GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
+                g_obsBlinkOn   = g_obsBlinkOn ? 0 : 1;
+                g_obsBlinkLeft--;
+                g_obsBlinkNextMs = Peripheral_GetSystemMs() + 160;  // ~100ms 半周期
+                if (g_obsBlinkLeft == 0) {
+                    GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 提示结束灭
+                }
             }
         }
 

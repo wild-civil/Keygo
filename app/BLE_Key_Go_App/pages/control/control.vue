@@ -25,8 +25,10 @@
               <view class="reconnect-info">
                 <text class="reconnect-name">{{ d.displayName }}</text>
                 <text class="reconnect-mac">{{ d.mac }}</text>
-                <text v-if="d.customName" class="device-alias-tag">已命名</text>
-                <text v-if="d.isDefault" class="device-default-tag">默认</text>
+                <view v-if="d.customName || d.isDefault" class="device-tags">
+                  <text v-if="d.customName" class="device-alias-tag">已命名</text>
+                  <text v-if="d.isDefault" class="device-default-tag">默认</text>
+                </view>
               </view>
               <view class="known-item-actions">
                 <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
@@ -479,6 +481,23 @@ async function onToggleProxRide(v) {
   font-size: 22rpx;
 }
 .default-btn:active { opacity: 0.7; }
+/* ★ 2026-07-30: 重连卡内「已命名 / 默认」等徽章横向排布容器（不挤占名称/地址的纵向布局） */
+.device-tags {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8rpx;
+  margin-top: 6rpx;
+  min-height: 28rpx;
+}
+.device-tags .device-alias-tag,
+.device-tags .device-default-tag,
+.device-tags .device-paired-tag {
+  align-self: auto;
+  margin-top: 0;
+  margin-left: 0;
+}
 .device-default-tag {
   align-self: flex-start;
   margin-top: 4rpx;

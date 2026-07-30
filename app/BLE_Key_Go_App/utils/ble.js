@@ -724,19 +724,23 @@ export function connectDevice(deviceId) {
           success: () => {
             console.log('[BLE] 连接成功', deviceId)
             _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE   // ★ 连接后 10007 宽限期（加密握手窗口）
-            setTimeout(() => {
-              uni.setBLEMTU({
-                deviceId,
-                mtu: 512,
-                success: (res) => {
-                  console.log('[BLE] MTU 设置成功:', res.mtu)
-                },
-                fail: (err) => {
-                  console.warn('[BLE] MTU 设置失败（可能使用默认20字节）:', err.errMsg)
-                },
-                complete: () => finish(() => resolve())
-              })
-            }, 500)
+            // ★ 2026-07-30: MTU 协商改为「尽力而为 + 自身超时」，绝不再阻塞连接建立。
+            //   原实现在 setBLEMTU 的 complete 里才 finish(resolve)，但设备重启后重连，
+            //   createBLEConnection 已 success 而 setBLEMTU 的 complete 不回调（uni-app/固件 MTU 时序问题）
+            //   → connectDevice 永不 resolve → _doReconnect 永久卡死 → _reconnecting 恒 true →
+            //     后续所有重连(含手动点击)被"重入被拦"挡掉，表现为"不能自动重连 / 点了没反应"。
+            //   现：连接成功即 resolve（MTU 默认 20 字节已可工作），MTU 设置异步重试、独立 3s 超时兜底。
+            const mtuTimer = setTimeout(() => {
+              console.warn('[BLE] setBLEMTU 超时(3s)，连接已建立，跳过 MTU 协商（使用默认 MTU）')
+            }, 3000)
+            uni.setBLEMTU({
+              deviceId,
+              mtu: 512,
+              success: (res) => { console.log('[BLE] MTU 设置成功:', res.mtu) },
+              fail: (err) => { console.warn('[BLE] MTU 设置失败（使用默认20字节）:', err.errMsg) },
+              complete: () => { clearTimeout(mtuTimer) }
+            })
+            finish(() => resolve())
           },
           fail: (err) => {
             const msg = String(err?.errMsg || '')
