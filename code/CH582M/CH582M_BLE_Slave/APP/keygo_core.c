@@ -179,13 +179,9 @@ static uint8_t  g_deviceMode       = 0;     // ★ Phase 2: 设备模式 0=car(�
 //   必须存固件 DataFlash: 靠近解锁由固件 RSSI 状态机驱动(无App模式也能触发), 故偏好不能只放 App 本地。
 static uint8_t  g_ebikeProxMode    = 0;     // ★ 0=仅解锁(默认) / 1=靠近直接骑行(仅 ebike 模式生效)
 
-/* [LED_BEGIN] ──────── 后备箱 LED 闪烁状态机 ────────
- *   g_ledBlinkLocked=1 时 KeyGo_Unlock/Lock 不会改变 LED 状态
- *   g_ledTrunkBlinkToggle=0~9 共 10 次翻转 = 5 次亮灭 (500ms ON + 500ms OFF per cycle)
- *   低功耗: 去掉 LED 时注释掉这两个变量 ——————————— [LED_END] */
-static uint8_t  g_ledBlinkLocked     = 0;
-static uint8_t  g_ledTrunkBlinkToggle = 0;
-static uint8_t  g_ledRideBlinkToggle  = 0;   // ★ Phase 2: 骑行 LED 闪烁翻转计数 (4 次 = 2 亮灭)
+/* ★ LED 跟随脉冲：蓝 LED(PB14) 仅在 GPIO 控制脉冲 ON 时亮，脉冲结束灭（平时全灭省电）。
+ *   不再有独立闪烁状态机（已删除 SBP_LED_*_BLINK_EVT 腾出事件位）。
+ *   红 LED(PB15) 仅用于长按恢复出厂重大提示，走独立 GPIO 逻辑，不受影响。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 前向声明
@@ -328,10 +324,7 @@ static void KeyGo_FactoryReset_Poll(void)
             g_frLedOn     = 0;
             g_frFast      = 0;
             g_frLastPct   = 0;
-            /* 停掉可能残留的 LED 闪烁任务，独占红 LED 做反馈 */
-            tmos_stop_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT);
-            tmos_stop_task(Peripheral_TaskID, SBP_LED_RIDE_BLINK_EVT);
-            g_ledBlinkLocked = 0;
+            /* 独占红 LED 做反馈：蓝 LED 灭（平时本就灭，这里确保无残留脉冲亮） */
             GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 恢复出厂期间关闭蓝 LED, 仅红 LED 闪烁提示
             KeyGo_FactoryReset_SendBle("RESET:ARM");
             PRINT("[FR] button down, arming...\n");
@@ -341,8 +334,7 @@ static void KeyGo_FactoryReset_Poll(void)
 
     if (g_frState == 1) {  // arming：按住累计中
         if (!pressed) {    // 提前松开 → 取消
-            if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
-            else GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
+            GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 蓝 LED 灭(取消复位, 平时不亮)
             GPIOB_ResetBits(PIN_LED_RED_GPIO);   // 红 LED 灭(取消复位)
             KeyGo_FactoryReset_SendBle("RESET:CANCEL");
             PRINT("[FR] released early, cancelled\n");
@@ -429,9 +421,7 @@ void KeyGo_Unlock(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();  // ★ v3.15-#16: 看门狗启动时间
     g_pulsePinMask  = PIN_UNLOCK_GPIO;
-    /* [LED_BEGIN] 解锁 → 蓝 LED 亮 (常规反馈)
-     *   后备箱闪烁期间跳过 (g_ledBlinkLocked=1)，闪烁结束后恢复 [LED_END] */
-    if (!g_ledBlinkLocked) { GPIOB_SetBits(PIN_LED_BLUE_GPIO); }
+    GPIOB_SetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：解锁脉冲期间蓝 LED 亮，PulseEnd 时灭
     PRINT("[KEY] unlock\n");
     GPIOB_SetBits(PIN_UNLOCK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
@@ -444,9 +434,7 @@ void KeyGo_Lock(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();  // ★ v3.15-#16: 看门狗启动时间
     g_pulsePinMask  = PIN_LOCK_GPIO;
-    /* [LED_BEGIN] 锁车 → 蓝 LED 灭 (常规反馈)
-     *   后备箱闪烁期间跳过，闪烁结束后恢复 [LED_END] */
-    if (!g_ledBlinkLocked) { GPIOB_ResetBits(PIN_LED_BLUE_GPIO); }
+    GPIOB_SetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：锁车脉冲期间蓝 LED 亮（按下多久亮多久），PulseEnd 时灭
     PRINT("[KEY] lock\n");
     GPIOB_SetBits(PIN_LOCK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
@@ -459,14 +447,7 @@ void KeyGo_Trunk(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();  // ★ v3.15-#16: 看门狗启动时间
     g_pulsePinMask  = PIN_TRUNK_GPIO;
-    /* [LED_BEGIN] 后备箱 → 蓝 LED 闪烁 5 次 (500ms ON / 500ms OFF ×5 周期 = 5s)
-     *   设置 g_ledBlinkLocked=1 防止闪烁期间 Unlock/Lock 覆盖 LED [LED_END] */
-    if (!g_ledBlinkLocked) {
-        g_ledBlinkLocked = 1;
-        g_ledTrunkBlinkToggle = 0;
-        GPIOB_SetBits(PIN_LED_BLUE_GPIO);            // 第 1 个 500ms: 蓝 LED ON
-        tmos_start_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT, LED_TRUNK_BLINK_TICKS);
-    }
+    GPIOB_SetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：后备箱长按 5s 期间蓝 LED 亮，PulseEnd 时灭
     PRINT("[KEY] trunk\n");
     GPIOB_SetBits(PIN_TRUNK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_TRUNK_TICKS);
@@ -487,11 +468,12 @@ void KeyGo_Other(void)
 
 /* ─────────────────────────────────────────────────────────────────
  * ★ Phase 2: ebike 骑行 — 输出「快速双击」脉冲（模拟电动车遥控双击启动骑行）
- *   序列: ON 100ms → OFF 150ms → ON 100ms → OFF。由 KeyGo_RidePulseHandler
+ *   序列: ON(RIDE_HALF_TICKS≈350ms) → OFF(RIDE_GAP_TICKS≈200ms) → ON(RIDE_HALF_TICKS≈350ms) → OFF。
+ *   比原 100/150ms 略慢，肉眼清晰识别为「快速按两下」而非常亮。由 KeyGo_RidePulseHandler
  *   按 g_rideStep 推进。仅 ebike 模式调用；car 模式由 HandleCommand 直接拒绝。
  * ───────────────────────────────────────────────────────────────── */
 static uint8_t g_rideStep = 0;
-static uint8_t g_rideExitStep = 0;   // ★ 骑行退出链式上锁状态: 0=空闲 1=解锁脉冲中(等 SBP_GPIO_PULSE_END_EVT) 2=解锁完成(等状态机轮询间隙后上锁)
+static uint8_t g_rideExitStep = 0;   // ★ 骑行退出链式上锁状态: 0=空闲 1=解锁脉冲中(等 SBP_GPIO_PULSE_END_EVT) 2=解锁完成(等 SBP_RIDE_EXIT_LOCK_EVT 上锁)
 
 void KeyGo_Ride(void)
 {
@@ -499,19 +481,10 @@ void KeyGo_Ride(void)
     g_keyState = KSTATE_RIDE;      // ★ v3.36.3-fix8: 骑行态=已解锁语义；状态报文 st 报 "RIDE"
     if (g_rideStep != 0) return;   // 上一轮双脉冲未结束，忽略（keyState 已置 RIDE）
     g_rideStep = 0;
-    GPIOB_SetBits(PIN_RIDE_GPIO);  // 第 1 个脉冲 ON（继电器控制，与 LED 解耦）
+    GPIOB_SetBits(PIN_RIDE_GPIO);          // 第 1 个脉冲 ON（继电器控制）
+    GPIOB_SetBits(PIN_LED_BLUE_GPIO);      // ★ LED 跟随脉冲：RIDE 双脉冲期间蓝 LED 同步闪两下（见 KeyGo_RidePulseHandler）
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_HALF_TICKS);
-
-    /* [LED_BEGIN] 骑行 → 蓝 LED 闪烁 2 次 (500ms ON / 500ms OFF ×2 = 2s)
-     *   与后备箱同机制：独立事件 + 干净状态机，结束可靠恢复，杜绝「卡死」
-     *   设置 g_ledBlinkLocked=1 防止闪烁期间 Unlock/Lock 覆盖 LED [LED_END] */
-    if (!g_ledBlinkLocked) {
-        g_ledBlinkLocked = 1;
-        g_ledRideBlinkToggle = 0;
-        GPIOB_SetBits(PIN_LED_BLUE_GPIO);            // 第 1 个 500ms: 蓝 LED ON
-        tmos_start_task(Peripheral_TaskID, SBP_LED_RIDE_BLINK_EVT, LED_RIDE_BLINK_TICKS);
-    }
-    PRINT("[RIDE] ride start (ebike), led blink 2x\n");
+    PRINT("[RIDE] ride start (ebike), led blink 2x (pulse-follow)\n");
 }
 
 void KeyGo_RidePulseHandler(void)
@@ -519,12 +492,15 @@ void KeyGo_RidePulseHandler(void)
     g_rideStep++;
     if (g_rideStep == 1) {              // 第 1 个脉冲 OFF
         GPIOB_ResetBits(PIN_RIDE_GPIO);
+        GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随：同步灭
         tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_GAP_TICKS);
     } else if (g_rideStep == 2) {       // 第 2 个脉冲 ON
         GPIOB_SetBits(PIN_RIDE_GPIO);
+        GPIOB_SetBits(PIN_LED_BLUE_GPIO);     // ★ LED 跟随：同步亮
         tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_HALF_TICKS);
-    } else {                            // 第 2 个脉冲 OFF，结束（LED 由独立事件负责恢复）
+    } else {                            // 第 2 个脉冲 OFF，结束
         GPIOB_ResetBits(PIN_RIDE_GPIO);
+        GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随：结束灭
         g_rideStep = 0;
         PRINT("[RIDE] ride pulse end\n");
     }
@@ -534,7 +510,7 @@ void KeyGo_RidePulseHandler(void)
  * ★ 电瓶车骑行模式「一键退出并锁车」：骑行态(KSTATE_RIDE)收到 LOCK 时，
  *   先输出 UNLOCK 脉冲退出骑行（车辆不会响应锁车脉冲，必须先进解锁），
  *   解锁脉冲结束(经 KeyGo_GPIO_PulseEnd 置 g_rideExitStep=2)后，由
- *   KeyGo_ProcessStateMachine 在状态机轮询间隙(~125ms)输出 LOCK 脉冲完成上锁。
+ *   SBP_RIDE_EXIT_LOCK_EVT 延迟输出 LOCK 脉冲完成上锁（独立事件，时序确定、兼容 HAL_SLEEP）。
  *   忠实模拟真实电瓶车：骑行中直接锁无效，须先解锁退出骑行才能锁。
  *   手动 LOCK 与 RSSI 自动锁共用本逻辑。
  * ───────────────────────────────────────────────────────────────── */
@@ -548,18 +524,37 @@ static void KeyGo_RideExitThenLock(void)
     PRINT("[LOCK] ride active → unlock-exit then lock (chained)\n");
 }
 
+/* ★ 骑行退出链式上锁：解锁脉冲结束后由 SBP_RIDE_EXIT_LOCK_EVT 触发，
+ *   输出 LOCK 脉冲完成「退出骑行 → 上锁」。独立事件驱动，时序确定且兼容 HAL_SLEEP。
+ *   原实现借状态机 125ms 轮询间隙上锁，已废弃（见 KeyGo_ProcessStateMachine 移除处）。 */
+void KeyGo_RideExitLockHandler(void)
+{
+    if (g_rideExitStep != 2) return;   // 仅处理「解锁脉冲已结束」后的上锁
+    g_rideExitStep = 0;
+    g_keyState     = KSTATE_LOCKED;
+    KeyGo_Lock();
+    KeyGo_NotifyStatus();
+    PRINT("[LOCK] ride-exit → lock done (event-driven)\n");
+}
+
 /*
  * TMOS 事件回调：脉冲时间到达，复位 GPIO 引脚
  */
 void KeyGo_GPIO_PulseEnd(void)
 {
     GPIOB_ResetBits(g_pulsePinMask);
+    GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：脉冲结束蓝 LED 灭
     g_pulsePinMask  = 0;
     g_actionActive  = 0;
-    /* ★ 骑行退出链式上锁：本脉冲是「解锁退出骑行」的脉冲 → 标记待状态机间隙上锁 */
+    /* ★ 骑行退出链式上锁：本脉冲是「解锁退出骑行」的脉冲 → 延迟启动独立事件输出 LOCK
+     *   （不再依赖状态机轮询，HAL_SLEEP 下更可靠；时序由 RIDE_EXIT_LOCK_DELAY_TICKS 决定） */
     if (g_rideExitStep == 1) {
         g_rideExitStep = 2;
-        PRINT("[LOCK] ride-exit unlock pulse done, pending lock\n");
+        /* ★★★ 想调「结束骑行模式中间的间隔」(先解锁退出骑行 → 隔多久再上锁) 就改这里用到的宏：
+         *   peripheral.h 里的 RIDE_EXIT_LOCK_DELAY_TICKS（当前 3200 tick ≈ 2s）。
+         *   嫌长就调小（如 1600≈1s），嫌短就调大。改这一处即可，勿动此处调用。★★★ */
+        tmos_start_task(Peripheral_TaskID, SBP_RIDE_EXIT_LOCK_EVT, RIDE_EXIT_LOCK_DELAY_TICKS);
+        PRINT("[LOCK] ride-exit unlock pulse done, schedule lock evt\n");
     }
     PRINT("[KEY] pulse end\n");
 }
@@ -599,63 +594,9 @@ void KeyGo_KeyPowerCheck(void)
     }
 }
 
-/* [LED_BEGIN] ──────── 后备箱 LED 闪烁 TMOS 回调 ────────
- *   500ms 周期翻转 LED(PB15)，共 10 次翻转 = 5 次亮灭循环
- *   完成后恢复 LED 到当前锁状态 (解锁=亮, 锁车=灭)
- *   低功耗: 去掉 LED 时整个函数 + 声明一起注释掉 ──── [LED_END] */
-void KeyGo_LedTrunkBlinkHandler(void)
-{
-    g_ledTrunkBlinkToggle++;
-    if (g_ledTrunkBlinkToggle >= 10) {
-        /* 闪烁结束 → 恢复蓝 LED 到当前锁状态 */
-        g_ledBlinkLocked = 0;
-        g_ledTrunkBlinkToggle = 0;
-        if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
-            GPIOB_SetBits(PIN_LED_BLUE_GPIO);     // 解锁/骑行 → 蓝 LED 亮
-        } else {
-            GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 锁车 → 蓝 LED 灭
-        }
-        PRINT("[LED] trunk blink end, restored to %s\n",
-              (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) ? "ON (BLUE)" : "OFF (BLUE)");
-        return;
-    }
-    /* 翻转 蓝 LED: 奇数翻转 → OFF, 偶数翻转 → ON */
-    if (g_ledTrunkBlinkToggle & 1) {
-        GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // odd → OFF
-    } else {
-        GPIOB_SetBits(PIN_LED_BLUE_GPIO);     // even → ON
-    }
-    tmos_start_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT, LED_TRUNK_BLINK_TICKS);
-}
-
-/* [LED_BEGIN] ──────── 骑行 LED 闪烁 TMOS 回调 (参照后备箱) ────────
- *   500ms 周期翻转 LED(PB15)，共 4 次翻转 = 2 次亮灭循环（模拟按了两下开关）
- *   完成后恢复 LED 到当前锁状态 (解锁=亮, 锁车=灭)
- *   低功耗: 去掉 LED 时整个函数 + 声明一起注释掉 ──── [LED_END] */
-void KeyGo_LedRideBlinkHandler(void)
-{
-    g_ledRideBlinkToggle++;
-    if (g_ledRideBlinkToggle >= 4) {
-        /* 闪烁结束 → 恢复蓝 LED 到当前锁状态 */
-        g_ledBlinkLocked = 0;
-        g_ledRideBlinkToggle = 0;
-        if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) {
-            GPIOB_SetBits(PIN_LED_BLUE_GPIO);     // 解锁/骑行 → 蓝 LED 亮
-        } else {
-            GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 锁车 → 蓝 LED 灭
-        }
-        PRINT("[LED] ride blink end, restored to %s\n",
-              (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) ? "ON (BLUE)" : "OFF (BLUE)");
-        return;
-    }
-    /* 翻转 蓝 LED: 奇数翻转 → OFF, 偶数翻转 → ON */
-    if (g_ledRideBlinkToggle & 1) {
-        GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // odd → OFF
-    } else {
-        GPIOB_SetBits(PIN_LED_BLUE_GPIO);     // even → ON
-    }
-    tmos_start_task(Peripheral_TaskID, SBP_LED_RIDE_BLINK_EVT, LED_RIDE_BLINK_TICKS);
-}
+/* [LED_REMOVED] 后备箱/骑行 LED 闪烁 TMOS 回调已删除（v3.36.x）：
+ *   LED 改为跟随 GPIO 脉冲（解锁/锁/后备箱脉冲期间亮、结束灭；骑行跟随双脉冲闪两下），
+ *   不再需要独立闪烁事件，腾出的 0x0040/0x0200 供骑行退出链式上锁等新事件使用。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * Kalman 滤波
@@ -696,11 +637,12 @@ void KeyGo_ResetState(void)
     g_actionStartMs   = 0;   // ★ v3.15-#16: 看门狗时间戳清零
     g_manualCooldown  = 0;
     g_rideExitStep    = 0;   // ★ 骑行退出链式上锁：断连/重连清理中间态
-    /* [LED_BEGIN] 清理后备箱闪烁状态机，保持 LED 当前状态不变
-     *   断连/重连时不应改变 LED (锁车=灭, 解锁=亮 已反映真实状态) [LED_END] */
-    g_ledBlinkLocked  = 0;
-    g_ledTrunkBlinkToggle = 0;
-    g_ledRideBlinkToggle  = 0;
+    g_rideStep        = 0;   // ★ 双脉冲序列：SBP_GPIO_RIDE_EVT 可能在断连时被 stop 而中途退出，必须清零，否则下一轮 RIDE 被 if(g_rideStep!=0) 拦截
+    /* ★ LED 跟随脉冲：断连/重连时蓝 LED 直接灭（无脉冲即不亮） */
+    GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
+    /* ★ 断连时若有脉冲进行中，SBP_GPIO_PULSE_END_EVT 已被 stop，控制脚可能卡在高电平（继电器吸合）
+     *   → 强制复位所有输出脚，避免重连后引脚残留高电平 */
+    GPIOB_ResetBits(PIN_UNLOCK_GPIO | PIN_LOCK_GPIO | PIN_TRUNK_GPIO | PIN_OTHER_GPIO | PIN_RIDE_GPIO);
 
     /* ★ 2026-07-12 fix3：清空 raw 短报文队列。断连/重连都调本函数，
      *   若不清理，上一条连接未发完的 AUTH:OK/NONCE 会残留到新连接 flush，
@@ -798,7 +740,8 @@ void KeyGo_ProcessStateMachine(void)
         }
         g_obsLinkEncrypted = encNow;
 
-        /* LED 提示驱动：到点翻蓝 LED，结束恢复锁态稳态指示 */
+        /* LED 提示驱动：OS 重连后闪几下蓝 LED 提示（不占 TMOS 事件位，走状态机轮询）。
+         *   结束直接灭（平时不亮，LED 仅跟随脉冲 / 重连提示） */
         if (g_obsBlinkLeft > 0 && Peripheral_GetSystemMs() >= g_obsBlinkNextMs) {
             if (g_obsBlinkOn) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
             else              GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
@@ -806,8 +749,7 @@ void KeyGo_ProcessStateMachine(void)
             g_obsBlinkLeft--;
             g_obsBlinkNextMs = Peripheral_GetSystemMs() + 160;  // ~100ms 半周期
             if (g_obsBlinkLeft == 0) {
-                if (g_keyState == KSTATE_UNLOCKED || g_keyState == KSTATE_RIDE) GPIOB_SetBits(PIN_LED_BLUE_GPIO);
-                else GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
+                GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // 提示结束灭
             }
         }
 
@@ -890,16 +832,8 @@ void KeyGo_ProcessStateMachine(void)
     if (!g_rssiUpdated) return;
     g_rssiUpdated = 0;
 
-    /* ★ 骑行退出链式上锁：解锁脉冲结束后，借本次状态机轮询间隙(~125ms)输出 LOCK 脉冲完成上锁。
-     *   间隙给电瓶车处理「解锁退出骑行」的时间，避免解锁/锁车脉冲连在一起被车辆误判。 */
-    if (g_rideExitStep == 2) {
-        g_rideExitStep = 0;
-        g_keyState = KSTATE_LOCKED;
-        KeyGo_Lock();
-        KeyGo_NotifyStatus();
-        PRINT("[LOCK] ride-exit chained lock done\n");
-        // 已上锁，下方锁分支因 g_keyState==KSTATE_LOCKED 不会重复触发
-    }
+    /* ★ 骑行退出链式上锁已改独立事件 SBP_RIDE_EXIT_LOCK_EVT（见 KeyGo_GPIO_PulseEnd →
+     *   KeyGo_RideExitLockHandler），不再依赖状态机轮询间隙，本处移除。 */
 
     // ★ v3.36 + v3.36.2-fix: RSSI 阈值跟随——按「当前已鉴权 owner」选阈值。
     //   owner 身份来源二选一：① App AUTH/BIND 会话；② 无 App 时由 Bonding_OnLinkEncrypted()

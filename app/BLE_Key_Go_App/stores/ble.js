@@ -1283,6 +1283,12 @@ export const useBleStore = defineStore('ble', {
       }
       this._notifyBuffer = ''
       this.connected = false
+      // ★ 2026-07-30: 僵尸连接兜底——Android 在 GATT 实际已死时仍可能把设备留在系统"已连接"列表，
+      //   主动 close 拆掉 stale ACL handle，确保后续自动/手动重连能建立全新 GATT（否则须重启 App）。
+      //   已真断连时 close 报错被忽略，无害。
+      if (this.deviceId) {
+        try { uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => {} }) } catch (e) {}
+      }
       // ★ 2026-07-19: 断连时立即 flush 所有 binding waiter（BIND/NONCE/AUTH 等），
       //   让 bindDevice 秒级失败，不再卡在 2500ms + 4000ms 等超时。
       _flushBindWaiters(false)
@@ -1458,7 +1464,8 @@ export const useBleStore = defineStore('ble', {
      *
      * @param {string} deviceId 触发事件的设备 id（已通过 deviceId===this.deviceId 过滤）
      */
-    async _verifyThenDisconnect(deviceId) {
+    async _verifyThenDisconnect(deviceId, opts = {}) {
+      const forceStale = !!opts.forceStale
       // ① 系统级确认（Android 可靠；mp-weixin 可能漏报，故仅作"快速放行"信号，不作为"已断连"唯一证据）
       try {
         const devices = await new Promise((resolve, reject) => {
@@ -1469,9 +1476,14 @@ export const useBleStore = defineStore('ble', {
           })
         })
         if (devices.some(d => d.deviceId === deviceId)) {
-          // 设备仍在系统已连接列表 → 假断连，忽略（GATT 自愈，不翻 connected）
-          console.log('[Store] ⚠ 断连事件但设备仍在系统已连接列表，判定为假断连，忽略（不翻 connected）')
-          return
+          if (!forceStale) {
+            // 设备仍在系统已连接列表 → 假断连，忽略（GATT 自愈，不翻 connected）
+            console.log('[Store] ⚠ 断连事件但设备仍在系统已连接列表，判定为假断连，忽略（不翻 connected）')
+            return
+          }
+          // ★ 僵尸连接：FF02 已静默>20s，系统列表"仍连"是 Android 未清理的 stale ACL handle，
+          //   不可采信 → 跳过短回路，继续走 GATT 探针。
+          console.log('[Store] ⚠ forceStale：系统列表仍含设备（疑似僵尸），不采信，继续 GATT 探针')
         }
       } catch (e) {
         // 查询失败：不据此判连，交下方 GATT 探针兜底
@@ -1480,7 +1492,14 @@ export const useBleStore = defineStore('ble', {
       // ② 系统列表查不到：可能真断连，也可能 mp-weixin getConnectedBluetoothDevices 漏报 → GATT 探针二次确认
       const alive = await this._isGattAlive(deviceId)
       if (alive) {
-        console.log('[Store] ⚠ 系统列表漏报但 GATT 仍活 → 假断连，忽略（不翻 connected）')
+        if (!forceStale) {
+          console.log('[Store] ⚠ 系统列表漏报但 GATT 仍活 → 假断连，忽略（不翻 connected）')
+          return
+        }
+        // ★ forceStale 且 GATT 探针仍"活"：Android 常从缓存秒回 services（链路实际已死），
+        //   FF02 已静默>20s 即"对 App 不可用"的确证 → 强制清理，避免卡在"信号--且连着"须重启。
+        console.warn('[Store] forceStale 且 GATT 探针仍"活"(疑似缓存) → 判定僵尸连接，强制清理')
+        this._handleDisconnect()
         return
       }
       // 系统列表 + GATT 均确认已断连 → 执行真正断连
@@ -3165,7 +3184,7 @@ export const useBleStore = defineStore('ble', {
           if (!this._staleSinceMs) this._staleSinceMs = Date.now()
           else if (Date.now() - this._staleSinceMs > 20000 && this.deviceId) {
             console.warn('[Store] FF02 静默 >20s，主动探测 GATT 是否为僵尸连接')
-            this._verifyThenDisconnect(this.deviceId)
+            this._verifyThenDisconnect(this.deviceId, { forceStale: true })
           }
         } else {
           this._staleSinceMs = 0

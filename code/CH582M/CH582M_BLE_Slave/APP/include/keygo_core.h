@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix8"  /* ★ v3.36.3-fix8 (2026-07-23): 新增骑行态 KSTATE_RIDE，状态报文 st 报 "RIDE"；手动/靠近骑行均进入 RIDE（=已解锁语义：离场锁车/LED 亮），App 控制页显示「骑行模式」；手动 RIDE 命令后补 KeyGo_NotifyStatus 即时推送。前序 v3.36.3-fix5/6/7 为 App 侧 UI（控制页标题栏居中、命名入口简化），未 bump 固件 */
+#define KEYGO_FW_VERSION   "3.36.3-fix11"  /* ★ v3.36.3-fix11 (2026-07-30): 修 ebike RIDE LED 永久常亮 bug——SBP_GPIO_RIDE_EVT 误用 0x8000 与 OSAL 保留位 SYS_EVENT_MSG 冲突，Peripheral_ProcessEvent 顶部 SYS_EVENT_MSG 分支先 return，KeyGo_RidePulseHandler 永不可达→蓝 LED 亮后不灭。改到空闲位 0x0200。car 后备箱(0x0100)不受影响故一直正常。前序 v3.36.3-fix10 为按键时序放慢。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
@@ -56,12 +56,7 @@ void KeyGo_KeyPower(uint8_t on);
 void KeyGo_EnsureKeyPower(void);           // ★ 自动电源: 命令时按需上电
 void KeyGo_KeyPowerCheck(void);            // ★ 周期性: 空闲超时自动断电
 void KeyGo_GPIO_PulseEnd(void);    // TMOS 事件回调：结束当前 GPIO 脉冲
-/* [LED_BEGIN] 后备箱 LED 闪烁 TMOS 回调 (每 500ms 翻转 PB4, 共 5 次)
- *   低功耗: 去掉 LED 时注释掉此声明 [LED_END] */
-void KeyGo_LedTrunkBlinkHandler(void);
-/* [LED_BEGIN] 骑行 LED 闪烁 TMOS 回调 (每 500ms 翻转 PB4, 共 2 次亮灭；参照后备箱)
- *   低功耗: 去掉 LED 时注释掉此声明 [LED_END] */
-void KeyGo_LedRideBlinkHandler(void);
+
 
 
 // Kalman 滤波
@@ -208,5 +203,6 @@ void KeyGo_SaveMode(uint8_t mode);         // 持久化模式到 DataFlash
 void KeyGo_SaveEbikeProx(uint8_t v);       // ★ 2026-07-19: 持久化电瓶车靠近骑行偏好
 void KeyGo_Ride(void);                      // ebike: 输出「快速双击」脉冲
 void KeyGo_RidePulseHandler(void);          // SBP_GPIO_RIDE_EVT 双脉冲序列回调
+void KeyGo_RideExitLockHandler(void);       // ★ SBP_RIDE_EXIT_LOCK_EVT 骑行退出链式上锁回调
 
 #endif

@@ -593,21 +593,15 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         return (events ^ SBP_GPIO_PULSE_END_EVT);
     }
 
-    /* [LED_BEGIN] 后备箱 LED 闪烁回调 (500ms 周期翻转 PB4) [LED_END] */
-    if (events & SBP_LED_TRUNK_BLINK_EVT) {
-        KeyGo_LedTrunkBlinkHandler();
-        return (events ^ SBP_LED_TRUNK_BLINK_EVT);
-    }
-
-    /* [LED_BEGIN] 骑行 LED 闪烁回调 (参照后备箱, 2 次亮灭) [LED_END] */
-    if (events & SBP_LED_RIDE_BLINK_EVT) {
-        KeyGo_LedRideBlinkHandler();
-        return (events ^ SBP_LED_RIDE_BLINK_EVT);
-    }
-
     if (events & SBP_GPIO_RIDE_EVT) {     // ★ Phase 2: ebike RIDE 双脉冲序列
         KeyGo_RidePulseHandler();
         return (events ^ SBP_GPIO_RIDE_EVT);
+    }
+
+    /* ★ 骑行退出链式上锁：解锁脉冲结束后延迟输出 LOCK，独立事件驱动（为 HAL_SLEEP 铺路） */
+    if (events & SBP_RIDE_EXIT_LOCK_EVT) {
+        KeyGo_RideExitLockHandler();
+        return (events ^ SBP_RIDE_EXIT_LOCK_EVT);
     }
 
     // ★ v3.13: advertising 重启兜底 — 延迟重试，避免 BLE Controller 偶发卡死
@@ -864,12 +858,10 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
         /* ★ v3.15-#15: 取消残留的断连锁车定时器（极速断连→重连→再断连） */
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
-        /* [LED_BEGIN] 取消残留的后备箱 LED 闪烁定时器 [LED_END] */
-        tmos_stop_task(Peripheral_TaskID, SBP_LED_TRUNK_BLINK_EVT);
-        /* [LED_BEGIN] 取消残留的骑行 LED 闪烁定时器 [LED_END] */
-        tmos_stop_task(Peripheral_TaskID, SBP_LED_RIDE_BLINK_EVT);
         /* ★ 方案A（2026-07-12）：取消可能挂起的超时强断（已自然断连无需再踢） */
         tmos_stop_task(Peripheral_TaskID, SBP_UNBOUND_TIMEOUT_EVT);
+        /* ★ 骑行退出链式上锁：断连取消可能挂起的上锁事件，避免重连后误锁 */
+        tmos_stop_task(Peripheral_TaskID, SBP_RIDE_EXIT_LOCK_EVT);
         advRestartRetryCount = 0;
 
         KeyGo_ResetState();
