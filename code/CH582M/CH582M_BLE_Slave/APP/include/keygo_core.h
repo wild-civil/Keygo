@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix16"  /* ★ v3.36.3-fix16 (2026-07-30): 移除无App模式 OS 重连蓝 LED 3 短闪提示（用户要求，与 APP 手动操作保持一致，避免观感混乱）——删除 KeyGo_ObsBlinkTrigger 函数、其驱动循环、上升沿待判与 RSSI 决策块、g_obsBlink* 变量；保留 LINK_ENCRYPTED/RSSI 日志供调试。LED 现在只在真实脉冲/OTA 时亮。前序 fix14: 修骑行态骤然断连 SBP_DISCONNECT_LOCK_EVT 裸发 LOCK 被电瓶车忽略→锁不上，断连兜底锁 KSTATE_RIDE 改走 KeyGo_RideExitThenLock「先解锁→2s→锁车」链(去 static 导出)。前序 fix13: 修无App"骑走自动退出骑行"锁车被取消 + OBS 重连3闪与解锁脉冲叠加"闪4下"。前序 fix12 开 HAL_SLEEP 低功耗。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix17"  /* ★ v3.36.3-fix17 (2026-07-30): 低功耗 P5 —— config.h DCDC_ENABLE FALSE→TRUE 启用内部降压变换器（活跃/连接态电流约降至直通 60%）。硬件前提按 CH582M Datasheet：VSW–VDCID 建议串 10uH 电感（范围 3.3uH~33uH；不可直连/旁路否则短路损芯片）；VDCID/VDCIA 退耦建议 2.2uF（支持 0.47uF~4.7uF，容值小降 BLE 灵敏度约 2dBm），VSW 不挂电容；VDD33/VIO33 退耦启用 DC-DC 时建议 2.2uF 或 1uF。与 HAL_SLEEP 兼容(LowPower_Sleep 保留 DCDC_EN/PRE 位)。前序 fix16: 移除无App模式 OS 重连蓝 LED 3 短闪提示（用户要求，与 APP 手动操作保持一致，避免观感混乱）——删除 KeyGo_ObsBlinkTrigger 函数、其驱动循环、上升沿待判与 RSSI 决策块、g_obsBlink* 变量；保留 LINK_ENCRYPTED/RSSI 日志供调试。LED 现在只在真实脉冲/OTA 时亮。前序 fix14: 修骑行态骤然断连 SBP_DISCONNECT_LOCK_EVT 裸发 LOCK 被电瓶车忽略→锁不上，断连兜底锁 KSTATE_RIDE 改走 KeyGo_RideExitThenLock「先解锁→2s→锁车」链(去 static 导出)。前序 fix13: 修无App"骑走自动退出骑行"锁车被取消 + OBS 重连3闪与解锁脉冲叠加"闪4下"。前序 fix12 开 HAL_SLEEP 低功耗。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

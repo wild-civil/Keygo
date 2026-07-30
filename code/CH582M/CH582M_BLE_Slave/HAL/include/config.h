@@ -77,9 +77,27 @@
 #define BLE_MAC                             FALSE
 #endif
 
-/* 【DCDC】 */
+/* 【DCDC】内部降压变换器 —— 2026-07-30 (v3.36.3-fix17) 启用
+ * ★ 硬件前提（自定义 PCB v1 已满足，换板务必逐条确认，否则必须改回 FALSE）：
+ *     ① VSW–VDCID 储能电感：CH582M Datasheet 建议 **10uH**（范围 3.3uH~33uH），
+ *        额定电流 >250mA，自谐振频率 SRF >11MHz，直流电阻 DCR <1Ω。
+ *        若两脚是【直连/旁路】接法，开启 DCDC 等于把开关节点直接短到 VDD → 短路损坏芯片，此宏必须保持 FALSE。
+ *     ② VDCID / VDCIA 对地退耦电容：Datasheet 建议 **2.2uF**（支持 0.47uF~4.7uF）。
+ *        **容值偏小会降低 BLE 灵敏度约 2dBm**（Datasheet 原文："容值小略省电但降低 BLE 灵敏度 2dBm"）。
+ *        最佳 2.2uF（可用 2×1uF 并联≈2uF 近似）；再并 100nF 高频旁路。原理图默认的 0.1uF 低于 datasheet 下限 0.47uF，开启 DCDC 不可用。
+ *     ③ VDD33 / VIO33（引脚 3）退耦电容：Datasheet 要求启用 DC-DC 时建议 2.2uF 或 1uF，不启用 DC-DC 时 0.1uF 即可。
+ *        VIO33 可与 VDD33 共用同一电容。★ v1 板 VIO33/VDD33 接入 +3V3（XC6206 LDO 输出），
+ *        务必确认已在 CH582M 引脚旁布置 ≥1uF 本地退耦（非仅靠上级 LDO 输出电容）。
+ *     ④ VSW 脚【不可】挂任何对地电容（开关节点挂电容 = 每周期硬放电，发热且损效率）。
+ * ★ 软件路径：peripheral_main.c 的 main() 首行 PWR_DCDCCfg(ENABLE)（受本宏保护）。
+ * ★ 与 HAL_SLEEP 兼容：LowPower_Sleep()（StdPeriphDriver/CH58x_pwr.c）在进/出睡眠时
+ *     保留 DCDC_EN / DCDC_PRE 位，休眠唤醒后 DCDC 仍生效，无需额外处理。
+ * ★ 收益：活跃态 / 连接态电流约降至直通模式的 60%；睡眠态电流几乎不变（睡眠本就极低）。
+ * ★ 回退：真机若出现偶发复位、BLE 灵敏度下降、串口乱码，先把本宏改回 FALSE 复测，
+ *     以区分是电源纹波问题还是固件逻辑问题。旁路接法下 FALSE 亦安全（电感等效导线，仅无收益）。
+ */
 #ifndef DCDC_ENABLE
-#define DCDC_ENABLE                         FALSE
+#define DCDC_ENABLE                         TRUE
 #endif
 
 /* 【SLEEP】低功耗休眠开关 —— P1+P2 (2026-07-30, v3.36.3-fix12) 已启用
