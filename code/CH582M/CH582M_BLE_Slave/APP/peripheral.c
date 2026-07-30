@@ -538,12 +538,15 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-            uint8_t adv = FALSE;
-            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-            adv = TRUE;
+            // ★ fix20: 切慢速 = 改间隔后用 enable=TRUE 让协议栈以新间隔重启广播。
+            //   官方 HID 例程 hidDevLowAdvertising 同款做法（高/低占空比切换），
+            //   绝不先 FALSE（同 tick 背靠背会竞态卡死广播）。
+            uint8_t adv = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
             LOGF(LOG_DIAG, "[ADV] slowed to %lums advertising (standby)\n",
                   (unsigned long)ADV_SLOW_INT_MS);
+            // ★ 保险：慢速切换后重排一次广播健康检查，若切换意外失败可由恢复机制兜底重试。
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
         }
         return (events ^ SBP_ADV_SLOWDOWN_EVT);
     }
@@ -879,21 +882,19 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
     }
 }
 
-/* ★ v3.36.3-fix19 (P6): 进入「快广播窗口」。
- *   设置快广播间隔（若此前已降速，则重启广播以让新间隔生效），并启动降速定时器。
- *   仅在断连态调用（连接态 advertising 已停，无需操作）。 */
+/* ★ v3.36.3-fix19→fix20 (P6): 进入「快广播窗口」。
+ *   只设置快广播间隔参数并（重）启动降速定时器；【绝不】在此开关广播。
+ *   - 上电态：GAPRole_PeripheralStartDevice 会用已设好的快间隔启动广播；
+ *   - 断连态：由 Peripheral_LinkTerminated 调 GAPROLE_ADVERT_ENABLED=TRUE 启动。
+ *   ★ fix20 修复：此前此处（及慢速处理器）用「FALSE 后立刻 TRUE」背靠背切换广播，
+ *     而 GAPROLE_ADVERT_ENABLED 是 GAP 角色任务异步处理的 HCI 命令，同 tick 背靠背会竞态，
+ *     可能让广播卡在 OFF → 设备不可发现 → 连不上（官方 HID 例程 hidDevLowAdvertising
+ *     切高低占空比也只用 enable=TRUE，从不先 FALSE）。 */
 #if ADV_SLOWDOWN_ENABLE
 static void KeyGo_AdvEnterFastWindow(void)
 {
     GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
     GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
-    if (!g_deviceConnected) {
-        // 重启广播以应用快间隔（若上一次已处于慢速）
-        uint8_t adv = FALSE;
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-        adv = TRUE;
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-    }
     tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
     LOGF(LOG_DIAG, "[ADV] enter fast window %lums (then slow %lums)\n",
           (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
@@ -967,15 +968,16 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
             }
         }
 
-        // ★ v3.13: 断连立即重启广播；P6(fix19) 断连后先保持快广播窗口再降速
+        // ★ v3.13: 断连立即重启广播；P6(fix19/fix20) 断连后先保持快广播窗口再降速
 #if ADV_SLOWDOWN_ENABLE
-        KeyGo_AdvEnterFastWindow();
-#else
+        KeyGo_AdvEnterFastWindow();   // 设快间隔 + 起降速定时器（不开关广播）
+#endif
         {
+            // ★ 启动/恢复广播（与旧行为一致：仅 enable=TRUE，绝不先 FALSE）。
+            //   断连态 GAP 栈已停广播，enable=TRUE 即按刚设好的快间隔重新广播。
             uint8_t advertising_enable = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &advertising_enable);
         }
-#endif
         // ★ v3.13: 200ms 后检查 advertising 状态，未恢复则触发重试机制
         tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
 

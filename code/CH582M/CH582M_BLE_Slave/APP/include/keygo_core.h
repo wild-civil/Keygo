@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix19"  /* ★ v3.36.3-fix19 (2026-07-30): 低功耗 P6 —— 断连/上电后「快广播窗口(≈10s,50ms)+慢速待机(1s)」两段式广播。复用 0x0010 位(SBP_ADV_SLOWDOWN_EVT；原 SBP_PHY_UPDATE_EVT 仅作 GAP 消息 opcode 从未作任务事件，安全复用)作降速定时器；ADV_SLOWDOWN_ENABLE 一键开关(=0 回恒 50ms 旧行为)。动机：断连态恒 50ms 高频广播是待机最大耗电点(bonding.c 自注)。实测(350mAh,无App): 连接态 0.04V/10min vs 断连态 0.02~0.03V/10min → 连接态反而是主要耗电，P6 主攻待机段。代价：慢速下重连/自动解锁发现变慢约 +1~2s。前序 fix18: 低功耗 P3-A 从机延迟 0→4 + 超时 1s→6s(连接态射频 1/5)。前序 fix17: 低功耗 P5 启用 DCDC。前序 fix16: 移除无App OS 重连蓝 LED 3 短闪。前序 fix14: 骑行态骤断连兜底锁改走 KeyGo_RideExitThenLock。前序 fix13: 修无App"骑走自动退出骑行"锁车被取消。前序 fix12 开 HAL_SLEEP 低功耗。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix20"  /* ★ v3.36.3-fix20 (2026-07-30): 修 P6(fix19) 连接回归 bug —— 原 KeyGo_AdvEnterFastWindow 与慢速处理器用「ADVERT_ENABLED 先 FALSE 后立刻 TRUE」背靠背切广播，GAP 角色任务异步处理 HCI 竞态可能卡死广播→不可发现→连不上(尤上电/断连约10s后慢速定时器触发时，且无恢复兜底)；改回官方验证写法(参考 hidDevLowAdvertising：仅改 TGAP_DISC_ADV_INT_* + enable=TRUE)，慢速切换后重排 SBP_ADV_RESTART_EVT 兜底。低功耗 P6 —— 断连/上电后「快广播窗口(≈10s,50ms)+慢速待机(1s)」两段式广播。复用 0x0010 位(SBP_ADV_SLOWDOWN_EVT；原 SBP_PHY_UPDATE_EVT 仅作 GAP 消息 opcode 从未作任务事件，安全复用)作降速定时器；ADV_SLOWDOWN_ENABLE 一键开关(=0 回恒 50ms 旧行为)。动机：断连态恒 50ms 高频广播是待机最大耗电点(bonding.c 自注)。实测(350mAh,无App): 连接态 0.04V/10min vs 断连态 0.02~0.03V/10min → 连接态反而是主要耗电，P6 主攻待机段。代价：慢速下重连/自动解锁发现变慢约 +1~2s。前序 fix18: 低功耗 P3-A 从机延迟 0→4 + 超时 1s→6s(连接态射频 1/5)。前序 fix17: 低功耗 P5 启用 DCDC。前序 fix16: 移除无App OS 重连蓝 LED 3 短闪。前序 fix14: 骑行态骤断连兜底锁改走 KeyGo_RideExitThenLock。前序 fix13: 修无App"骑走自动退出骑行"锁车被取消。前序 fix12 开 HAL_SLEEP 低功耗。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
