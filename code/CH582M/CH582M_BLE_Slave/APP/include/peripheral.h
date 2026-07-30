@@ -26,7 +26,11 @@ extern "C" {
 #define SBP_PERIODIC_EVT            0x0002  // 周期性任务 (状态机 + 通知)
 #define SBP_READ_RSSI_EVT           0x0004  // 读取 RSSI
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
-#define SBP_PHY_UPDATE_EVT          0x0010  // PHY 更新
+/* ★ v3.36.3-fix19 (P6 低功耗): 复用 0x0010 位作为「广播降速」定时器事件。
+ *   原 SBP_PHY_UPDATE_EVT(0x0010) 从未作为 TMOS 任务事件被 tmos_start_task/事件处理使用
+ *   （PHY 更新走 GAP_MSG_EVENT 的 GAP_PHY_UPDATE_EVENT 消息分支，与任务事件位是两套命名空间），
+ *   故此位长期空闲，安全复用。0x0001~0x4000 其余 14 位已满，0x8000=SYS_EVENT_MSG 保留。 */
+#define SBP_ADV_SLOWDOWN_EVT        0x0010  // ★ P6: 快广播窗口到期 → 切慢速广播
 #define SBP_BATTERY_CHECK_EVT       0x0020  // ★ v3.13: 电池电量检测
 #define SBP_STATE_MACHINE_EVT       0x0080  // 状态机轮询
 #define SBP_GPIO_PULSE_END_EVT      0x0100  // GPIO 脉冲结束（非阻塞延迟）
@@ -77,6 +81,19 @@ extern "C" {
 
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
+
+/* ★ v3.36.3-fix19 (P6 低功耗): 断连/上电后「快广播窗口 + 慢速待机」两段式广播。
+ *   动机：断连态原一直 50ms 高频广播（bonding.c 自注"20ms 较耗电"），是待机最大耗电点。
+ *   策略：上电/断连后先保持快广播 ADV_FAST_WINDOW_TICKS（用户主动靠近时即时发现），
+ *         窗口到期切慢速 ADV_SLOW_INT_TICKS（省电），一连上连接即取消定时器。
+ *   ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。
+ *   ★ 安全约束：慢速仅影响「可发现性/重连速度」，不改连接参数、不触发任何控制逻辑；
+ *         慢速下重连/自动解锁发现变慢约 +1~2s（代价，需真机权衡）。 */
+#define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
+#define ADV_FAST_WINDOW_TICKS       16000   // ★ 快广播窗口时长 ≈10s（= N×0.625ms）。可按产品调：30s=48000
+#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈10000ms，仅日志用
+#define ADV_SLOW_INT_TICKS          1600    // ★ 慢速广播间隔 =1s（=1600×0.625ms）。可改 3200=2s 更省但发现更慢
+#define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =1000ms，仅日志用
 
 // 连接参数
 /* ──────────────────────────────────────────────────────────────────

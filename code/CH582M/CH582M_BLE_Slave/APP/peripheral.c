@@ -142,6 +142,10 @@ peripheralConnItem_t peripheralConnList = {GAP_CONNHANDLE_INIT, 0, 0, 0};
 uint8_t  Peripheral_TaskID    = INVALID_TASK_ID;
 static uint8_t advRestartRetryCount = 0;  // ★ v3.13: advertising 重启重试计数器
 static uint16_t peripheralMTU        = ATT_MTU_SIZE;
+/* ★ v3.36.3-fix19 (P6): 记录「快广播」间隔（上电/断连时使用的间隔，普通模式 50ms，
+ *   无App HID 模式 20/30ms），供降速→恢复快广播时回填，避免把 HID 模式也降成 50ms。 */
+static uint16_t g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
+static uint16_t g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
 
 /* ★ 2026-07-11: FF03 写累积缓冲（文件级静态，供 Peripheral_HandleFF03 追加解析、
  *   并在 Peripheral_LinkTerminated 断连时清空，防止旧残片跨连接误解析）。声明置于
@@ -255,9 +259,20 @@ void Peripheral_Init(void)
         uint8_t  hidMode  = g_encRequired;
         uint16_t advIntMin = hidMode ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:20ms / 默认:50ms
         uint16_t advIntMax = hidMode ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:30ms / 默认:50ms
+        g_advFastMin = advIntMin;   // ★ P6: 记录快广播间隔供降速后恢复
+        g_advFastMax = advIntMax;
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
         GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, ENABLE);
+
+#if ADV_SLOWDOWN_ENABLE
+        /* ★ P6 (fix19): 上电先快广播，窗口到期降速。此时 advertising 尚未启动
+         *   (GAPRole_PeripheralStartDevice 在 SBP_START_DEVICE_EVT 触发)，仅设好参数+起计时，
+         *   广播启动即快间隔，定时器到点(ADV_FAST_WINDOW_TICKS)自动切慢速。 */
+        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
+        LOGF(LOG_DIAG, "[ADV] power-on fast window %lums, then slow %lums\n",
+              (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
+#endif
     }
 
     // ── GATT Services ──
@@ -515,6 +530,24 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
                 Peripheral_TaskID);
         return (events ^ SBP_PARAM_UPDATE_EVT);
     }
+
+#if ADV_SLOWDOWN_ENABLE
+    if (events & SBP_ADV_SLOWDOWN_EVT) {
+        /* ★ P6 (fix19): 快广播窗口到期 → 切慢速广播以省电。
+         *   仅在仍断连态生效（已连接则 advertising 停，切间隔无意义且会被下次断连覆盖）。 */
+        if (!g_deviceConnected) {
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
+            uint8_t adv = FALSE;
+            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+            adv = TRUE;
+            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+            LOGF(LOG_DIAG, "[ADV] slowed to %lums advertising (standby)\n",
+                  (unsigned long)ADV_SLOW_INT_MS);
+        }
+        return (events ^ SBP_ADV_SLOWDOWN_EVT);
+    }
+#endif
 
     if (events & SBP_READ_RSSI_EVT) {
         GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
@@ -783,6 +816,12 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
 
+#if ADV_SLOWDOWN_ENABLE
+        /* ★ P6 (fix19): 一连上连接即取消降速定时器；连接态 advertising 已停，无需切间隔。
+         *   下次断连由 LinkTerminated 重新进入快广播窗口。 */
+        tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);
+#endif
+
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
         PRINT("[OBS] CONNECTED (noAppMode=%d)\n", g_encRequired);
         /* ★ 2026-07-17 埋点：打印本次连接的初始协商参数（手机发起连接时给的值）。
@@ -839,6 +878,27 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
         default:   return "OTHER";
     }
 }
+
+/* ★ v3.36.3-fix19 (P6): 进入「快广播窗口」。
+ *   设置快广播间隔（若此前已降速，则重启广播以让新间隔生效），并启动降速定时器。
+ *   仅在断连态调用（连接态 advertising 已停，无需操作）。 */
+#if ADV_SLOWDOWN_ENABLE
+static void KeyGo_AdvEnterFastWindow(void)
+{
+    GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
+    GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
+    if (!g_deviceConnected) {
+        // 重启广播以应用快间隔（若上一次已处于慢速）
+        uint8_t adv = FALSE;
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+        adv = TRUE;
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+    }
+    tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
+    LOGF(LOG_DIAG, "[ADV] enter fast window %lums (then slow %lums)\n",
+          (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
+}
+#endif
 
 static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
 {
@@ -907,11 +967,15 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
             }
         }
 
-        // ★ v3.13: 立即启动 advertising（BLE Controller 正常情况）
+        // ★ v3.13: 断连立即重启广播；P6(fix19) 断连后先保持快广播窗口再降速
+#if ADV_SLOWDOWN_ENABLE
+        KeyGo_AdvEnterFastWindow();
+#else
         {
             uint8_t advertising_enable = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &advertising_enable);
         }
+#endif
         // ★ v3.13: 200ms 后检查 advertising 状态，未恢复则触发重试机制
         tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
 
