@@ -116,8 +116,17 @@ extern "C" {
  * ────────────────────────────────────────────────────────────────── */
 #define DEFAULT_DESIRED_MIN_CONN_INTERVAL    6     // 7.5ms   连接间隔   = N × 1.25ms     （范围 6~3,200 → 7.5ms~4s）
 #define DEFAULT_DESIRED_MAX_CONN_INTERVAL    100   // 125ms
-#define DEFAULT_DESIRED_SLAVE_LATENCY        0
-#define DEFAULT_DESIRED_CONN_TIMEOUT         100   // 1s      连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
+/* ★ P3-A（v3.36.3-fix18，低功耗）：从机延迟 0 → 4 + 连接超时 1s → 6s。
+ *   从机可"跳过"最多 4 个连续连接事件 → 射频收发次数降至约 1/5，连接态功耗显著下降；
+ *   自动解锁最大延迟由 <125ms 升至 <625ms（=125ms×(4+1)），用户基本无感。
+ *   ★ 安全约束（必须满足，否则手机会拒绝/频繁断连）：
+ *      CONN_TIMEOUT(×10ms) > MAX_INTERVAL(×1.25ms) × (latency+1) × 6
+ *      = 125ms × 5 × 6 = 4687.5ms → 此处 600(6s) ✓。
+ *      iOS/Android 兼容性：有效间隔(125×5=625ms)≤2s 且 6×625ms=3.75s≤6s ✓。
+ *   ★ 仅"建议"参数：手机（尤其 iOS）可协商成更小值，固件自动接受，不会劣化功能。
+ *   ★ 回退：若发现连接异常/解锁变慢不可接受，把 SLAVE_LATENCY 改回 0、CONN_TIMEOUT 改回 100 即可。 */
+#define DEFAULT_DESIRED_SLAVE_LATENCY        4
+#define DEFAULT_DESIRED_CONN_TIMEOUT         600   // 6s      连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH
 #define WCH_COMPANY_ID                       0x07D7
