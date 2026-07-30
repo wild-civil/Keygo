@@ -850,10 +850,14 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         // ★ 方案A（2026-07-12）：断连即清未鉴权计时；重连时重新计（见 LinkEstablished）。
         g_unauthConnStartMs = 0;
 
+        /* ★ [P2 低功耗] 停掉连接态专有的高频周期任务：停掉后断连设备只剩「广播 + 电量轮询(30s) + 2min 校准」
+         *   三类稀疏唤醒，配合已开启的 HAL_SLEEP 即可在广播包之间深度睡眠；KEY_POWER 已在 KeyGo_ResetState
+         *   中断电(peripheral.c:867 → keygo_core.c:652)，继电器模块不耗电。
+         *   (连接态这些任务照常运行，不牺牲自动解锁响应——P3 拉长连接间隔/从机延迟未做) */
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
-        /* ★ v3.14: 电池检测持续运行（断开后不停），确保广播包电量实时更新 */
+        /* ★ v3.14: 电池检测持续运行（断开后不停），确保广播包电量实时更新——这是断连态唯一的低频保活唤醒(30s)，可接受 */
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT);  // 取消之前的重试
         /* ★ v3.15-#15: 取消残留的断连锁车定时器（极速断连→重连→再断连） */

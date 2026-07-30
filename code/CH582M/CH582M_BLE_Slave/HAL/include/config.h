@@ -82,9 +82,20 @@
 #define DCDC_ENABLE                         FALSE
 #endif
 
-/* 【SLEEP】默认关闭, 后续优化功耗 */
+/* 【SLEEP】低功耗休眠开关 —— P1+P2 (2026-07-30, v3.36.3-fix12) 已启用
+ * ★ 机制：休眠由 BLE 库的 cfg.sleepCB = CH58X_LowPower 驱动（见 HAL/MCU.c:124），
+ *   TMOS_SystemProcess() 在无待处理任务时自动调用，主循环 Main_Circulation 无需改动。
+ * ★ GPIO 安全：main() 在 HAL_SLEEP=TRUE 时先把 GPIOA/B 全部设输入上拉(peripheral_main.c:189)，
+ *   但 Peripheral_Init→KeyGo_GPIO_Init 随后把控制脚(PB4/5/6/7/PB0/14/15)配回输出并保电平，
+ *   睡眠期间 GPIO 输出锁存保持 → 继电器/LED 电平不丢、不 float。已真机确认引脚配置完整。
+ * ★ 软看门狗兼容：断连后设备持续广播（间隔<2.5s），主循环每次唤醒都置 g_mainLoopAlive=1
+ *   （peripheral_main.c:160），故 WDOG_BAT 不会误判死机复位；连接态唤醒更频繁，天然安全。
+ *   ? 注意：若将来把广播间隔调到 >2.5s 或实现"完全停广播 deep-park"，需重新评估看门狗，
+ *     否则长睡会让 g_mainLoopAlive 连续 5 次(~2.5s)不报到 → 误软复位。
+ * ★ 调试提示：抓 UART 日志时若发现 PRINT 被睡眠吞掉，临时设回 FALSE 即可（生产固件保持 TRUE）。
+ * ★ DCDC_ENABLE 必须保持 FALSE（config.h:82，短路风险，见 MEMORY「关键坑」），与休眠无关。 */
 #ifndef HAL_SLEEP
-#define HAL_SLEEP                           FALSE
+#define HAL_SLEEP                           TRUE
 #endif
 #ifndef SLEEP_RTC_MIN_TIME
 #define SLEEP_RTC_MIN_TIME                  US_TO_RTC(1000)
