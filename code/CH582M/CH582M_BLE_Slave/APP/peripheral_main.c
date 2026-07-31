@@ -186,7 +186,10 @@ int main(void)
     SetSysClock(CLK_SOURCE_PLL_60MHz);
 
 #if(defined(HAL_SLEEP)) && (HAL_SLEEP == TRUE)
-    GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+    /* ★2026-07-31 修复：CLK_OSC32K=0 用外部 32.768K 晶振(PA10/PA11)时，此二脚是晶振专用，
+     *   绝不能配成数字 GPIO（输入上拉会破坏起振 → RTC 无时钟 → 永远不睡）。
+     *   故从 GPIO_Pin_All 中排除 PA10/PA11；CLK_OSC32K=1(片内RC)时它们可作普通 IO，排除后浮空也无害。 */
+    GPIOA_ModeCfg(GPIO_Pin_All & ~(GPIO_Pin_10 | GPIO_Pin_11), GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
 #endif
 #ifdef DEBUG

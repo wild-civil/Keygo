@@ -84,6 +84,8 @@ void HAL_TimeInit(void)
     sys_safe_access_enable();
     R8_CK32K_CONFIG |= RB_CLK_OSC32K_XT | RB_CLK_INT32K_PON | RB_CLK_XT32K_PON;
     sys_safe_access_disable();
+    /* ★2026-07-31 修复：禁用 PA10/PA11 数字输入，避免数字输入缓冲/上拉干扰外部 32.768K 晶振起振 */
+    R16_PIN_ANALOG_IE |= RB_PIN_XT32K_IE;
 #endif
     RTC_InitTime(2020, 1, 1, 0, 0, 0); //RTC时钟初始化当前时间
     TMOS_TimerInit(0);

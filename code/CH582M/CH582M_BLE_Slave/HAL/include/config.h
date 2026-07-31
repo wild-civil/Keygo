@@ -17,6 +17,8 @@
 #include "CH58xBLE_LIB.H"
 #endif
 
+#define DEBUG                         Debug_UART1   // ★ 2026-07-31 临时诊断：打开 [LP] 睡眠日志(见 SLEEP.c)。CLK_OSC32K=1 时 PA10 空闲，可接 UART1(PA9=TX)看日志；改回 CLK_OSC32K=0 前须删此行或改 DEBUG=Debug_UART0/2/3，否则占 32.768K 晶振脚 PA10/PA11。
+
 #include "CH58x_common.h"
 
 /* ─────────────────────────────────────────────────────────────────
@@ -164,9 +166,11 @@
                                                  *   需真机用 [DIAG] snvBonds 验证(读到 2=成功)。 */
 #endif
 
-/* 【RTC】内部 32K */
+/* 【RTC】32K 时钟源：0=外部 32.768K 晶振(PA10/PA11)，1=片内 RC 32K
+ * ★ 自定义 PCB 实测断连 1.8mA 不睡(片内 RC 32K 不稳/精度差，RTC 睡不了)=> 改走外部晶振。
+ *   开发板自带外部 32.768K 晶振，直接可用。焊好晶振后此值必须为 0。 */
 #ifndef CLK_OSC32K
-#define CLK_OSC32K                          1
+#define CLK_OSC32K                          0
 #endif
 
 /* 【内存】协议栈堆 */

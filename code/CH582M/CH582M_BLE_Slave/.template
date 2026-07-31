@@ -28,5 +28,5 @@ SDIPrintf=false
 Disable Power Output=false
 Clear CodeFlash=false
 Disable Code-Protect=false
-Flash Type=
+Flash Type=Internal
 Algorithm File=
