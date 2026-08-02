@@ -123,10 +123,10 @@ int main(void)
     uart_puts("\r\n");
 
     /* 睡眠诊断(_RTC 唤醒版_):
-       每轮:打印 HELLO -> ENTER SLEEP -> 设 RTC 2 秒后触发 -> LowPower_Sleep
+       每轮:打印 HELLO -> ENTER SLEEP -> 设 RTC 8 秒后触发 -> LowPower_Sleep
              -> (静默,电流掉) -> RTC 到点唤醒 -> WAKEUP -> 重设时钟 -> 下一轮
        判读:
-         - 看到 HELLO -> ENTER SLEEP -> (静默约2s) -> WAKEUP -> HELLO ... 循环
+         - 看到 HELLO -> ENTER SLEEP -> (静默约8s) -> WAKEUP -> HELLO ... 循环
            且静默期间电流掉到 ~µA 级 = 真睡了 ✓
          - 一直 HELLO 从不见 ENTER SLEEP -> Sleep 没真正生效(检查 HAL_SLEEP) ✗
          - ENTER 后立刻 WAKEUP(无静默) -> RTC 没真正让芯片睡(睡眠时间被门槛拦掉) ✗
@@ -141,14 +141,22 @@ int main(void)
         DelayMs(300);
 
         uart_puts("ENTER SLEEP\r\n");
-        /* 进睡前把全部 GPIO 改成浮空输入(高阻),
-           彻底断开 LED/外设驱动,隔离"GPIO 驱动耗电" vs "内核耗电"。
-           Sleep 保留 GPIO 状态,若不主动释放,输出脚会一直驱动 LED → 持续 mA 级。 */
+        /* 进睡前 GPIO 配置(隔离板级负载耗电):
+           - PB0 明确输出 HIGH = 关 KeyPower(PMOS 低有效),彻底断开门锁/继电器负载;
+             若设浮空,PMOS 栅极不确定可能误导通 → 持续 mA 级。
+           - PB14/PB15(蓝/红 LED)明确输出 LOW = 灭,避免浮空微亮耗电。
+           - 其余 GPIO(A 全 + B 除 0/14/15)设浮空输入,断开其它外设驱动。
+           Sleep 保留 GPIO 状态,必须主动给确定电平,否则输出脚持续驱动 → mA 级假象。 */
+        GPIOB_ModeCfg(GPIO_Pin_0, GPIO_ModeOut_PP_5mA);
+        GPIOB_SetBits(GPIO_Pin_0);                 /* 关 KeyPower */
+        GPIOB_ModeCfg(GPIO_Pin_14 | GPIO_Pin_15, GPIO_ModeOut_PP_5mA);
+        GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15); /* LED 灭 */
         GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_Floating);
-        GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_Floating);
+        GPIOB_ModeCfg(GPIO_Pin_All & ~(GPIO_Pin_0 | GPIO_Pin_14 | GPIO_Pin_15),
+                      GPIO_ModeIN_Floating);
 
-        /* 设 RTC 在约 2 秒(32K 计数 65536)后触发唤醒 */
-        RTC_SetTignTime(RTC_GetCycle32k() + 65536);
+        /* 设 RTC 在约 8 秒(32K 计数 262144)后触发唤醒 */
+        RTC_SetTignTime(RTC_GetCycle32k() + 262144);
         LowPower_Sleep(RB_PWR_RAM2K | RB_PWR_RAM30K | RB_PWR_EXTEND);
         uart_puts("WAKEUP\r\n");
         /* 唤醒后重建 60M 时钟 + DCDC( Sleep 强制关了),否则串口乱码 */
