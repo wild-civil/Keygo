@@ -1,0 +1,101 @@
+/********************************** (C) COPYRIGHT *******************************
+ * File Name          : Main.c
+ * Author             : KeyGo PM Test V25 — LowPower_Shutdown 终极地板测试
+ * Version            : V25.0
+ * Date               : 2026/08/02
+ * Description        : V24(Sleep) 实测仍 4.7mA 掉不进深睡,故出 Shutdown 版做终极
+ *   地板测试。Shutdown 唤醒即软复位,几乎所有电源域断电,典型 < 1uA,是最低功耗
+ *   档,且不依赖 32K 复杂唤醒时序,最不容易因时钟配置失败而睡不下去。
+ *   唤醒 = 软复位 → main 重新跑 → 蓝灯再闪 6 下(可据此确认"确实睡过+被唤醒")。
+ *
+ *   关键避坑(V5 历史教训):Shutdown 后 GPIO 全部高阻 → PB0(KeyPower PMOS 栅极)
+ *   浮空 → 可能导通 KeyPower 给外围供电 → 外圈吃电伪装成"没睡"。
+ *   故:① 本版优先在【淘宝开发板】上测(最小系统,无 KeyPower 顾虑);
+ *       ② 进 Shutdown 前强行把 PB0 输出 HIGH(关 KeyPower)锁死,降低风险。
+ *
+ *   流程:
+ *   1) 内部 32K RC,关外部 32K 晶振
+ *   2) GPIO 全部上拉(照官方,避免浮空漏电)
+ *   3) 关所有外设睡眠时钟
+ *   4) PB0 输出 HIGH 锁死 KeyPower(关)
+ *   5) PB22 下降沿唤醒
+ *   6) 蓝灯闪 6 次确认固件版本
+ *   7) LowPower_Shutdown(RB_SLP_GPIO_WAKE) —— 全断电地板
+ *
+ *   预期:开发板应掉到 uA 级(芯片自身 < 1uA)。
+ *   若开发板也 mA 级 → 100% 是板级常通电负载(CH340/Flash/电源灯),与芯片无关;
+ *   固件侧低功耗已到底,降总功耗需硬件给常通电负载加睡眠断电(MOS 关断)。
+ *******************************************************************************/
+
+#include "CH58x_common.h"
+
+__INTERRUPT
+__HIGH_CODE
+void GPIOB_IRQHandler(void)
+{
+    GPIOB_ClearITFlagBit(GPIO_Pin_22);
+}
+
+static void Init32K_Clock(void)
+{
+#if(CLK_OSC32K)
+    sys_safe_access_enable();
+    R8_CK32K_CONFIG &= ~(RB_CLK_OSC32K_XT | RB_CLK_XT32K_PON);
+    sys_safe_access_disable();
+
+    sys_safe_access_enable();
+    R8_CK32K_CONFIG |= RB_CLK_INT32K_PON;
+    sys_safe_access_disable();
+
+    LSECFG_Current(LSE_RCur_100);
+    Lib_Calibration_LSI();
+#else
+    sys_safe_access_enable();
+    R8_CK32K_CONFIG |= RB_CLK_OSC32K_XT | RB_CLK_INT32K_PON | RB_CLK_XT32K_PON;
+    sys_safe_access_disable();
+#endif
+}
+
+int main(void)
+{
+    SetSysClock(CLK_SOURCE_PLL_60MHz);
+
+    /* 1) 内部 32K RC,关外部 32K 晶振 */
+    Init32K_Clock();
+
+    /* 2) GPIO 全部上拉(照官方 EXAM/PM 例程,避免浮空脚引入不确定漏电) */
+    GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+    GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+
+    /* 3) 关闭所有外设睡眠时钟(睡眠时模块不耗电) */
+    R8_SLP_CLK_OFF0 = RB_SLP_CLK_TMR0 | RB_SLP_CLK_TMR1 | RB_SLP_CLK_TMR2 |
+                      RB_SLP_CLK_TMR3 | RB_SLP_CLK_UART0 | RB_SLP_CLK_UART1 |
+                      RB_SLP_CLK_UART2 | RB_SLP_CLK_UART3;
+    R8_SLP_CLK_OFF1 = RB_SLP_CLK_SPI0 | RB_SLP_CLK_SPI1 | RB_SLP_CLK_PWMX |
+                      RB_SLP_CLK_I2C  | RB_SLP_CLK_USB   | RB_SLP_CLK_USB2 |
+                      RB_SLP_CLK_BLE;
+
+    /* 4) PB0(KeyPower PMOS 栅极)强行输出 HIGH 锁死 = 关 KeyPower。
+           Shutdown 后 GPIO 全高阻,这里先锁 HIGH,避免唤醒前 PMOS 误导通吃外围电。
+           开发板无 KeyPower 引脚占用也无妨(只是普通 IO 拉高)。 */
+    GPIOB_ModeCfg(GPIO_Pin_0, GPIO_ModeOut_PP_5mA);
+    GPIOB_SetBits(GPIO_Pin_0);
+
+    /* 5) PB22 下降沿 GPIO 唤醒(Shutdown 唤醒=软复位,无需 IRQ 真处理) */
+    GPIOB_ITModeCfg(GPIO_Pin_22, GPIO_ITMode_FallEdge);
+    PFIC_EnableIRQ(GPIO_B_IRQn);
+    PWR_PeriphWakeUpCfg(ENABLE, RB_SLP_GPIO_WAKE, Long_Delay);
+
+    /* 6) 版本确认:蓝灯闪 6 次(每次唤醒复位都会再闪,可据此确认"睡过+被唤醒") */
+    GPIOB_ModeCfg(GPIO_Pin_14, GPIO_ModeOut_PP_5mA);
+    for (int i = 0; i < 6; i++) {
+        GPIOB_SetBits(GPIO_Pin_14);
+        DelayMs(100);
+        GPIOB_ResetBits(GPIO_Pin_14);
+        DelayMs(100);
+    }
+
+    /* 7) 终极地板:全断电 Shutdown。唤醒即软复位,重新跑 main 再闪 6 下。 */
+    LowPower_Shutdown(RB_SLP_GPIO_WAKE);
+}
+
