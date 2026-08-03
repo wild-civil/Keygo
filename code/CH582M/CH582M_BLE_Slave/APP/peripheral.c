@@ -524,10 +524,13 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
 
     if (events & SBP_PARAM_UPDATE_EVT) {
+        /* ★ fix23: 改为周期性重试（30s），确保手机最终接受长连接间隔。
+         *   原为 one-shot（连上后只请求一次）→ 手机忽略后再无机会修正。 */
         GAPRole_PeripheralConnParamUpdateReq(peripheralConnList.connHandle,
                 DEFAULT_DESIRED_MIN_CONN_INTERVAL, DEFAULT_DESIRED_MAX_CONN_INTERVAL,
                 DEFAULT_DESIRED_SLAVE_LATENCY, DEFAULT_DESIRED_CONN_TIMEOUT,
                 Peripheral_TaskID);
+        tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT, SBP_PARAM_UPDATE_PERIOD);
         return (events ^ SBP_PARAM_UPDATE_EVT);
     }
 
