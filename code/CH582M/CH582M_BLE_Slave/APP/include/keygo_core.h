@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix25"  /* ★ v3.36.3-fix25 (2026-08-03): P11 绕过低效降速机制，目标未连接 <100µA —— ① 普通模式：上电/断连直接 5s 慢速广播 + TX=-8dBm（跳过 3s 快窗口，避开疑似未生效的 fix19 降速机制；580µA→<50µA）；② No-App 模式：5s 快窗口(1700µA→仅5s)→5s 慢速→30s 超慢+TX=-8dBm；③ TX 功率动态开关：慢速/超慢=-8dBm(事件能耗↓40%)，连接态/快广播=-3dBm(质量优先)；④ 超慢加速：2min→30s、10s→30s 间隔。前序 fix24: P10 LATENCY=4+关扫描唤醒+三段广播(疑似未生效)。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix26"  /* ★ v3.36.3-fix26 (2026-08-03): P12 修复fix25两个致命bug + STOP→RESTART降速 —— ① 回退所有 LL_SetTxPowerLevel 调用(疑似为No-App配对失败根因)；② 降速改用 STOP(ENABLED=FALSE)→200ms→RESTART(ENABLED=TRUE) 替代 fix19~fix25 的 GAP_SetParamValue+ENABLED=TRUE(跨3版从未真正改变广播间隔，580/560µA始终对应50ms广播)；③ 新增 g_advSlowRestartPending 标志让 ADV_RESTART_EVT 跳过健康检查直接重启。前序 fix25: TX功率动态+直接慢速(560µA未降+No-App配对失败)。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

@@ -86,30 +86,21 @@ extern "C" {
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
 
-/* ★ v3.36.3-fix25 (P11 激进省电): 普通模式直接启动慢速广播（绕过疑似未生效的降速机制），
- *   No-App模式保留5s快速窗口（OS自动重连需要）。三段式：慢速(5s) → 超慢(30s，TX-8dBm)。
- * ★ fix24 (P10): 新增第三段「超慢广播」——ADV_SLOWDOWN_EVT 之后又过了 UltraSlowDelay，
- *   仍未连接 → 进入 10s 超慢广播（停车占多数时间，只保留最低可发现性）。
- *   ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。
- *   ★ 安全约束：慢速仅影响「可发现性/重连速度」，不改连接参数、不触发任何控制逻辑；
- *         慢速下重连/自动解锁发现变慢约 +1~2s（代价，需真机权衡）。 */
+/* ★ v3.36.3-fix26 (P12): 1) 回退所有 LL_SetTxPowerLevel（fix25 新增，疑似致 No-App 配对失败）。
+ *   2) 降速改用 STOP→RESTART（先停广告→200ms→以新间隔重启；fix19~fix25 的 "GAP_SetParamValue+ENABLED=TRUE"
+ *      跨3版从未真正改变广播间隔，功耗 580/560µA 始终对应 50ms 广播）。
+ * ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。 */
 #define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
-#define ADV_FAST_WINDOW_TICKS       1600    // ★ fix25: 快广播窗口 ≈1s（普通模式仅1s预热，原 3s→0s；No-App用 ADV_FAST_WINDOW_NOAPP_TICKS）
+#define ADV_FAST_WINDOW_TICKS       1600    // ★ fix25: 快广播窗口 ≈1s（普通模式仅1s预热；No-App用 ADV_FAST_WINDOW_NOAPP_TICKS）
 #define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈1000ms，仅日志用
 #define ADV_FAST_WINDOW_NOAPP_TICKS 8000   // ★ fix25: No-App 模式快速窗口 5s（给 OS 足够时间扫描并自动重连）
 #define ADV_SLOW_INT_TICKS          8000    // ★ 低功耗: 慢速广播间隔 =5s（=8000×0.625ms）; 发现变慢+2~3s (fix21: 2s→5s)
 #define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =5000ms，仅日志用
-/* ★ fix25 (P11): 超慢广播 — 深度停车后每 30s 发一个广播包（原 10s），几乎不耗电。
- *   触发条件：进入慢速广播后再过 30s 仍未连接 → 视为已深度停车（原 2min）。
- *   TX 功率同时降至 -8dBm，进一步削减每次广播事件的能耗。
- *   可发现性代价：用户打开 App 后最多等 30s（深度停车场景可接受——极少急用）。 */
+/* ★ fix26 (P12): 超慢广播 — 深度停车后每 30s 发一个广播包。STOP→RESTART 方式切换间隔。 */
 #define ADV_ULTRA_SLOW_INT_TICKS    48000   // ★ fix25: 30s（原 10s）; 超慢广播间隔
 #define ADV_ULTRA_SLOW_INT_MS       (ADV_ULTRA_SLOW_INT_TICKS * 5 / 4) // =30000ms，仅日志用
 #define ADV_ULTRA_SLOW_DELAY_TICKS  48000  // ★ fix25: 30s（原 2min）; 进入慢速后 30s 切超慢
-/* ★ fix25 (P11): 广播 TX 功率分档 —— 快广播/连接态用 -3dBm(全局默认)，慢速/超慢降至 -8dBm，
- *   每次广播事件的射频能耗砍约 40%。LL_SetTxPowerLevel() 是运行时开关，可随时切回。 */
-#define ADV_TX_POWER_FAST           LL_TX_POWEER_MINUS_3_DBM   // 快广播/连接态（全局默认）
-#define ADV_TX_POWER_STANDBY        LL_TX_POWEER_MINUS_8_DBM   // 慢速/超慢广播（停车省电）
+/* ★ fix26: 已移除 ADV_TX_POWER 宏和所有 LL_SetTxPowerLevel 调用（fix25 疑似为 No-App 配对失败根因）。 */
 
 // 连接参数
 /* ──────────────────────────────────────────────────────────────────
