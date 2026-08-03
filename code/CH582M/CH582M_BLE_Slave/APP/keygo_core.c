@@ -722,9 +722,20 @@ static void KeyGo_ProximityAct(void)
 
 void KeyGo_ProcessStateMachine(void)
 {
+    /* ★ fix22: RSSI 读取合并到状态机内联运行（消除独立 SBP_READ_RSSI_EVT 定时器的完整唤醒周期）
+     *   每 2 tick 读一次 RSSI（~2s 间隔，状态机周期已从 500ms 拉长到 1s）。
+     *   节省约 40µA（原独立定时器每次 TCXO→射频→GAP 回调吃 ~5ms×4mA）。 */
+    static uint8_t s_rssiTick = 0;
+    if (++s_rssiTick >= 2) {
+        s_rssiTick = 0;
+        if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
+            GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
+        }
+    }
+
     Bonding_TickPairingWindow();  /* [v3.36.2-fix-2] 配对窗口超时收尾(仅打印) */
     /* ── [OBS_BEGIN] 观测性（①）：加密链路上升沿 + LED 提示驱动 + RSSI 节流打印 ──
-     *   放在函数最前，确保每拍(≈125ms)都执行，不受下方看门狗/冷却提前 return 影响。
+     *   放在函数最前，确保每拍(≈1s)都执行，不受下方看门狗/冷却提前 return 影响。
      *   串行 PRINT 由 HAL 条件编译（release 自动剔除）；LED 提示与状态检测始终运行。 ── [OBS_END] */
     if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
         uint8_t encNow = linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0;

@@ -552,11 +552,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 #endif
 
-    if (events & SBP_READ_RSSI_EVT) {
-        GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
-        return (events ^ SBP_READ_RSSI_EVT);
-    }
+/* ★ fix22: SBP_READ_RSSI_EVT 已移除 — RSSI 读取合并到 KeyGo_ProcessStateMachine 内联执行，消除独立唤醒周期 */
 
     if (events & SBP_BATTERY_CHECK_EVT) {
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
@@ -815,7 +811,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,      SBP_PERIODIC_EVT_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     KeyGo_GetRssiPeriodTicks());
+        /* ★ fix22: SBP_READ_RSSI_EVT 已移除 — RSSI 由状态机内联读取 */
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
 
@@ -925,7 +921,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
          *   中断电(peripheral.c:867 → keygo_core.c:652)，继电器模块不耗电。
          *   (连接态这些任务照常运行，不牺牲自动解锁响应——P3 拉长连接间隔/从机延迟未做) */
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
-        tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
+        /* ★ fix22: SBP_READ_RSSI_EVT 已移除(合并到状态机) — 不需 stop */
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
         /* ★ v3.14: 电池检测持续运行（断开后不停），确保广播包电量实时更新——这是断连态唯一的低频保活唤醒(30s)，可接受 */
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
@@ -1324,11 +1320,7 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
                 uint8_t configChanged = KeyGo_ParseConfig(buf);
                 if (configChanged) {
                     KeyGo_NotifyStatus();  // ★ 配置变更后通知 App 最新状态
-                    // ★ v3.13: 重启 RSSI 读取任务以应用新周期
-                    if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
-                        tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
-                        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
-                    }
+                    /* ★ fix22: RSSI 由状态机内联读取，不再需要独立定时器重启 */
                 }
                 // ★ 同时检查是否包含 rssi key (混合下发)
                 {

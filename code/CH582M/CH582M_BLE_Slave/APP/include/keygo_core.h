@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix21"  /* ★ v3.36.3-fix21 (2026-08-03): P7+ 周期性定时器降速省电 —— SBP_STATE_MACHINE_PERIOD 125→500ms(连接态最大省电点)、SBP_PERIODIC_EVT 1→2s、MAX_CONN_INTERVAL 125→400ms(P3-C 拉长连接间隔)、ADV_SLOW_INT_TICKS 2→5s(断连态广播进一步省电)。预估总省电 ~180µA。前序 fix20: 修 P6 广播切换竞态回归。前序 fix19: P6 两段式广播。前序 fix18: P3-A 从机延迟 4+超时 6s。前序 fix17: P5 DCDC 启用。前序 fix16: 移除无App重连蓝LED。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix22"  /* ★ v3.36.3-fix22 (2026-08-03): P8 合并 RSSI 到状态机内联 + 状态机 500ms→1s —— 消除独立 SBP_READ_RSSI_EVT 定时器唤醒周期(省 ~40µA) + 状态机进一步降速(省 ~20µA)。总目标: 280µA→~200µA。前序 fix21: P7+ 定时器降速。前序 fix20: 修 P6 广播切换回归。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

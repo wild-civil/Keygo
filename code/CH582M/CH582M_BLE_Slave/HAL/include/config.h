@@ -195,7 +195,9 @@
 #define BLE_TX_NUM_EVENT                    1
 #endif
 #ifndef BLE_TX_POWER
-#define BLE_TX_POWER                        LL_TX_POWEER_0_DBM
+/* ★ fix22: TX 功率 0dBm → -3dBm。发射电流降低 ~15%，连接态/广播态均受益。
+ *   钥匙类场景通常 1~5m 内操作，-3dBm(~0.5mW) 绰绰有余；若发现连接距离变短可回退 0dBm。 */
+#define BLE_TX_POWER                        LL_TX_POWEER_MINUS_3_DBM
 #endif
 
 /* 【连接数】仅 1 个从机 */

@@ -24,7 +24,9 @@ extern "C" {
 // ── TMOS 事件掩码 ──
 #define SBP_START_DEVICE_EVT        0x0001  // 启动设备 (GAP Role)
 #define SBP_PERIODIC_EVT            0x0002  // 周期性任务 (状态机 + 通知)
-#define SBP_READ_RSSI_EVT           0x0004  // 读取 RSSI
+/* ★ fix22: 0x0004 原为 SBP_READ_RSSI_EVT（独立定期读 RSSI，每 500ms 一次唤醒）。
+ *   现 RSSI 读取已合并到 KeyGo_ProcessStateMachine 内联（每 2 tick 读一次），
+ *   消除一个独立睡眠→唤醒周期，省 ~40µA。0x0004 位释放可用。 */
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
 /* ★ v3.36.3-fix19 (P6 低功耗): 复用 0x0010 位作为「广播降速」定时器事件。
  *   原 SBP_PHY_UPDATE_EVT(0x0010) 从未作为 TMOS 任务事件被 tmos_start_task/事件处理使用
@@ -56,9 +58,9 @@ extern "C" {
 #define SBP_GPIO_RIDE_EVT         0x0200  // ★ Phase 2: ebike RIDE 双脉冲序列回调（务必避开 0x8000=SYS_EVENT_MSG）
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
-#define SBP_PERIODIC_EVT_PERIOD        3200   // ~2s  系统状态更新 (fix21: 1s→2s, 省电)
-#define SBP_READ_RSSI_EVT_PERIOD       800    // ~500ms RSSI 读取
-#define SBP_STATE_MACHINE_PERIOD       800    // ~500ms 状态机轮询 (fix21: 125ms→500ms, 连接态最大省电点)
+#define SBP_PERIODIC_EVT_PERIOD        3200   // ~2s  系统状态更新 (fix21: 1s→2s)
+/* ★ fix22: SBP_READ_RSSI_EVT_PERIOD 已移除 — RSSI 读取合并到状态机内联，不再独立定时 */
+#define SBP_STATE_MACHINE_PERIOD       1600   // ~1s  状态机轮询 (fix22: 500ms→1s, 连接态二次省电)
 #define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   连接参数更新
 #define SBP_ADV_RESTART_DELAY          320    // ★ v3.13: ~200ms advertising 恢复延迟（给 BLE Controller 缓冲时间）
 #define SBP_ADV_RESTART_MAX_RETRIES    3      // ★ v3.13: 最多重试 3 次（总计 ~800ms 恢复窗口）
