@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix23"  /* ★ v3.36.3-fix23 (2026-08-03): P9 激进连接参数 + 周期性重试，目标几十 µA —— MIN_INTERVAL 7.5→250ms(防手机选30ms)、MAX_INTERVAL 400→2000ms(iOS 2s 卡线)、LATENCY 4→0、TIMEOUT 6→10s、SBP_PARAM_UPDATE_EVT one-shot→30s 周期性重试、状态机 1→2s、快广播窗口 10→3s。实测 240µA(≈30ms 间隔=6%占空) → 预期 <100µA。前序 fix22: P8 合并 RSSI+状态机 1s。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix24"  /* ★ v3.36.3-fix24 (2026-08-03): P10 三管齐下，目标几十 µA —— ① 连接态：MIN 250→40ms + LATENCY 0→4（替代 fix23 失败的 MIN 强制路线，246µA=手机仍用30ms）；② 未连接：关 ADV_SCAN_REQ_NOTIFY（防周围手机扫描持续唤醒MCU——停车态主耗电源）；③ 三段式广播：快(3s)→慢(5s,2min)→超慢(10s,深度停车)，停车占多数时间大幅降功耗。前序 fix23: P9 激进连接参数（MIN=250ms 被手机拒绝）。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口

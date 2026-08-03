@@ -263,7 +263,7 @@ void Peripheral_Init(void)
         g_advFastMax = advIntMax;
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
-        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, ENABLE);
+        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24: 关闭扫描请求回调，防止周围手机频繁扫描唤醒 MCU（停车态主要耗电源之一）
 
 #if ADV_SLOWDOWN_ENABLE
         /* ★ P6 (fix19): 上电先快广播，窗口到期降速。此时 advertising 尚未启动
@@ -550,8 +550,32 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
                   (unsigned long)ADV_SLOW_INT_MS);
             // ★ 保险：慢速切换后重排一次广播健康检查，若切换意外失败可由恢复机制兜底重试。
             tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
+            /* ★ fix24 (P10): 慢速广播 2min 后若仍未连接 → 进入超慢广播（深度停车）。
+             *   这是停车态（占绝大多数时间）省电的关键：从 5s→10s 间隔再砍半。 */
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
+            LOGF(LOG_DIAG, "[ADV] ultra-slow timer started, will fire in %lums if no connection\n",
+                  (unsigned long)(ADV_ULTRA_SLOW_DELAY_TICKS * 5 / 4));
+#endif
         }
         return (events ^ SBP_ADV_SLOWDOWN_EVT);
+    }
+#endif
+
+    /* ★ fix24 (P10): 超慢广播 — 慢速广播 N 分钟后仍未连接（深度停车），
+     *   将广播间隔拉长到 10s，几乎不影响平均功耗。
+     *   下次任何连接/断连事件都会取消本定时器并重新进入快广播窗口。 */
+#if ADV_SLOWDOWN_ENABLE && ADV_ULTRA_SLOW_DELAY_TICKS > 0
+    if (events & SBP_ADV_ULTRA_SLOW_EVT) {
+        if (!g_deviceConnected) {
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_ULTRA_SLOW_INT_TICKS);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_ULTRA_SLOW_INT_TICKS);
+            uint8_t adv = TRUE;
+            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+            LOGF(LOG_DIAG, "[ADV] ultra-slow %lums (deep park, min power)\n",
+                  (unsigned long)ADV_ULTRA_SLOW_INT_MS);
+        }
+        return (events ^ SBP_ADV_ULTRA_SLOW_EVT);
     }
 #endif
 
@@ -822,6 +846,9 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         /* ★ P6 (fix19): 一连上连接即取消降速定时器；连接态 advertising 已停，无需切间隔。
          *   下次断连由 LinkTerminated 重新进入快广播窗口。 */
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+        tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // ★ fix24: 连上即取消超慢定时器
+#endif
 #endif
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
@@ -895,6 +922,9 @@ static void KeyGo_AdvEnterFastWindow(void)
     GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
     GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
     tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // ★ fix24: 重新进入快窗口 → 取消超慢定时器
+#endif
     LOGF(LOG_DIAG, "[ADV] enter fast window %lums (then slow %lums)\n",
           (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
 }

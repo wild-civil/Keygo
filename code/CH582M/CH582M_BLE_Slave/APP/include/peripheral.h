@@ -27,6 +27,7 @@ extern "C" {
 /* ★ fix22: 0x0004 原为 SBP_READ_RSSI_EVT（独立定期读 RSSI，每 500ms 一次唤醒）。
  *   现 RSSI 读取已合并到 KeyGo_ProcessStateMachine 内联（每 2 tick 读一次），
  *   消除一个独立睡眠→唤醒周期，省 ~40µA。0x0004 位释放可用。 */
+#define SBP_ADV_ULTRA_SLOW_EVT      0x0004  // ★ fix24: 超长时间无连接 → 切超慢广播（深度停车省电）
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
 /* ★ v3.36.3-fix19 (P6 低功耗): 复用 0x0010 位作为「广播降速」定时器事件。
  *   原 SBP_PHY_UPDATE_EVT(0x0010) 从未作为 TMOS 任务事件被 tmos_start_task/事件处理使用
@@ -89,6 +90,8 @@ extern "C" {
  *   动机：断连态原一直 50ms 高频广播（bonding.c 自注"20ms 较耗电"），是待机最大耗电点。
  *   策略：上电/断连后先保持快广播 ADV_FAST_WINDOW_TICKS（用户主动靠近时即时发现），
  *         窗口到期切慢速 ADV_SLOW_INT_TICKS（省电），一连上连接即取消定时器。
+ * ★ fix24 (P10): 新增第三段「超慢广播」——ADV_SLOWDOWN_EVT 之后又过了 UltraSlowDelay，
+ *   仍未连接 → 进入 10s 超慢广播（停车占多数时间，只保留最低可发现性）。
  *   ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。
  *   ★ 安全约束：慢速仅影响「可发现性/重连速度」，不改连接参数、不触发任何控制逻辑；
  *         慢速下重连/自动解锁发现变慢约 +1~2s（代价，需真机权衡）。 */
@@ -97,6 +100,12 @@ extern "C" {
 #define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈3000ms，仅日志用
 #define ADV_SLOW_INT_TICKS          8000    // ★ 低功耗: 慢速广播间隔 =5s（=8000×0.625ms）; 发现变慢+2~3s (fix21: 2s→5s)
 #define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =5000ms，仅日志用
+/* ★ fix24 (P10): 超慢广播 — 深度停车后每 10s 才发一个广播包，几乎不耗电。
+ *   触发条件：进入慢速广播后再过 2min 仍未连接 → 视为已深度停车。
+ *   可发现性代价：用户打开 App 后最多等 10s（可接受，停车场景极少急用）。 */
+#define ADV_ULTRA_SLOW_INT_TICKS    16000   // 10s  （=16000×0.625ms）; 超慢广播间隔
+#define ADV_ULTRA_SLOW_INT_MS       (ADV_ULTRA_SLOW_INT_TICKS * 5 / 4) // =10000ms，仅日志用
+#define ADV_ULTRA_SLOW_DELAY_TICKS  192000  // ★ 2min（进入慢速后再等 2min 才切超慢；0=立即切，测试用）
 
 // 连接参数
 /* ──────────────────────────────────────────────────────────────────
@@ -134,22 +143,24 @@ extern "C" {
  *   仅修改此文件中的宏值即可, 会自动传播到:
  *     peripheral.c → 广播数据 / 连接请求 / 参数更新请求
  * ────────────────────────────────────────────────────────────────── */
-#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    200   // 250ms   ★ fix23: 抬高下限防手机选 30ms；低于此值手机必须拒绝
-#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    1600  // 2000ms  ★ fix23: 推到头，iOS (lat+1)×2s=2s 卡线
-/* ★ fix23（P9 激进连接参数，目标几十 µA）：
- *   从机延迟 0（2s 间隔下延迟无意义，反而增加协议复杂度）。
- *   有效间隔: 2000ms（直接等于 MAX interval，无跳过）。
- *   射频占空比: ~2ms / 2000ms = 0.1% → 约 4µA（仅 BLE 射频层）。
- *   自动解锁最大延迟 ≈2s（与 fix21/22 相同，用户无感）。
- *   ★ 安全约束（必须满足，否则手机会拒绝/频繁断连）：
- *      BLE spec: (0+1) × 2000ms × 2 = 4000ms < 10000ms(1000×10ms) ✓
- *      iOS 软限: (0+1) × 2000ms = 2000ms ≤ 2s ✓ 刚好卡线。
- *   ★ 关键（fix23 核心策略）：MIN 提高到 250ms，强制手机不能选 30ms 默认值。
- *     若手机不能接受 ≥250ms → 拒绝连接/参数更新 → 回退：MIN 改回 6, MAX 改回 320, LATENCY=4。
- *   ★ 验证：UART 日志 [DIAG] ParamUpd int=XX(XXms) 查看实际协商值。
- *     实际 240µA 对应约 30ms 间隔(6% 占空比)；若协商到 ≥200ms, 功耗应降至 <100µA。 */
-#define DEFAULT_DESIRED_SLAVE_LATENCY        0     // fix23: 2s interval, latency unnecessary
-#define DEFAULT_DESIRED_CONN_TIMEOUT         1000  // 10s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
+#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    32    // 40ms    ★ fix24: 回退 250→40ms（fix23 的 250ms 被手机拒绝，仍用 30ms）
+#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    320   // 400ms   ★ fix24: 回退 2000→400ms，配合 LATENCY 4 达成 iOS 2s 卡线
+/* ★ fix24（P10 LATENCY 策略，替代 fix23 失败的 MIN 强制路线）：
+ *   根因确认：fix23 MIN=250ms 被手机无视，246µA ≈ 30ms 连接间隔（6% 占空比）。
+ *   新策略：不再强行抬高 MIN(防拒绝)，改用「合适间隔 + 从机延迟跳过事件」：
+ *     - MIN=40ms：温和抬高(远离 7.5ms)，手机大概率接受，且约束更宽松
+ *     - MAX=400ms：iOS 兼容（不要 2s 卡线，给 LATENCY 留余量）
+ *     - LATENCY=4：跳过 4 个连接事件，有效间隔 = 5 × actual_interval
+ *        手机 30ms: 5×30=150ms → 占空比 1.3% → ~53µA
+ *        手机 40ms: 5×40=200ms → 占空比 1.0% → ~40µA
+ *     - TIMEOUT=2000(20s)：安全余量充足
+ *   ★ 安全约束（BLE spec + iOS 双验证）：
+ *      BLE: (4+1) × 400ms × 2 = 4000ms < 20000ms(2000×10ms) ✓
+ *      iOS: (4+1) × 400ms = 2000ms ≤ 2s ✓ 刚好卡线。
+ *   ★ 若手机仍不接受 ≥40ms 间隔 → 回退 MIN=6/LATENCY=4(有效 37.5ms→150µA 仍优于 246µA)。
+ *   ★ 验证：UART log [DIAG] ParamUpd int=XX(XXms) 看实际协商值。 */
+#define DEFAULT_DESIRED_SLAVE_LATENCY        4     // ★ fix24: 跳过 4 个连接事件（替代 fix23 LATENCY=0）
+#define DEFAULT_DESIRED_CONN_TIMEOUT         2000  // 20s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH
 #define WCH_COMPANY_ID                       0x07D7
