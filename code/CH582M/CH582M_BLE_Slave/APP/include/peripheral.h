@@ -56,9 +56,9 @@ extern "C" {
 #define SBP_GPIO_RIDE_EVT         0x0200  // ★ Phase 2: ebike RIDE 双脉冲序列回调（务必避开 0x8000=SYS_EVENT_MSG）
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
-#define SBP_PERIODIC_EVT_PERIOD        1600   // ~1s  系统状态更新
+#define SBP_PERIODIC_EVT_PERIOD        3200   // ~2s  系统状态更新 (fix21: 1s→2s, 省电)
 #define SBP_READ_RSSI_EVT_PERIOD       800    // ~500ms RSSI 读取
-#define SBP_STATE_MACHINE_PERIOD       200    // ~125ms 状态机轮询
+#define SBP_STATE_MACHINE_PERIOD       800    // ~500ms 状态机轮询 (fix21: 125ms→500ms, 连接态最大省电点)
 #define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   连接参数更新
 #define SBP_ADV_RESTART_DELAY          320    // ★ v3.13: ~200ms advertising 恢复延迟（给 BLE Controller 缓冲时间）
 #define SBP_ADV_RESTART_MAX_RETRIES    3      // ★ v3.13: 最多重试 3 次（总计 ~800ms 恢复窗口）
@@ -92,8 +92,8 @@ extern "C" {
 #define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
 #define ADV_FAST_WINDOW_TICKS       16000   // ★ 快广播窗口时长 ≈10s（= N×0.625ms）。可按产品调：30s=48000
 #define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈10000ms，仅日志用
-#define ADV_SLOW_INT_TICKS          1600    // ★ 慢速广播间隔 =1s（=1600×0.625ms）。可改 3200=2s 更省但发现更慢
-#define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =1000ms，仅日志用
+#define ADV_SLOW_INT_TICKS          8000    // ★ 低功耗: 慢速广播间隔 =5s（=8000×0.625ms）; 发现变慢+2~3s (fix21: 2s→5s)
+#define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =5000ms，仅日志用
 
 // 连接参数
 /* ──────────────────────────────────────────────────────────────────
@@ -132,16 +132,17 @@ extern "C" {
  *     peripheral.c → 广播数据 / 连接请求 / 参数更新请求
  * ────────────────────────────────────────────────────────────────── */
 #define DEFAULT_DESIRED_MIN_CONN_INTERVAL    6     // 7.5ms   连接间隔   = N × 1.25ms     （范围 6~3,200 → 7.5ms~4s）
-#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    100   // 125ms
-/* ★ P3-A（v3.36.3-fix18，低功耗）：从机延迟 0 → 4 + 连接超时 1s → 6s。
- *   从机可"跳过"最多 4 个连续连接事件 → 射频收发次数降至约 1/5，连接态功耗显著下降；
- *   自动解锁最大延迟由 <125ms 升至 <625ms（=125ms×(4+1)），用户基本无感。
+#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    320   // 400ms   (fix21 P3-C: 125ms→400ms，连接事件频率降至 ~1/3)
+/* ★ P3-A（v3.36.3-fix18）+ P3-C（fix21）低功耗连接参数：
+ *   从机延迟 4（可跳过最多 4 个连接事件）+ MAX interval 400ms。
+ *   有效间隔: 400ms × (4+1) = 2000ms（iOS 上限），射频收发降至约 1/3.2（vs 原 1/5）。
+ *   自动解锁最大延迟由 <125ms 升至 <2s（略慢但可接受）。
  *   ★ 安全约束（必须满足，否则手机会拒绝/频繁断连）：
- *      CONN_TIMEOUT(×10ms) > MAX_INTERVAL(×1.25ms) × (latency+1) × 6
- *      = 125ms × 5 × 6 = 4687.5ms → 此处 600(6s) ✓。
- *      iOS/Android 兼容性：有效间隔(125×5=625ms)≤2s 且 6×625ms=3.75s≤6s ✓。
- *   ★ 仅"建议"参数：手机（尤其 iOS）可协商成更小值，固件自动接受，不会劣化功能。
- *   ★ 回退：若发现连接异常/解锁变慢不可接受，把 SLAVE_LATENCY 改回 0、CONN_TIMEOUT 改回 100 即可。 */
+ *      BLE spec: (latency+1) × max_interval × 2 < timeout
+ *      = 5 × 400ms × 2 = 4000ms < 6000ms(600×10ms) ✓
+ *      iOS 软限: (latency+1) × max_interval ≤ 2s → 5 × 400ms = 2s ✓ 刚好卡线上。
+ *      Android 完全兼容 400ms 间隔。
+ *   ★ 回退：若连接异常/解锁太慢，将 MAX_INTERVAL 改回 100(125ms) 即可。 */
 #define DEFAULT_DESIRED_SLAVE_LATENCY        4
 #define DEFAULT_DESIRED_CONN_TIMEOUT         600   // 6s      连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
