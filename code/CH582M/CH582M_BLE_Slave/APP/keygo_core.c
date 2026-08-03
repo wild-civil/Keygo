@@ -219,20 +219,20 @@ void KeyGo_GPIO_Init(void)
      *   说明烧的是旧 hex（Clean+Rebuild 未生效），与 App 控制台 fwVersion= 互证。 */
     PRINT("[INIT] FW Version: %s\n", KEYGO_FW_VERSION);
 
-    GPIOB_ModeCfg(PIN_UNLOCK_GPIO, GPIO_ModeOut_PP_5mA);
-    GPIOB_ModeCfg(PIN_LOCK_GPIO, GPIO_ModeOut_PP_5mA);
-    GPIOB_ModeCfg(PIN_TRUNK_GPIO, GPIO_ModeOut_PP_5mA);
-    GPIOB_ModeCfg(PIN_OTHER_GPIO, GPIO_ModeOut_PP_5mA);
+    GPIOA_ModeCfg(PIN_UNLOCK_GPIO, GPIO_ModeOut_PP_5mA);
+    GPIOA_ModeCfg(PIN_LOCK_GPIO, GPIO_ModeOut_PP_5mA);
+    GPIOA_ModeCfg(PIN_TRUNK_GPIO, GPIO_ModeOut_PP_5mA);
+    GPIOA_ModeCfg(PIN_OTHER_GPIO, GPIO_ModeOut_PP_5mA);
     GPIOB_ModeCfg(PIN_KEYPOWER_GPIO, GPIO_ModeOut_PP_5mA);
 
 #ifdef BOARD_HAS_EXT_BAT_ADC
     Battery_ADC_Init();   // ★ V04 外部电池 ADC: PB3 闸门 + PA3 模拟输入
 #endif
 
-    GPIOB_ResetBits(PIN_UNLOCK_GPIO);
-    GPIOB_ResetBits(PIN_LOCK_GPIO);
-    GPIOB_ResetBits(PIN_TRUNK_GPIO);
-    GPIOB_ResetBits(PIN_OTHER_GPIO);
+    GPIOA_ResetBits(PIN_UNLOCK_GPIO);
+    GPIOA_ResetBits(PIN_LOCK_GPIO);
+    GPIOA_ResetBits(PIN_TRUNK_GPIO);
+    GPIOA_ResetBits(PIN_OTHER_GPIO);
     GPIOB_ResetBits(PIN_KEYPOWER_GPIO);   // ★ 开机钥匙断电(PB0=KEY_POWER), 由自动电源管理按需上电
 
     /* ──────── [LED_BEGIN] 双 LED 状态指示 ────────
@@ -245,7 +245,7 @@ void KeyGo_GPIO_Init(void)
     GPIOB_ResetBits(GPIO_Pin_14);    // 蓝 LED 初始灭
     GPIOB_ResetBits(GPIO_Pin_15);    // 红 LED 初始灭
     KeyGo_FactoryReset_GPIO_Init();                   // ★ 隐藏按键(PB22/BOOT) 长按恢复出厂轮询任务
-    PRINT("[GPIO] Initialized (PB5=UNLOCK, PB7=LOCK, PB6=TRUNK, PB4=OTHER, PB0=KEY_POWER, PB14=LED_B(蓝), PB15=LED_R(红), PB22=FR_BTN)\n");
+    PRINT("[GPIO] Initialized (PA4=UNLOCK, PA5=LOCK, PA6=TRUNK, PA7=OTHER, PB0=KEY_POWER, PB14=LED_B, PB15=LED_R, PB22=FR_BTN)\n");
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -379,7 +379,7 @@ static void KeyGo_FactoryReset_Poll(void)
         if (now >= g_frConfirmMs) {
             KeyGo_FactoryReset_DoErase();
             /* 复位前拉低控制引脚防误动(与看门狗/adv 重启复位一致) */
-            GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+            GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
             GPIOB_ResetBits(PIN_LED_BLUE_GPIO | PIN_LED_RED_GPIO);   // 双 LED 灭
             SYS_ResetExecute();   // 完整重启 → 以出厂默认(未绑定/car/默认阈值)重新初始化
         }
@@ -420,7 +420,7 @@ void KeyGo_Unlock(void)
     g_pulsePinMask  = PIN_UNLOCK_GPIO;
     GPIOB_SetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：解锁脉冲期间蓝 LED 亮，PulseEnd 时灭
     PRINT("[KEY] unlock\n");
-    GPIOB_SetBits(PIN_UNLOCK_GPIO);
+    GPIOA_SetBits(PIN_UNLOCK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
 }
 
@@ -433,7 +433,7 @@ void KeyGo_Lock(void)
     g_pulsePinMask  = PIN_LOCK_GPIO;
     GPIOB_SetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：锁车脉冲期间蓝 LED 亮（按下多久亮多久），PulseEnd 时灭
     PRINT("[KEY] lock\n");
-    GPIOB_SetBits(PIN_LOCK_GPIO);
+    GPIOA_SetBits(PIN_LOCK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
 }
 
@@ -446,11 +446,11 @@ void KeyGo_Trunk(void)
     g_pulsePinMask  = PIN_TRUNK_GPIO;
     GPIOB_SetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：后备箱长按 5s 期间蓝 LED 亮，PulseEnd 时灭
     PRINT("[KEY] trunk\n");
-    GPIOB_SetBits(PIN_TRUNK_GPIO);
+    GPIOA_SetBits(PIN_TRUNK_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_TRUNK_TICKS);
 }
 
-/* ★ PCB V04: 第 4 个脉冲键 (PB4 = Other / 喇叭 / 寻车) — 单脉冲, 不改变锁状态 */
+/* ★ PCB V04: 第 4 个脉冲键 (PA7 = Other / 喇叭 / 寻车) — 单脉冲, 不改变锁状态 */
 void KeyGo_Other(void)
 {
     KeyGo_EnsureKeyPower();
@@ -458,8 +458,8 @@ void KeyGo_Other(void)
     g_actionActive  = 1;
     g_actionStartMs = Peripheral_GetSystemMs();
     g_pulsePinMask  = PIN_OTHER_GPIO;
-    PRINT("[KEY] other (PB4)\n");
-    GPIOB_SetBits(PIN_OTHER_GPIO);
+    PRINT("[KEY] other (PA7)\n");
+    GPIOA_SetBits(PIN_OTHER_GPIO);
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT, GPIO_PULSE_LOCK_TICKS);
 }
 
@@ -478,7 +478,7 @@ void KeyGo_Ride(void)
     g_keyState = KSTATE_RIDE;      // ★ v3.36.3-fix8: 骑行态=已解锁语义；状态报文 st 报 "RIDE"
     if (g_rideStep != 0) return;   // 上一轮双脉冲未结束，忽略（keyState 已置 RIDE）
     g_rideStep = 0;
-    GPIOB_SetBits(PIN_RIDE_GPIO);          // 第 1 个脉冲 ON（继电器控制）
+    GPIOA_SetBits(PIN_RIDE_GPIO);          // 第 1 个脉冲 ON（继电器控制）
     GPIOB_SetBits(PIN_LED_BLUE_GPIO);      // ★ LED 跟随脉冲：RIDE 双脉冲期间蓝 LED 同步闪两下（见 KeyGo_RidePulseHandler）
     tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_HALF_TICKS);
     PRINT("[RIDE] ride start (ebike), led blink 2x (pulse-follow)\n");
@@ -488,15 +488,15 @@ void KeyGo_RidePulseHandler(void)
 {
     g_rideStep++;
     if (g_rideStep == 1) {              // 第 1 个脉冲 OFF
-        GPIOB_ResetBits(PIN_RIDE_GPIO);
+        GPIOA_ResetBits(PIN_RIDE_GPIO);
         GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随：同步灭
         tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_GAP_TICKS);
     } else if (g_rideStep == 2) {       // 第 2 个脉冲 ON
-        GPIOB_SetBits(PIN_RIDE_GPIO);
+        GPIOA_SetBits(PIN_RIDE_GPIO);
         GPIOB_SetBits(PIN_LED_BLUE_GPIO);     // ★ LED 跟随：同步亮
         tmos_start_task(Peripheral_TaskID, SBP_GPIO_RIDE_EVT, RIDE_HALF_TICKS);
     } else {                            // 第 2 个脉冲 OFF，结束
-        GPIOB_ResetBits(PIN_RIDE_GPIO);
+        GPIOA_ResetBits(PIN_RIDE_GPIO);
         GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随：结束灭
         g_rideStep = 0;
         PRINT("[RIDE] ride pulse end\n");
@@ -540,7 +540,7 @@ void KeyGo_RideExitLockHandler(void)
  */
 void KeyGo_GPIO_PulseEnd(void)
 {
-    GPIOB_ResetBits(g_pulsePinMask);
+    GPIOA_ResetBits(g_pulsePinMask);
     GPIOB_ResetBits(PIN_LED_BLUE_GPIO);   // ★ LED 跟随脉冲：脉冲结束蓝 LED 灭
     g_pulsePinMask  = 0;
     g_actionActive  = 0;
@@ -645,7 +645,7 @@ void KeyGo_ResetState(void)
     GPIOB_ResetBits(PIN_LED_BLUE_GPIO);
     /* ★ 断连时若有脉冲进行中，SBP_GPIO_PULSE_END_EVT 已被 stop，控制脚可能卡在高电平（继电器吸合）
      *   → 强制复位所有输出脚，避免重连后引脚残留高电平 */
-    GPIOB_ResetBits(PIN_UNLOCK_GPIO | PIN_LOCK_GPIO | PIN_TRUNK_GPIO | PIN_OTHER_GPIO | PIN_RIDE_GPIO);
+    GPIOA_ResetBits(PIN_UNLOCK_GPIO | PIN_LOCK_GPIO | PIN_TRUNK_GPIO | PIN_OTHER_GPIO | PIN_RIDE_GPIO);
 
     /* ★ 2026-07-12 fix3：清空 raw 短报文队列。断连/重连都调本函数，
      *   若不清理，上一条连接未发完的 AUTH:OK/NONCE 会残留到新连接 flush，

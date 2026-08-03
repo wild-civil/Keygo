@@ -20,26 +20,27 @@
 #include "CH58x_common.h"
 
 /* ─────────────────────────────────────────────────────────────────
- * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件) — 自定义 PCB V03/V04
- *   Unlock=PB5, Lock=PB7, Trunk/Cycling=PB6, Other(喇叭/寻车)=PB4
+ * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件) — 淘宝 CH582M 开发板
+ *   Unlock=PA4, Lock=PA5, Trunk/Cycling=PA6, Other(喇叭/寻车)=PA7
  *   KEY_POWER(给钥匙供电/驱动PMOS导通)=PB0
  *   LED_R=PB15, LED_B=PB14
  *   PB22 = BIND 按键, RST=PB23, BOOT=PB22(长按恢复出厂)
+ *   注：开发板上 KEY_POWER(PB0) 无实际 PMOS 负载，仅作占位输出。
  * ───────────────────────────────────────────────────────────────── */
-#define PIN_UNLOCK_GPIO             GPIO_Pin_5   // PB5 → 解锁
-#define PIN_LOCK_GPIO               GPIO_Pin_7   // PB7 → 上锁
-#define PIN_TRUNK_GPIO              GPIO_Pin_6   // PB6 → 后备箱/骑行
-#define PIN_OTHER_GPIO              GPIO_Pin_4   // PB4 → 第4键(喇叭/寻车)
+#define PIN_UNLOCK_GPIO             GPIO_Pin_4   // PA4 → 解锁
+#define PIN_LOCK_GPIO               GPIO_Pin_5   // PA5 → 上锁
+#define PIN_TRUNK_GPIO              GPIO_Pin_6   // PA6 → 后备箱/骑行
+#define PIN_OTHER_GPIO              GPIO_Pin_7   // PA7 → 第4键(喇叭/寻车)
 #define PIN_KEYPOWER_GPIO           GPIO_Pin_0   // PB0 → KEY_POWER(给钥匙供电, 驱动 PMOS 导通)
-/* ★ ebike RIDE 输出引脚。复用 TRUNK 脚(PB6)——电动车模式 RIDE 触发线接此处 */
-#define PIN_RIDE_GPIO               GPIO_Pin_6   // PB6 → 电瓶车 RIDE(快速双击)
+/* ★ ebike RIDE 输出引脚。复用 TRUNK 脚(PA6)——电动车模式 RIDE 触发线接此处 */
+#define PIN_RIDE_GPIO               GPIO_Pin_6   // PA6 → 电瓶车 RIDE(快速双击)
 
-#define PIN_UNLOCK_PORT             GPIOB
-#define PIN_LOCK_PORT               GPIOB
-#define PIN_TRUNK_PORT              GPIOB
-#define PIN_OTHER_PORT              GPIOB
+#define PIN_UNLOCK_PORT             GPIOA
+#define PIN_LOCK_PORT               GPIOA
+#define PIN_TRUNK_PORT              GPIOA
+#define PIN_OTHER_PORT              GPIOA
 #define PIN_KEYPOWER_PORT           GPIOB
-#define PIN_RIDE_PORT               GPIOB
+#define PIN_RIDE_PORT               GPIOA
 
 /* ★ 双 LED 指示: 蓝(PB14)=常规状态/命令反馈, 红(PB15)=重大提示(恢复出厂等) */
 #define PIN_LED_BLUE_GPIO           GPIO_Pin_14  // PB14 → 蓝色 LED (常规: 解锁亮/锁车灭, TRUNK/RIDE 闪烁, OS重连提示)
@@ -166,8 +167,17 @@
 
 /* 【RTC】内部 32K */
 #ifndef CLK_OSC32K
+/* ★ 当前选内部 32K RC(=1)。2026-07-31 实测证明: 4.3mA 与晶振无关——CLK_OSC32K=0(外部)和=1(内部)都量到 4.3mA,
+ *   说明根因是"芯片没进深睡"(4.3mA=CH582M 60MHz active), 而非 32K 时钟源。用户虽已焊接外部 32.768K 晶振,
+ *   但 CLK=0 时若晶振未真正起振同样会 4.3mA, 故先用内部 RC 这条已验证能跑的通路定位"不睡"真凶
+ *   (EXTREME_PARK_TEST 地板测试)。若想改回外部晶振, 必须先用示波器确认 PA10/PA11 有 32.768K 正弦起振再切。 */
 #define CLK_OSC32K                          1
 #endif
+
+/* ★ 功耗地板测试（实验用，默认关闭）：取消注释 → 初始化后立刻深度睡眠且永不唤醒(掉电才醒)。
+ *   用于测量纯硬件漏电地板(与晶振/蓝牙无关)，可区分"固件不睡"还是"板级漏电(继电器未断/LDO/退耦)"。
+ *   实测仍 >100?A → 板级漏电；≈?A 级 → 硬件OK，瓶颈只在晶振/BLE 睡眠路径。 */
+// #define EXTREME_PARK_TEST  // ★ V10 失败已关闭 — 关一切后纯深睡永不唤醒, 用于区分"固件不睡" vs "板级漏电"(见 peripheral_main.c main)
 
 /* 【内存】协议栈堆 */
 #ifndef BLE_MEMHEAP_SIZE

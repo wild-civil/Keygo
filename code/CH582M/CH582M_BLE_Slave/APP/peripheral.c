@@ -692,7 +692,7 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
              *     PB0 = KEY_POWER(供电), PB14 = LED_B(蓝,常规), PB15 = LED_R(红,重大)
              *   ─────────────────────────────────────────────────────────────
              *   GPIO_Pin_4/5/6/7 = (1<<4)~(1<<7) 在 PA 和 PB 端口上值是相同的 */
-            GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+            GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
             GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);   // ★ 双 LED(PB14蓝/PB15红) 复位前灭
 
             SYS_ResetExecute();

@@ -14,6 +14,7 @@
 /* 头文件包含 */
 #include "CONFIG.h"
 #include "HAL.h"
+#include "CH58x_pwr.h"   /* ★2026-07-31: LowPower_Sleep (EXTREME_PARK_TEST 地板测试用) */
 #include "gattprofile.h"
 #include "peripheral.h"
 #include "keygo_core.h"  /* ★ 2026-07-16: KeyGo_UartCmdPoll 声明（串口 DEBUG 命令） */
@@ -114,9 +115,9 @@ void WDOG_BAT_IRQHandler(void)
             {
                 /* ★ 复位前安全措施：拉低所有 GPIO 控制引脚
                  *   防止复位过程中引脚电平抖动 → 车锁误动作
-                 *   PB5/PB7/PB6/PB4(OTHER) 是 KeyGo 的按键输出引脚, PB0=KEY_POWER(供电)
+                 *   PA4/PA5/PA6/PA7(OTHER) 是 KeyGo 的按键输出引脚, PB0=KEY_POWER(供电)
                  *   PB14=LED_B(蓝,常规), PB15=LED_R(红,重大) */
-                GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+                GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
                 GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);   // ★ 双 LED 复位前灭
 
                 /* 执行软件复位 — 芯片完全重启，等效于上电复位 */
@@ -185,7 +186,81 @@ int main(void)
 #endif
     SetSysClock(CLK_SOURCE_PLL_60MHz);
 
+#ifdef EXTREME_PARK_TEST
+    /* ★ V10: TMOS 托底睡眠测试
+     *   走完整 CH58X_BLEInit + HAL_Init（让 TMOS/CH58X_LowPower 睡眠路径就绪），
+     *   但不启动 BLE 广播（跳过 Peripheral_Init），TMOS 空转自然进深睡。
+     *   对比 V8/V9 裸调 LowPower_Sleep 3.7mA 不睡 → 验证是否是缺少 BLE/TMOS 初始化所致。
+     *   预期: TMOS 无任务时 CH58X_LowPower 进深睡 → ~15uA
+     *
+     *   gpio: LED 脚输出 LOW(灭灯)，PB0 输出 HIGH(关 KeyPower PMOS)，
+     *         其余全部浮空高阻(零漏电路径)。
+     */
+    {
+        /* ── 放心跳: 蓝 LED 闪 3 次确认固件已烧录 ── */
+        GPIOB_ModeCfg(GPIO_Pin_14, GPIO_ModeOut_PP_5mA);
+        for (int i = 0; i < 3; i++) {
+            GPIOB_SetBits(GPIO_Pin_14); DelayMs(100);
+            GPIOB_ResetBits(GPIO_Pin_14); DelayMs(100);
+        }
+
+        /* ── GPIO 初始化(full init 用 Pin_All, 之后精确覆盖) ── */
+        GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+        GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+
+        /* ── DCDC + 时钟 ── */
+#if(defined(DCDC_ENABLE)) && (DCDC_ENABLE == TRUE)
+        PWR_DCDCCfg(ENABLE);
+#endif
+        SetSysClock(CLK_SOURCE_PLL_60MHz);
+
+        /* ── BLE/HAL 初始化(让 TMOS 睡眠路径就绪) ── */
+        CH58X_BLEInit();
+        HAL_Init();
+        GAPRole_PeripheralInit();
+        /* 注意: 不调用 Peripheral_Init() → 不启动 BLE 广播 → 无 BLE 耗电 */
+
+        /* ── 精确 GPIO 覆盖: 零漏电 ── */
+        /* PB0=HIGH → KeyPower PMOS 截止(外围断电) */
+        GPIOB_ModeCfg(GPIO_Pin_0, GPIO_ModeOut_PP_5mA);
+        GPIOB_SetBits(GPIO_Pin_0);
+
+        /* PA4-7=输出 LOW(控制脚安全, 开发板) */
+        GPIOA_ModeCfg(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7,
+                      GPIO_ModeOut_PP_5mA);
+        GPIOA_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+
+        /* PB14/15=输出 LOW(双 LED 真实灭灯) */
+        GPIOB_ModeCfg(GPIO_Pin_14 | GPIO_Pin_15, GPIO_ModeOut_PP_5mA);
+        GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);
+
+        /* 其余 GPIOB 浮空高阻 */
+        GPIOB_ModeCfg(GPIO_Pin_1  | GPIO_Pin_2  | GPIO_Pin_3  |
+                      GPIO_Pin_8  | GPIO_Pin_9  | GPIO_Pin_10 | GPIO_Pin_11 |
+                      GPIO_Pin_12 | GPIO_Pin_13 | GPIO_Pin_16 | GPIO_Pin_17 |
+                      GPIO_Pin_18 | GPIO_Pin_19 | GPIO_Pin_20 | GPIO_Pin_21 |
+                      GPIO_Pin_22 | GPIO_Pin_23,
+                      GPIO_ModeIN_Floating);
+
+        /* GPIOA: 保留 PA10/PA11 上拉(CLK_OSC32K=1 时为普通IO) */
+        /* 其余 PA 浮空(包括 PA5 不配唤醒) */
+        GPIOA_ModeCfg(GPIO_Pin_0  | GPIO_Pin_1  | GPIO_Pin_2  | GPIO_Pin_3  |
+                      GPIO_Pin_4  | GPIO_Pin_5  | GPIO_Pin_6  | GPIO_Pin_7  |
+                      GPIO_Pin_8  | GPIO_Pin_9  | GPIO_Pin_12 | GPIO_Pin_13 |
+                      GPIO_Pin_14 | GPIO_Pin_15,
+                      GPIO_ModeIN_Floating);
+
+        /* ── 进入 TMOS 空转主循环 ──
+         *   TMOS 无业务任务 → CH58X_LowPower(large_timeout) → LowPower_Sleep
+         *   → 预期 ~15uA 深睡
+         */
+        Main_Circulation();
+    }
+#endif
+
 #if(defined(HAL_SLEEP)) && (HAL_SLEEP == TRUE)
+    /* CLK_OSC32K=1(内部32K RC, 本PCB无外部晶振)时 PA10/PA11 可作普通IO, 保持全GPIO上拉避免浮空漏电。
+     * (若改用外部晶振 CLK_OSC32K=0 才需排除 PA10/11 并禁用其数字输入, 见 RTC.c) */
     GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
 #endif
