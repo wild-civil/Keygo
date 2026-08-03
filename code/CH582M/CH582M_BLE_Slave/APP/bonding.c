@@ -212,6 +212,13 @@ void Bonding_Init(void)
     // ★ 方案1: 应用 无App模式 配对模式(基于已加载的 g_encRequired)
     Bonding_ApplyPairingMode();
 
+    /* ★ fix27 (P13): 无App 模式冷启动必须打开配对窗口。
+     *   fix26 实测 No-App 配对弹出配对提示但 passkey 输入框不出现 → PasscodeCB 返回 FAILURE。
+     *   根因：Bonding_OpenPairingWindow 只在 App 发 ENCRYPT:1 时才被调用，设备自举 encRequired=1
+     *   时 g_pairWinUntilMs=0 → Bonding_PairingWindowOpen() 永远 false → 任何配对秒拒。
+     *   本修复：encRequired=1 冷启动即开 60s 窗（足够 OS 发现+重连+配对+AUTH 全流程）。 */
+    if (g_encRequired) Bonding_OpenPairingWindow(60000);
+
     PRINT("[BOND] init done, owners=%d, bonding=%d, mitm=%d\n", s_bondCount, bondingEnabled, mitm);
     Bonding_DumpStatus("INIT");   /* ★ 2026-07-17 埋点：上电基线（应用层 owner + SNV bond） */
 }
@@ -281,20 +288,11 @@ void Bonding_ApplyPairingMode(void)
     uint8_t eraseAuto = 0;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_AUTO, sizeof(uint8_t), &eraseAuto);
     PRINT("[BOND] ERASE_AUTO = disabled (multi-phone safe)\n");
-
-    /* ★ v3.34.0 无App模式(HID锚点)同步广播占空比：
-     *   encRequired=1 → 高占空比(20/30ms)加快 OS 后台自动重连；
-     *   encRequired=0 → 恢复默认 50ms 省电。
-     *   注：持续 20ms 较耗电；量产应加「高占空比 N 秒后转低占空比」降速定时器。 */
-    {
-        uint16_t advIntMin = g_encRequired ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 20ms / 50ms
-        uint16_t advIntMax = g_encRequired ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 30ms / 50ms
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
-        PRINT("[BOND] adv interval = %s duty (encRequired=%d)\n",
-              g_encRequired ? "HIGH(20/30ms)" : "NORMAL(50ms)", g_encRequired);
-    }
 }
+
+/* ★ fix27 (P13): 已移除 Bonding_ApplyPairingMode 中的 TGAP_DISC_ADV_INT_* 设置。
+ *   广播间隔现由 Peripheral_Init 统一管理（Bonding_Init 后在 broadcast 块中按模式设参），
+ *   不再被 Bonding 层覆写。避免普通模式设了 5s 又被改回 50ms 导致 560→800µA 折腾。 */
 
 /*********************************************************************
  * @fn      Bonding_Load / Bonding_Save

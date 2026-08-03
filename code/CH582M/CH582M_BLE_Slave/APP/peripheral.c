@@ -240,43 +240,7 @@ void Peripheral_Init(void)
 
     PRINT("[INIT] Device Name: %s\n", attDeviceName);
 
-    /* ★ fix26 (P12): 广播参数必须在 GAPRole 之前设置，确保 StartDevice 时用对间隔。
-     *   条件化上电广播策略：
-     *   - 普通模式(g_encRequired=0)：直接 5s 慢速广播，跳过快窗口（省电优先）
-     *   - 无App 模式(g_encRequired=1)：20ms 快速广播 5s → OS 自动重连 → 然后降速 */
-    {
-        uint8_t  hidMode = g_encRequired;
-        if (hidMode) {
-            uint16_t fastMin = 32;   // 20ms
-            uint16_t fastMax = 48;   // 30ms
-            g_advFastMin = fastMin;
-            g_advFastMax = fastMax;
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, fastMin);
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, fastMax);
-        } else {
-            g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
-            g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-            LOGF(LOG_DIAG, "[ADV] init slow %lums (no fast window)\\n",
-                  (unsigned long)ADV_SLOW_INT_MS);
-        }
-        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24: 关闭扫描请求回调，防止周围手机频繁扫描唤醒 MCU
-
-#if ADV_SLOWDOWN_ENABLE
-        if (hidMode) {
-            tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
-            LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums window %lums\\n",
-                  (unsigned long)20, (unsigned long)30, (unsigned long)ADV_FAST_WINDOW_NOAPP_TICKS);
-        } else {
-#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
-            tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
-#endif
-        }
-#endif
-    }
-
-    // ── GAP Role ── （必须在广播参数之后，确保 StartDevice 读取的是已设好的间隔）
+    // ── GAP Role ── (★ fix27: 先以默认间隔启动广告，广播策略在 Bonding_Init 后统一设置)
     {
         uint8_t  adv_enable          = TRUE;
         uint16_t desired_min         = DEFAULT_DESIRED_MIN_CONN_INTERVAL;
@@ -344,7 +308,50 @@ void Peripheral_Init(void)
     KeyGo_LoadMode();     // ★ Phase 2: 从 DataFlash 恢复设备模式(car/ebike)
     KeyGo_LoadEncrypt();  // ★ 方案1: 从 DataFlash 恢复 无 App 模式(OS 配对)标志
     KeyGo_LoadPasscode(); // ★ 方案1 扩展: 从 DataFlash 恢复系统配对码(OS passkey)
-    Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层，内部据 g_encRequired 设配对模式）
+    Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（内部据 g_encRequired 设配对模式+开配对窗）
+
+    /* ★ fix27 (P13): 广播策略必须在 Bonding_Init 之后设置 ——
+     *   fix26 的数据证明：① Bonding_ApplyPairingMode() 会把 TGAP_DISC_ADV_INT_* 覆写回 50ms，
+     *   抵消之前在 Peripheral_Init 中设的 5s；② 广播参数在 GAPRole_StartDevice 前设置会被
+     *   GAP 内部默认值覆盖（这就是 fix19~fix26 广告间隔从未改变的根因）。
+     *   fix27：移走 Bonding_ApplyPairingMode 中的 TGAP 覆写后，在 Bonding_Init 后统一设参。
+     *   普通模式：设 5s 慢速 → STOP→RESTART 立即生效（200ms 广告空隙可接受）。
+     *   No-App 模式：设 20/30ms 快速 → 5s 快窗口给 OS 自动重连+配对。
+     *   配对窗已在 Bonding_Init 内为 encRequired=1 自举打开。 */
+    {
+        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24
+#if ADV_SLOWDOWN_ENABLE
+        if (g_encRequired) {
+            uint16_t fastMin = 32;
+            uint16_t fastMax = 48;
+            g_advFastMin = fastMin;
+            g_advFastMax = fastMax;
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, fastMin);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, fastMax);
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
+            LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums, slowdown in %lums\\n",
+                  (unsigned long)20, (unsigned long)30, (unsigned long)ADV_FAST_WINDOW_NOAPP_TICKS);
+        } else {
+            g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
+            g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
+            /* STOP→RESTART：先停广告，200ms 后以 5s 新间隔重启 */
+            {
+                uint8_t adv = FALSE;
+                GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+            }
+            g_advSlowRestartPending = 1;
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, 320);
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
+#endif
+            LOGF(LOG_DIAG, "[ADV] init slow %lums (stop→restart)\\n",
+                  (unsigned long)ADV_SLOW_INT_MS);
+        }
+#endif
+    }
+
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
     GAPRole_BroadcasterSetCB(&Broadcaster_BroadcasterCBs);
 

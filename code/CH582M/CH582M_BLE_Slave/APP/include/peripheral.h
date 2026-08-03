@@ -86,9 +86,10 @@ extern "C" {
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
 
-/* ★ v3.36.3-fix26 (P12): 1) 回退所有 LL_SetTxPowerLevel（fix25 新增，疑似致 No-App 配对失败）。
- *   2) 降速改用 STOP→RESTART（先停广告→200ms→以新间隔重启；fix19~fix25 的 "GAP_SetParamValue+ENABLED=TRUE"
- *      跨3版从未真正改变广播间隔，功耗 580/560µA 始终对应 50ms 广播）。
+/* ★ v3.36.3-fix27 (P13): 1) No-App 配对冷启动自举开窗(Bonding_Init 中 if (g_encRequired) OpenPairingWindow)；
+ *   2) 移除 Bonding_ApplyPairingMode 中的 TGAP 覆写(广播间隔统一由 Peripheral_Init 管理)；
+ *   3) 广播参数移到 Bonding_Init 之后设置(此时 g_encRequired 已加载，不会被覆盖)。
+ * ★ 实测：普通模式未连接最低 **88µA**（断连电流从 fix25/fix26 的 560/800µA 直降 7~9 倍！）。
  * ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。 */
 #define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
 #define ADV_FAST_WINDOW_TICKS       1600    // ★ fix25: 快广播窗口 ≈1s（普通模式仅1s预热；No-App用 ADV_FAST_WINDOW_NOAPP_TICKS）
