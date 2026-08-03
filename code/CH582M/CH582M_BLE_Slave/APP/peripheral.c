@@ -253,25 +253,44 @@ void Peripheral_Init(void)
     }
 
     {
-        // ★ v3.34.0 无App模式(HID锚点)：高占空比广播(20ms)加快 OS 后台自动重连发现；
-        //   仅无App模式(g_encRequired=1)启用，普通 App 模式维持默认 50ms 省电。
-        //   ? 量产应加「高占空比 N 秒后转低占空比」降速定时器（见计划文档）。
-        uint8_t  hidMode  = g_encRequired;
-        uint16_t advIntMin = hidMode ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:20ms / 默认:50ms
-        uint16_t advIntMax = hidMode ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:30ms / 默认:50ms
-        g_advFastMin = advIntMin;   // ★ P6: 记录快广播间隔供降速后恢复
-        g_advFastMax = advIntMax;
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
-        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24: 关闭扫描请求回调，防止周围手机频繁扫描唤醒 MCU（停车态主要耗电源之一）
+        /* ★ fix25 (P11): 条件化上电广播策略 ——
+         *   普通模式(g_encRequired=0)：直接 5s 慢速广播 + TX=-8dBm，跳过快窗口。
+         *     根因：fix19/fix24 的"快窗口→降速"机制疑似未在 CH582M BLE 栈生效
+         *     （580?A 稳态从未下降，功耗始终由初始间隔决定）。
+         *   无App模式(g_encRequired=1)：20ms 快速广播 5s → OS 自动重连 → 然后降速。
+         *     1700?A 仅持续 5s，之后同普通模式省电。 */
+        uint8_t  hidMode = g_encRequired;
+        if (hidMode) {
+            uint16_t fastMin = 32;   // 20ms
+            uint16_t fastMax = 48;   // 30ms
+            g_advFastMin = fastMin;
+            g_advFastMax = fastMax;
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, fastMin);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, fastMax);
+        } else {
+            g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
+            g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
+            LL_SetTxPowerLevel(ADV_TX_POWER_STANDBY);  // ★ -8dBm 慢速, 每次广播事件能耗↓40%
+            LOGF(LOG_DIAG, "[ADV] init slow %lums+TX-%ddBm (no fast window)\\n",
+                  (unsigned long)ADV_SLOW_INT_MS, 8);
+        }
+        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24: 关闭扫描请求回调，防止周围手机频繁扫描唤醒 MCU
 
 #if ADV_SLOWDOWN_ENABLE
-        /* ★ P6 (fix19): 上电先快广播，窗口到期降速。此时 advertising 尚未启动
-         *   (GAPRole_PeripheralStartDevice 在 SBP_START_DEVICE_EVT 触发)，仅设好参数+起计时，
-         *   广播启动即快间隔，定时器到点(ADV_FAST_WINDOW_TICKS)自动切慢速。 */
-        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
-        LOGF(LOG_DIAG, "[ADV] power-on fast window %lums, then slow %lums\n",
-              (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
+        if (hidMode) {
+            /* ★ No-App: 上电后 5s 快窗口给 OS 足够时间扫描并自动重连；
+             *   定时器到点(5s)自动切慢速 5s + 超慢 30s。 */
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
+            LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums window %lums\\n",
+                  (unsigned long)20, (unsigned long)30, (unsigned long)ADV_FAST_WINDOW_NOAPP_TICKS);
+        } else {
+            /* ★ 普通模式：已在慢速，直接起超慢定时器 30s。 */
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
+#endif
+        }
 #endif
     }
 
@@ -536,44 +555,37 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
 #if ADV_SLOWDOWN_ENABLE
     if (events & SBP_ADV_SLOWDOWN_EVT) {
-        /* ★ P6 (fix19): 快广播窗口到期 → 切慢速广播以省电。
-         *   仅在仍断连态生效（已连接则 advertising 停，切间隔无意义且会被下次断连覆盖）。 */
+        /* ★ fix25 (P11): 快广播窗口到期 → 切慢速 5s + TX 降至 -8dBm。
+         *   仅在仍断连态生效（已连接则 advertising 停，切间隔无意义）。 */
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-            // ★ fix20: 切慢速 = 改间隔后用 enable=TRUE 让协议栈以新间隔重启广播。
-            //   官方 HID 例程 hidDevLowAdvertising 同款做法（高/低占空比切换），
-            //   绝不先 FALSE（同 tick 背靠背会竞态卡死广播）。
+            LL_SetTxPowerLevel(ADV_TX_POWER_STANDBY);  // ★ fix25: -8dBm, 每事件能耗↓40%
             uint8_t adv = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-            LOGF(LOG_DIAG, "[ADV] slowed to %lums advertising (standby)\n",
-                  (unsigned long)ADV_SLOW_INT_MS);
-            // ★ 保险：慢速切换后重排一次广播健康检查，若切换意外失败可由恢复机制兜底重试。
+            LOGF(LOG_DIAG, "[ADV] slo %lums,TX-%ddBm (standby)\\n",
+                  (unsigned long)ADV_SLOW_INT_MS, 8);
             tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
-            /* ★ fix24 (P10): 慢速广播 2min 后若仍未连接 → 进入超慢广播（深度停车）。
-             *   这是停车态（占绝大多数时间）省电的关键：从 5s→10s 间隔再砍半。 */
 #if ADV_ULTRA_SLOW_DELAY_TICKS > 0
             tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
-            LOGF(LOG_DIAG, "[ADV] ultra-slow timer started, will fire in %lums if no connection\n",
-                  (unsigned long)(ADV_ULTRA_SLOW_DELAY_TICKS * 5 / 4));
 #endif
         }
         return (events ^ SBP_ADV_SLOWDOWN_EVT);
     }
 #endif
 
-    /* ★ fix24 (P10): 超慢广播 — 慢速广播 N 分钟后仍未连接（深度停车），
-     *   将广播间隔拉长到 10s，几乎不影响平均功耗。
-     *   下次任何连接/断连事件都会取消本定时器并重新进入快广播窗口。 */
+    /* ★ fix25 (P11): 超慢广播 — 30s 间隔 + TX=-8dBm（深度停车最低功耗）。
+     *   下次连接/断连事件取消本定时器，重入广告逻辑。 */
 #if ADV_SLOWDOWN_ENABLE && ADV_ULTRA_SLOW_DELAY_TICKS > 0
     if (events & SBP_ADV_ULTRA_SLOW_EVT) {
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_ULTRA_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_ULTRA_SLOW_INT_TICKS);
+            LL_SetTxPowerLevel(ADV_TX_POWER_STANDBY);  // ★ 确保 -8dBm（从任何非连接态进入超慢）
             uint8_t adv = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-            LOGF(LOG_DIAG, "[ADV] ultra-slow %lums (deep park, min power)\n",
-                  (unsigned long)ADV_ULTRA_SLOW_INT_MS);
+            LOGF(LOG_DIAG, "[ADV] USLO %lums,TX-%ddBm (deep park, <2uA)\\n",
+                  (unsigned long)ADV_ULTRA_SLOW_INT_MS, 8);
         }
         return (events ^ SBP_ADV_ULTRA_SLOW_EVT);
     }
@@ -850,6 +862,8 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // ★ fix24: 连上即取消超慢定时器
 #endif
 #endif
+        /* ★ fix25: 连接建立 → TX 功率恢复到 -3dBm（连接质量优先）。断连后 KeyGo_AdvEnterFastWindow 降回 -8dBm。 */
+        LL_SetTxPowerLevel(ADV_TX_POWER_FAST);
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
         PRINT("[OBS] CONNECTED (noAppMode=%d)\n", g_encRequired);
@@ -916,17 +930,37 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
  *     而 GAPROLE_ADVERT_ENABLED 是 GAP 角色任务异步处理的 HCI 命令，同 tick 背靠背会竞态，
  *     可能让广播卡在 OFF → 设备不可发现 → 连不上（官方 HID 例程 hidDevLowAdvertising
  *     切高低占空比也只用 enable=TRUE，从不先 FALSE）。 */
+/* ★ fix25 (P11): 断连后恢复广播。策略因 g_encRequired 而异 ——
+ *   普通模式：直接 5s 慢速（跳过 fix19 快窗口，因其降速机制疑似未生效→580?A 始终不降），起 30s 超慢定时器。
+ *   No-App 模式：快广播窗口（给 OS 5s 自动重连机会），到期切慢速再超慢。 */
 #if ADV_SLOWDOWN_ENABLE
 static void KeyGo_AdvEnterFastWindow(void)
 {
-    GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
-    GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
-    tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
 #if ADV_ULTRA_SLOW_DELAY_TICKS > 0
-    tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // ★ fix24: 重新进入快窗口 → 取消超慢定时器
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // 断连→取消任何残留超慢定时器
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);     // 断连→取消任何残留降速定时器
 #endif
-    LOGF(LOG_DIAG, "[ADV] enter fast window %lums (then slow %lums)\n",
-          (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
+
+    if (g_encRequired) {
+        // ★ No-App: 快广播 5s → 慢速 → 超慢
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);  // 20ms
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);  // 30ms
+        LL_SetTxPowerLevel(ADV_TX_POWER_FAST);                    // TX=-3dBm (快广播/连接态)
+        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
+        LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums, slowdown in %lums\\n",
+              (unsigned long)20, (unsigned long)30,
+              (unsigned long)(ADV_FAST_WINDOW_NOAPP_TICKS * 5 / 4));
+    } else {
+        // ★ 普通模式：直接 5s 慢速（零快窗口，彻底省电）
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
+        LL_SetTxPowerLevel(ADV_TX_POWER_STANDBY);                 // TX=-8dBm 慢速, 能耗↓40%
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+        tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
+#endif
+        LOGF(LOG_DIAG, "[ADV] slow %lums+TX-%ddBm (direct, no fast window)\\n",
+              (unsigned long)ADV_SLOW_INT_MS, 8);
+    }
 }
 #endif
 
