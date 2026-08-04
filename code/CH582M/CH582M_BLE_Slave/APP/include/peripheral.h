@@ -86,21 +86,25 @@ extern "C" {
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
 
-/* ★ v3.36.3-fix27 (P13): 1) No-App 配对冷启动自举开窗(Bonding_Init 中 if (g_encRequired) OpenPairingWindow)；
- *   2) 移除 Bonding_ApplyPairingMode 中的 TGAP 覆写(广播间隔统一由 Peripheral_Init 管理)；
- *   3) 广播参数移到 Bonding_Init 之后设置(此时 g_encRequired 已加载，不会被覆盖)。
- * ★ 实测：普通模式未连接最低 **88µA**（断连电流从 fix25/fix26 的 560/800µA 直降 7~9 倍！）。
+/* ★ v3.36.3-fix28+P15 (P14/P15): fix27 回归修复 + 连接参数优化 ——
+ *   ① 断连后加「快重连窗口」：普通 3s(50ms) / No-App 15s(20ms)，过期才降至 5s 慢速。
+ *     fix27 断连直降 5s→30s 超慢致"经常断一下就再也连不上，需重启设备"。
+ *   ② 超慢广播延迟从 30s→5min，只有真正长时间无人连接才进 30s 省电。
+ *   ③ ULTRA_SLOW 统一由 SBP_ADV_SLOWDOWN_EVT 排程（不再由 KeyGo_AdvEnterFastWindow 直排，
+ *     避免双重定时器冲突）。
+ *   ④ ★ P15: LATENCY 4→1（fix24 LATENCY=4 每轮 GATT 最慢 1.8s → 服务发现+AUTH 最坏 33s
+ *      > 30s 超时 → "连接好久--然后自动断开"）。降为 1 后最慢 720ms/轮 → AUTH<10s 安全。
+ * ★ 实测：普通模式未连接最低 **88µA**（5s STOP→RESTART 生效）；超慢 30s 可进一步省电。
  * ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。 */
-#define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
-#define ADV_FAST_WINDOW_TICKS       1600    // ★ fix25: 快广播窗口 ≈1s（普通模式仅1s预热；No-App用 ADV_FAST_WINDOW_NOAPP_TICKS）
-#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈1000ms，仅日志用
-#define ADV_FAST_WINDOW_NOAPP_TICKS 8000   // ★ fix25: No-App 模式快速窗口 5s（给 OS 足够时间扫描并自动重连）
-#define ADV_SLOW_INT_TICKS          8000    // ★ 低功耗: 慢速广播间隔 =5s（=8000×0.625ms）; 发现变慢+2~3s (fix21: 2s→5s)
+#define ADV_SLOWDOWN_ENABLE          1
+#define ADV_FAST_WINDOW_TICKS       4800    // ★ fix28: 普通模式快窗口 3s (=4800×0.625ms)，断连后手机足够重新发现设备
+#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈3000ms，仅日志用
+#define ADV_FAST_WINDOW_NOAPP_TICKS 24000   // ★ fix28: No-App 快窗口 15s (原 8000=5s，实测 OS 自动重连+配对远超 5s)
+#define ADV_SLOW_INT_TICKS          8000    // ★ 慢速广播间隔 =5s（=8000×0.625ms）
 #define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =5000ms，仅日志用
-/* ★ fix26 (P12): 超慢广播 — 深度停车后每 30s 发一个广播包。STOP→RESTART 方式切换间隔。 */
-#define ADV_ULTRA_SLOW_INT_TICKS    48000   // ★ fix25: 30s（原 10s）; 超慢广播间隔
+#define ADV_ULTRA_SLOW_INT_TICKS    48000   // ★ 超慢广播间隔 30s
 #define ADV_ULTRA_SLOW_INT_MS       (ADV_ULTRA_SLOW_INT_TICKS * 5 / 4) // =30000ms，仅日志用
-#define ADV_ULTRA_SLOW_DELAY_TICKS  48000  // ★ fix25: 30s（原 2min）; 进入慢速后 30s 切超慢
+#define ADV_ULTRA_SLOW_DELAY_TICKS  480000  // ★ fix28: 超慢延迟 5min（=480000×0.625ms），慢速→超慢
 /* ★ fix26: 已移除 ADV_TX_POWER 宏和所有 LL_SetTxPowerLevel 调用（fix25 疑似为 No-App 配对失败根因）。 */
 
 // 连接参数
@@ -141,21 +145,18 @@ extern "C" {
  * ────────────────────────────────────────────────────────────────── */
 #define DEFAULT_DESIRED_MIN_CONN_INTERVAL    32    // 40ms    ★ fix24: 回退 250→40ms（fix23 的 250ms 被手机拒绝，仍用 30ms）
 #define DEFAULT_DESIRED_MAX_CONN_INTERVAL    320   // 400ms   ★ fix24: 回退 2000→400ms，配合 LATENCY 4 达成 iOS 2s 卡线
-/* ★ fix24（P10 LATENCY 策略，替代 fix23 失败的 MIN 强制路线）：
- *   根因确认：fix23 MIN=250ms 被手机无视，246µA ≈ 30ms 连接间隔（6% 占空比）。
- *   新策略：不再强行抬高 MIN(防拒绝)，改用「合适间隔 + 从机延迟跳过事件」：
- *     - MIN=40ms：温和抬高(远离 7.5ms)，手机大概率接受，且约束更宽松
- *     - MAX=400ms：iOS 兼容（不要 2s 卡线，给 LATENCY 留余量）
- *     - LATENCY=4：跳过 4 个连接事件，有效间隔 = 5 × actual_interval
- *        手机 30ms: 5×30=150ms → 占空比 1.3% → ~53µA
- *        手机 40ms: 5×40=200ms → 占空比 1.0% → ~40µA
- *     - TIMEOUT=2000(20s)：安全余量充足
- *   ★ 安全约束（BLE spec + iOS 双验证）：
- *      BLE: (4+1) × 400ms × 2 = 4000ms < 20000ms(2000×10ms) ✓
- *      iOS: (4+1) × 400ms = 2000ms ≤ 2s ✓ 刚好卡线。
- *   ★ 若手机仍不接受 ≥40ms 间隔 → 回退 MIN=6/LATENCY=4(有效 37.5ms→150µA 仍优于 246µA)。
- *   ★ 验证：UART log [DIAG] ParamUpd int=XX(XXms) 看实际协商值。 */
-#define DEFAULT_DESIRED_SLAVE_LATENCY        4     // ★ fix24: 跳过 4 个连接事件（替代 fix23 LATENCY=0）
+/* ★ fix28-P15 LATENCY 策略（fix28-fixed 实测反馈修正）：
+ *   fix24 LATENCY=4 过于激进，每个 GATT round-trip 最慢 5×360ms=1800ms：
+ *     服务发现~22s + FF02订阅~3.6s + NONCE~3.6s + AUTH~3.6s = 33s → 超 30s 强断。
+ *     "连接好一会儿--，然后自动断开" 即 AUTH 来不及在 30s 内完成。
+ *   P15 修正：LATENCY=1（最慢 2×360ms=720ms/round-trip，总 AUTH ~10s < 30s）。
+ *     保留适度省电（空闲时跳 1 个事件），但不再影响 GATT 关键路径吞吐。
+ *   ★ 安全约束：
+ *      BLE: (1+1) × 400ms × 2 = 1600ms < 20000ms ✓
+ *      iOS: (1+1) × 400ms = 800ms ≤ 2s ✓ 充足余量。
+ *   ★ 验证：UART log [DIAG] ParamUpd int=XX(XXms) 看实际协商值。
+ *   ★ 若仍需更快 → LATENCY=0；若需更省电 → LATENCY=2（AUTH 总时长~15s，仍有 ~15s 余量）。 */
+#define DEFAULT_DESIRED_SLAVE_LATENCY        1     // ★ fix28-P15: 从 4→1（消除 GATT 慢速致 AUTH 30s 超时断开）
 #define DEFAULT_DESIRED_CONN_TIMEOUT         2000  // 20s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH

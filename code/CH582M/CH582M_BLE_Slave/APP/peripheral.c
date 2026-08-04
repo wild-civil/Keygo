@@ -855,6 +855,10 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         g_deviceConnected        = 1;
 
+        /* ★ P14: No-App 模式连上就续配对窗（60s）
+         *   fix27 仅在上电开窗，若上电>60s 才连接，窗口已关→PasscodeCB 秒拒。 */
+        if (g_encRequired) Bonding_OpenPairingWindow(60000);
+
         KeyGo_ResetState();
 
         // ★ 方案A（2026-07-12）：启动未鉴权连接计时（防 DoS 占槽）。
@@ -947,9 +951,10 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
  *     而 GAPROLE_ADVERT_ENABLED 是 GAP 角色任务异步处理的 HCI 命令，同 tick 背靠背会竞态，
  *     可能让广播卡在 OFF → 设备不可发现 → 连不上（官方 HID 例程 hidDevLowAdvertising
  *     切高低占空比也只用 enable=TRUE，从不先 FALSE）。 */
-/* ★ fix25 (P11): 断连后恢复广播。策略因 g_encRequired 而异 ——
- *   普通模式：直接 5s 慢速（跳过 fix19 快窗口，因其降速机制疑似未生效→580?A 始终不降），起 30s 超慢定时器。
- *   No-App 模式：快广播窗口（给 OS 5s 自动重连机会），到期切慢速再超慢。 */
+/* ★ fix28 (P14): 断连后恢复广播。策略因 g_encRequired 而异 ——
+ *   普通模式：3s 快窗 (50ms 间隔) 给手机足够发现设备，到期由 SLOWDOWN→ULTRA_SLOW 逐级降速。
+ *   No-App 模式：15s 快窗 (20ms 间隔) 给 OS 足够时间扫描+自动重连+配对，到期切慢速→超慢。
+ *   ★ ULTRA_SLOW 统一由 SBP_ADV_SLOWDOWN_EVT 排程，KeyGo_AdvEnterFastWindow 不再直排（避免双重计时器冲突）。 */
 #if ADV_SLOWDOWN_ENABLE
 static void KeyGo_AdvEnterFastWindow(void)
 {
@@ -959,7 +964,7 @@ static void KeyGo_AdvEnterFastWindow(void)
 #endif
 
     if (g_encRequired) {
-        // ★ No-App: 快广播 5s → 慢速 → 超慢
+        // ★ No-App: 快广播 15s → 慢速 → 超慢
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);  // 20ms
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);  // 30ms
         tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
@@ -967,14 +972,16 @@ static void KeyGo_AdvEnterFastWindow(void)
               (unsigned long)20, (unsigned long)30,
               (unsigned long)(ADV_FAST_WINDOW_NOAPP_TICKS * 5 / 4));
     } else {
-        // ★ 普通模式：直接 5s 慢速（零快窗口，彻底省电）
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
-        tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
-#endif
-        LOGF(LOG_DIAG, "[ADV] slow %lums (direct, no fast window)\\n",
-              (unsigned long)ADV_SLOW_INT_MS);
+        // ★ fix28: 普通模式 3s 快窗 (50ms) → 5s 慢速 → 5min 超慢
+        //   fix27 零快窗口→断连直降 5s→30s 超慢，用户掏手机扫不到，"经常断一下连不上"。
+        //   ULTRA_SLOW 由 SBP_ADV_SLOWDOWN_EVT 统一排程，这里不再直排（避免双重定时器冲突）。
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
+        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
+        LOGF(LOG_DIAG, "[ADV] fast %lums→slow %lums in %lums\\n",
+              (unsigned long)(DEFAULT_ADVERTISING_INTERVAL * 5 / 800),
+              (unsigned long)ADV_SLOW_INT_MS,
+              (unsigned long)ADV_FAST_WINDOW_MS);
     }
 }
 #endif
@@ -994,6 +1001,10 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         peripheralConnList.peerAddrType    = 0;
         /* ★ 断连：清空绑定会话态（下次连接需重新 AUTH/BIND） */
         Bonding_ConnTerminated();
+
+        /* ★ P14: No-App 模式断连重置配对窗（60s）
+         *   fix27 仅在冷启动开窗，断连后窗口到期就不再开→再连必 PasscodeCB 秒拒。 */
+        if (g_encRequired) Bonding_OpenPairingWindow(60000);
 
         // ★ 方案A（2026-07-12）：断连即清未鉴权计时；重连时重新计（见 LinkEstablished）。
         g_unauthConnStartMs = 0;

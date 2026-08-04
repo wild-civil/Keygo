@@ -722,15 +722,10 @@ static void KeyGo_ProximityAct(void)
 
 void KeyGo_ProcessStateMachine(void)
 {
-    /* ★ fix22: RSSI 读取合并到状态机内联运行（消除独立 SBP_READ_RSSI_EVT 定时器的完整唤醒周期）
-     *   每 2 tick 读一次 RSSI（~2s 间隔，状态机周期已从 500ms 拉长到 1s）。
-     *   节省约 40µA（原独立定时器每次 TCXO→射频→GAP 回调吃 ~5ms×4mA）。 */
-    static uint8_t s_rssiTick = 0;
-    if (++s_rssiTick >= 2) {
-        s_rssiTick = 0;
-        if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
-            GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
-        }
+    /* ★ P14: RSSI 每拍采样（原每 2tick 一次→4s 延迟）。
+     *   GAPRole_ReadRssiCmd 仅发 HCI 命令复用状态机唤醒周期，无额外射频开销。 */
+    if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
+        GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
     }
 
     Bonding_TickPairingWindow();  /* [v3.36.2-fix-2] 配对窗口超时收尾(仅打印) */

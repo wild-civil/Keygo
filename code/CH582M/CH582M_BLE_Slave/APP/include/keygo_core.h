@@ -37,7 +37,7 @@
  *     KeyGo_ReadTemperatureC() 做 5s 节流缓存（详见 keygo_core.c），降低对 BLE 事件时序影响。
  *     纯新增字段、非破坏性，未 bump fwsec（仍 2），旧 App 忽略未知字段即可。App 侧需解析 "t" 显示温度。
  */
-#define KEYGO_FW_VERSION   "3.36.3-fix27"  /* ★ v3.36.3-fix27 (2026-08-03/04): P13 修复 No-App 配对失败根因 + 广播间隔覆写bug。实测普通模式未连接电流最低 88µA（断连态降至两位数µA级别！）—— ① bonding.c: Bonding_Init 中 g_encRequired=1 自举开配对窗(60s)（fix26 实测冷启时 PasscodeCB 返回 FAILURE→配对秒拒，根因是窗口只在 App ENCRYPT:1 时才开）；② bonding.c: 移除 Bonding_ApplyPairingMode 中 TGAP_DISC_ADV_INT_* 设置（会覆写 Peripheral_Init 的 5s→50ms，导致 fix26 普通模式 800µA 反升）；③ peripheral.c: 广播参数移到 Bonding_Init 之后（避免被覆写且 g_encRequired 此时已加载）。前序 fix26: STOP→RESTART降速(800µA反升,No-App仍失败→LL_SetTxPowerLevel不是根因)。 */
+#define KEYGO_FW_VERSION   "3.36.3-fix28"  /* ★ v3.36.3-fix28+P15 (2026-08-04): P14 断连快窗修复 + P15 LATENCY 4→1 消除 GATT 慢速致 AUTH 超时断开 —— ① 断连后快窗：普通 3s(50ms)/No-App 15s(20ms)→过期降 5s 慢速；② 超慢延迟 5min；③ ULTRA_SLOW 统一排程。P15: LATENCY=4 致每轮 GATT 最慢 1.8s→服务发现+AUTH 最坏 33s>30s 超时；降为 1 后最慢 720ms/轮→AUTH<10s 完成。fix27 88µA 基线保留。 */
 
 /* ─────────────────────────────────────────────────────────────────
  * 公开接口
