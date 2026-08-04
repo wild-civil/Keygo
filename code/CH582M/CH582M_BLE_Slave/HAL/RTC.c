@@ -84,6 +84,7 @@ void HAL_TimeInit(void)
     sys_safe_access_enable();
     R8_CK32K_CONFIG |= RB_CLK_OSC32K_XT | RB_CLK_INT32K_PON | RB_CLK_XT32K_PON;
     sys_safe_access_disable();
+    /* 注意: 本分支仅在 CLK_OSC32K=0(外部晶振)时编译。当前 PCB 无外部晶振, config.h 用 CLK_OSC32K=1, 走上方内部RC分支。 */
 #endif
     RTC_InitTime(2020, 1, 1, 0, 0, 0); //RTC时钟初始化当前时间
     TMOS_TimerInit(0);

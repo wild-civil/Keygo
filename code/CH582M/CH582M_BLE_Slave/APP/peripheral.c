@@ -322,32 +322,23 @@ void Peripheral_Init(void)
         GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24
 #if ADV_SLOWDOWN_ENABLE
         if (g_encRequired) {
-            uint16_t fastMin = 32;
-            uint16_t fastMax = 48;
-            g_advFastMin = fastMin;
-            g_advFastMax = fastMax;
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, fastMin);
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, fastMax);
-            tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
-            LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums, slowdown in %lums\\n",
-                  (unsigned long)20, (unsigned long)30, (unsigned long)ADV_FAST_WINDOW_NOAPP_TICKS);
+            // ★ No-App: 恒定 150ms 广播（手环级体验），不降速、不排降速定时器
+            uint16_t constInt = ADV_CONST_NOAPP_TICKS;
+            g_advFastMin = constInt;
+            g_advFastMax = constInt;
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, constInt);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, constInt);
+            LOGF(LOG_DIAG, "[ADV] No-App CONST %lums (no slowdown)\\n",
+                  (unsigned long)(constInt * 5 / 8));
         } else {
-            g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
-            g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
-            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-            /* STOP→RESTART：先停广告，200ms 后以 5s 新间隔重启 */
-            {
-                uint8_t adv = FALSE;
-                GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-            }
-            g_advSlowRestartPending = 1;
-            tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, 320);
-#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
-            tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
-#endif
-            LOGF(LOG_DIAG, "[ADV] init slow %lums (stop→restart)\\n",
-                  (unsigned long)ADV_SLOW_INT_MS);
+            // ★ 普通模式: 恒定 100ms 广播，不降速、不排降速定时器
+            uint16_t constInt = ADV_CONST_NORMAL_TICKS;
+            g_advFastMin = constInt;
+            g_advFastMax = constInt;
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, constInt);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, constInt);
+            LOGF(LOG_DIAG, "[ADV] CONST %lums (no slowdown)\\n",
+                  (unsigned long)(constInt * 5 / 8));
         }
 #endif
     }
@@ -963,25 +954,24 @@ static void KeyGo_AdvEnterFastWindow(void)
     tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);     // 断连→取消任何残留降速定时器
 #endif
 
+    /* ★ 2026-08-04 (用户决策): 断连后恒定高频广播，不降速 ——
+     *   手环/耳机级体验：OS 后台随时能扫到→自动重连秒级。
+     *   代价：断连态不进 5s/30s 省电，电流高于 88?A（No-App 150ms / 普通 100ms 待实测）。
+     *   No-App 用 150ms、普通用 100ms（均 >100ms，既快又比 20ms 省电）。 */
     if (g_encRequired) {
-        // ★ No-App: 快广播 15s → 慢速 → 超慢
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);  // 20ms
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);  // 30ms
-        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
-        LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums, slowdown in %lums\\n",
-              (unsigned long)20, (unsigned long)30,
-              (unsigned long)(ADV_FAST_WINDOW_NOAPP_TICKS * 5 / 4));
+        // ★ No-App: 恒定 150ms 广播，不排降速定时器
+        uint16_t constInt = ADV_CONST_NOAPP_TICKS;
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, constInt);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, constInt);
+        LOGF(LOG_DIAG, "[ADV] No-App CONST %lums (no slowdown)\\n",
+              (unsigned long)(constInt * 5 / 8));
     } else {
-        // ★ fix28: 普通模式 3s 快窗 (50ms) → 5s 慢速 → 5min 超慢
-        //   fix27 零快窗口→断连直降 5s→30s 超慢，用户掏手机扫不到，"经常断一下连不上"。
-        //   ULTRA_SLOW 由 SBP_ADV_SLOWDOWN_EVT 统一排程，这里不再直排（避免双重定时器冲突）。
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
-        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
-        LOGF(LOG_DIAG, "[ADV] fast %lums→slow %lums in %lums\\n",
-              (unsigned long)(DEFAULT_ADVERTISING_INTERVAL * 5 / 800),
-              (unsigned long)ADV_SLOW_INT_MS,
-              (unsigned long)ADV_FAST_WINDOW_MS);
+        // ★ 普通模式: 恒定 100ms 广播，不排降速定时器
+        uint16_t constInt = ADV_CONST_NORMAL_TICKS;
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, constInt);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, constInt);
+        LOGF(LOG_DIAG, "[ADV] CONST %lums (no slowdown)\\n",
+              (unsigned long)(constInt * 5 / 8));
     }
 }
 #endif

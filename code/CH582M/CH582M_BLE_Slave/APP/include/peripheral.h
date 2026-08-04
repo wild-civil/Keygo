@@ -84,20 +84,19 @@ extern "C" {
 
 
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
-#define DEFAULT_ADVERTISING_INTERVAL     160  // 100ms  ★ EXP(2026-08-04): 普通快窗 50ms→100ms(发现稍慢但广播省电;No-App 快窗仍 20ms 硬编码)
+#define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms  ★ 普通快窗间隔：恢复接近手环级"秒发现"体验(此前 100ms 太慢,断连过 3s 后掉 5s 慢速,OS 自动重连难抓包);50ms 兼顾省电
 
 /* ★ v3.36.3-fix28+P15 (P14/P15): fix27 回归修复 + 连接参数优化 ——
- *   ① 断连后加「快重连窗口」：普通 3s(50ms) / No-App 15s(20ms)，过期才降至 5s 慢速。
- *     fix27 断连直降 5s→30s 超慢致"经常断一下就再也连不上，需重启设备"。
- *   ② 超慢广播延迟从 30s→5min，只有真正长时间无人连接才进 30s 省电。
- *   ③ ULTRA_SLOW 统一由 SBP_ADV_SLOWDOWN_EVT 排程（不再由 KeyGo_AdvEnterFastWindow 直排，
- *     避免双重定时器冲突）。
+ *   ① 断连后【恒定高频广播，不降速】(2026-08-04 用户决策)：普通 100ms / No-App 150ms。
+ *      目的：手环/耳机级体验——OS 后台随时扫到→自动重连秒级。代价：断连态不进 5s/30s 省电，电流高于 88µA(待实测)。
+ *      此前 fix28 用"快窗 3s/15s→5s 慢速→5min 超慢"，但慢速后 OS 被动自动重连难抓包→体验差，已弃用。
+ *   ② 超慢广播延迟从 30s→5min，只有真正长时间无人连接才进 30s 省电（仅 ADV_SLOWDOWN_ENABLE=1 且仍走降速路径时生效）。
+ *   ③ ULTRA_SLOW 统一由 SBP_ADV_SLOWDOWN_EVT 排程（不再由 KeyGo_AdvEnterFastWindow 直排，避免双重定时器冲突）。
  *   ④ ★ P15: LATENCY 4→1（fix24 LATENCY=4 每轮 GATT 最慢 1.8s → 服务发现+AUTH 最坏 33s
- *      > 30s 超时 → "连接好久--然后自动断开"）。降为 1 后最慢 720ms/轮 → AUTH<10s 安全。
- *   ⑤ ★ EXP(2026-08-04): 用户实验参数 — MIN 40→120ms / MAX 400→240ms / LATENCY 1→3 / 普通快窗 50→100ms。
- *      目的：测"更省电(高 LATENCY) + 仍够快(AUTH<30s)"的边界。最坏(3+1)×240=960ms/轮→AUTH~17s<30s 安全。
+ *      > 30s 超时 → "连接好久--然后自动断开"）。降为 1 后最慢 720ms/轮 → AUTH<10s 安全；现 LATENCY=2。
+ *   ⑤ ★ EXP(2026-08-04): 用户实验参数 — MIN 40→120ms / MAX 400→240ms / LATENCY 1→3→2。
  *      注：RSSI 真实采样率由 SBP_STATE_MACHINE_PERIOD(≈2s) 固定，g_cfgRssiPeriodMs(APP下发)当前为死参数未接线。
- * ★ 实测：普通模式未连接最低 **88µA**（5s STOP→RESTART 生效）；超慢 30s 可进一步省电。
+ * ★ 实测：普通模式未连接最低 **88µA**（5s STOP→RESTART 生效，旧降速路径）；现恒定 100/150ms 待重测功耗。
  * ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。 */
 #define ADV_SLOWDOWN_ENABLE          1
 #define ADV_FAST_WINDOW_TICKS       4800    // ★ fix28: 普通模式快窗口 3s (=4800×0.625ms)，断连后手机足够重新发现设备
@@ -109,6 +108,12 @@ extern "C" {
 #define ADV_ULTRA_SLOW_INT_MS       (ADV_ULTRA_SLOW_INT_TICKS * 5 / 4) // =30000ms，仅日志用
 #define ADV_ULTRA_SLOW_DELAY_TICKS  480000  // ★ fix28: 超慢延迟 5min（=480000×0.625ms），慢速→超慢
 /* ★ fix26: 已移除 ADV_TX_POWER 宏和所有 LL_SetTxPowerLevel 调用（fix25 疑似为 No-App 配对失败根因）。 */
+
+/* ★ 2026-08-04 (用户决策): 断连后恒定高频广播，不降速 —— 手环/耳机级体验。
+ *   No-App 150ms / 普通 100ms，均 >100ms（快且比 20ms 省电）。
+ *   代价：断连态不再进 5s/30s 省电，电流高于 88µA，待实测。 */
+#define ADV_CONST_NORMAL_TICKS      240    // 150ms (=240×0.625ms) 普通模式恒定广播
+#define ADV_CONST_NOAPP_TICKS       240    // 150ms (=240×0.625ms) No-App 模式恒定广播
 
 // 连接参数
 /* ──────────────────────────────────────────────────────────────────
@@ -159,7 +164,7 @@ extern "C" {
  *      iOS: (1+1) × 400ms = 800ms ≤ 2s ✓ 充足余量。
  *   ★ 验证：UART log [DIAG] ParamUpd int=XX(XXms) 看实际协商值。
  *   ★ 若仍需更快 → LATENCY=0；若需更省电 → LATENCY=2（AUTH 总时长~15s，仍有 ~15s 余量）。 */
-#define DEFAULT_DESIRED_SLAVE_LATENCY        3     // ★ EXP(2026-08-04): 用户实验—原 1→3(更省电,但 GATT 略慢;最坏(3+1)x240=960ms/轮<AUTH死线)
+#define DEFAULT_DESIRED_SLAVE_LATENCY        2     // ★ EXP(2026-08-04): 用户实验—LATENCY=3 偶发 AUTH 超时断开 → 回退到 2(最坏(2+1)x240=720ms/轮<AUTH死线,余量更足)
 #define DEFAULT_DESIRED_CONN_TIMEOUT         2000  // 20s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH
