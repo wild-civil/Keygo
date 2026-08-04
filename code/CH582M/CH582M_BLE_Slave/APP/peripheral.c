@@ -310,9 +310,14 @@ void Peripheral_Init(void)
     KeyGo_LoadPasscode(); // ★ 方案1 扩展: 从 DataFlash 恢复系统配对码(OS passkey)
     Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（内部据 g_encRequired 设配对模式+开配对窗）
 
-    /* ★ fix28 (P14): 广播策略在 Bonding_Init 之后统一设置 ——
-     *   Normal mode: 冷启动即 5s 慢速（STOP→RESTART 生效，实测 88?A），5min 后切 30s 超慢。
-     *   No-App mode: 20/30ms 快广播 15s（OS 自动重连），到期切 5s 慢速→5min 后切 30s 超慢。 */
+    /* ★ fix27 (P13): 广播策略必须在 Bonding_Init 之后设置 ——
+     *   fix26 的数据证明：① Bonding_ApplyPairingMode() 会把 TGAP_DISC_ADV_INT_* 覆写回 50ms，
+     *   抵消之前在 Peripheral_Init 中设的 5s；② 广播参数在 GAPRole_StartDevice 前设置会被
+     *   GAP 内部默认值覆盖（这就是 fix19~fix26 广告间隔从未改变的根因）。
+     *   fix27：移走 Bonding_ApplyPairingMode 中的 TGAP 覆写后，在 Bonding_Init 后统一设参。
+     *   普通模式：设 5s 慢速 → STOP→RESTART 立即生效（200ms 广告空隙可接受）。
+     *   No-App 模式：设 20/30ms 快速 → 5s 快窗口给 OS 自动重连+配对。
+     *   配对窗已在 Bonding_Init 内为 encRequired=1 自举打开。 */
     {
         GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, DISABLE);  // ★ fix24
 #if ADV_SLOWDOWN_ENABLE
@@ -324,14 +329,14 @@ void Peripheral_Init(void)
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, fastMin);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, fastMax);
             tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
-            LOGF(LOG_DIAG, "[ADV] No-App init fast %lums, slowdown in %lums\n",
-                  (unsigned long)20, (unsigned long)(ADV_FAST_WINDOW_NOAPP_TICKS * 5 / 4));
+            LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums, slowdown in %lums\\n",
+                  (unsigned long)20, (unsigned long)30, (unsigned long)ADV_FAST_WINDOW_NOAPP_TICKS);
         } else {
             g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
             g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-            /* STOP→RESTART：先停，200ms 后以 5s 新间隔重启（实测 88?A） */
+            /* STOP→RESTART：先停广告，200ms 后以 5s 新间隔重启 */
             {
                 uint8_t adv = FALSE;
                 GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
@@ -341,7 +346,7 @@ void Peripheral_Init(void)
 #if ADV_ULTRA_SLOW_DELAY_TICKS > 0
             tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
 #endif
-            LOGF(LOG_DIAG, "[ADV] init slow %lums (stop→restart)\n",
+            LOGF(LOG_DIAG, "[ADV] init slow %lums (stop→restart)\\n",
                   (unsigned long)ADV_SLOW_INT_MS);
         }
 #endif
@@ -553,9 +558,10 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
 
 #if ADV_SLOWDOWN_ENABLE
     if (events & SBP_ADV_SLOWDOWN_EVT) {
-        /* ★ fix28: 快重连窗口到期 → STOP→RESTART 切 5s 慢速。
-         *   降速后同时排 5min 超慢定时器（统一路径，不再由 KeyGo_AdvEnterFastWindow 直排）。
-         *   STOP→RESTART：停广告→200ms→以新间隔重启（fix26 实测有效→88?A）。 */
+        /* ★ fix26: 快广播窗口到期 → 用 STOP→RESTART 切慢速 5s。
+         *   fix19/fix24/fix25 的 "GAP_SetParamValue+ENABLED=TRUE" 方式跨3版从未真正改变广播间隔
+         *   （实测 580/560?A 放电说明广播始终 50ms）。fix26 改为：停止广告→启定时器→重启广告，
+         *   这给 GAP 角色任务充分时间消化参数变更再以新间隔重启。 */
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
@@ -574,9 +580,8 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 #endif
 
-    /* ★ fix28: 超慢广播—STOP→RESTART 切 30s（极长时间无连接，深度省电）。
-     *   触发条件：降速至 5s 后 5min 无人连接（由 SBP_ADV_SLOWDOWN_EVT 排程，fix27 的 30s 已拉长到 5min）。
-     *   下次连接/断连会在 KeyGo_AdvEnterFastWindow 中取消重排。 */
+    /* ★ fix26: 超慢广播 — STOP→RESTART 切 30s 间隔（深度停车最低功耗）。
+     *   下次连接/断连事件取消本定时器，重入广告逻辑。 */
 #if ADV_SLOWDOWN_ENABLE && ADV_ULTRA_SLOW_DELAY_TICKS > 0
     if (events & SBP_ADV_ULTRA_SLOW_EVT) {
         if (!g_deviceConnected) {
@@ -934,34 +939,42 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
     }
 }
 
-/* ★ fix28 (P14): 断连后重连策略（替代 fix27 的"零快窗口→直降 5s→30s 超慢"致命回归）。
- *   原则：断连时一律进入快广播窗口（给手机充分重新发现时间），到期才降速→超慢。
- *   快窗口时长：普通模式 3s(50ms) / No-App 15s(20ms)。
- *   超慢控制：不再由本函数直排，统一由 SBP_ADV_SLOWDOWN_EVT 处理完后排 SBP_ADV_ULTRA_SLOW_EVT(5min)。 */
+/* ★ v3.36.3-fix19→fix20 (P6): 进入「快广播窗口」。
+ *   只设置快广播间隔参数并（重）启动降速定时器；【绝不】在此开关广播。
+ *   - 上电态：GAPRole_PeripheralStartDevice 会用已设好的快间隔启动广播；
+ *   - 断连态：由 Peripheral_LinkTerminated 调 GAPROLE_ADVERT_ENABLED=TRUE 启动。
+ *   ★ fix20 修复：此前此处（及慢速处理器）用「FALSE 后立刻 TRUE」背靠背切换广播，
+ *     而 GAPROLE_ADVERT_ENABLED 是 GAP 角色任务异步处理的 HCI 命令，同 tick 背靠背会竞态，
+ *     可能让广播卡在 OFF → 设备不可发现 → 连不上（官方 HID 例程 hidDevLowAdvertising
+ *     切高低占空比也只用 enable=TRUE，从不先 FALSE）。 */
+/* ★ fix25 (P11): 断连后恢复广播。策略因 g_encRequired 而异 ——
+ *   普通模式：直接 5s 慢速（跳过 fix19 快窗口，因其降速机制疑似未生效→580?A 始终不降），起 30s 超慢定时器。
+ *   No-App 模式：快广播窗口（给 OS 5s 自动重连机会），到期切慢速再超慢。 */
 #if ADV_SLOWDOWN_ENABLE
 static void KeyGo_AdvEnterFastWindow(void)
 {
 #if ADV_ULTRA_SLOW_DELAY_TICKS > 0
-    tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // 取消任何残留超慢定时器
-    tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);     // 取消任何残留降速定时器
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);   // 断连→取消任何残留超慢定时器
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);     // 断连→取消任何残留降速定时器
 #endif
 
     if (g_encRequired) {
-        // ★ No-App: 20/30ms 快广播 15s → SBP_ADV_SLOWDOWN_EVT → 5s 慢速 → 5min → 30s 超慢
+        // ★ No-App: 快广播 5s → 慢速 → 超慢
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);  // 20ms
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);  // 30ms
         tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_NOAPP_TICKS);
-        LOGF(LOG_DIAG, "[ADV] No-App fast %lums, slowdown in %lums\n",
-              (unsigned long)20, (unsigned long)(ADV_FAST_WINDOW_NOAPP_TICKS * 5 / 4));
+        LOGF(LOG_DIAG, "[ADV] No-App fast %lums/%lums, slowdown in %lums\\n",
+              (unsigned long)20, (unsigned long)30,
+              (unsigned long)(ADV_FAST_WINDOW_NOAPP_TICKS * 5 / 4));
     } else {
-        // ★ 普通模式: 50ms 默认快广播 3s → SBP_ADV_SLOWDOWN_EVT → 5s 慢速 → 5min → 30s 超慢
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);  // =80(50ms)
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);  // =80(50ms)
-        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
-        LOGF(LOG_DIAG, "[ADV] fast %lums (reconnect window), slowdown in %lums\n",
-              (unsigned long)(DEFAULT_ADVERTISING_INTERVAL * 5 / 4),
-              (unsigned long)(ADV_FAST_WINDOW_TICKS * 5 / 4));
-        // ★ 注意：不在此处排 ULTRA_SLOW。降至慢速后由 SBP_ADV_SLOWDOWN_EVT 排。
+        // ★ 普通模式：直接 5s 慢速（零快窗口，彻底省电）
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
+#if ADV_ULTRA_SLOW_DELAY_TICKS > 0
+        tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
+#endif
+        LOGF(LOG_DIAG, "[ADV] slow %lums (direct, no fast window)\\n",
+              (unsigned long)ADV_SLOW_INT_MS);
     }
 }
 #endif

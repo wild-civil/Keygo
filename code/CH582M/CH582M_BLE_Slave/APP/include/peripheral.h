@@ -86,22 +86,19 @@ extern "C" {
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
 #define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
 
-/* ★ v3.36.3-fix28 (P14): fix27 两个致命回归修复 —— 
- *   ① 断连后加「快重连窗口」：普通 3s(50ms) / No-App 15s(20ms)，过期才降至 5s 慢速。fix27 断连直降 5s→30s 超慢致"经常断一下就再也连不上，需重启设备"。
- *   ② 超慢广播延迟从 30s→5min，只有真正长时间无人连接才进 30s 省电。
- *   ③ 快窗口值大幅提升：No-App 5s→15s，普通 0s→3s。
- * ★ 实测：普通模式未连接最低 **88µA**（5s STOP→RESTART 生效）；超慢 30s 可进一步省电但重新连更难。
+/* ★ v3.36.3-fix27 (P13): 1) No-App 配对冷启动自举开窗(Bonding_Init 中 if (g_encRequired) OpenPairingWindow)；
+ *   2) 移除 Bonding_ApplyPairingMode 中的 TGAP 覆写(广播间隔统一由 Peripheral_Init 管理)；
+ *   3) 广播参数移到 Bonding_Init 之后设置(此时 g_encRequired 已加载，不会被覆盖)。
+ * ★ 实测：普通模式未连接最低 **88µA**（断连电流从 fix25/fix26 的 560/800µA 直降 7~9 倍！）。
  * ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。 */
-#define ADV_SLOWDOWN_ENABLE          1
-/* ★ fix28: 快重连窗口（断连后立即进入，给手机充分重新发现时间） */
-#define ADV_FAST_WINDOW_TICKS       4800    // 普通模式快窗口 3s (=4800×0.625ms)
-#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈3000ms，仅日志用
-#define ADV_FAST_WINDOW_NOAPP_TICKS 24000   // ★ fix28: No-App 快窗口 15s (原 8000=5s，实测 OS 自动重连+配对远超 5s)
-#define ADV_SLOW_INT_TICKS          8000    // 慢速广播间隔 =5s（=8000×0.625ms）
+#define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
+#define ADV_FAST_WINDOW_TICKS       1600    // ★ fix25: 快广播窗口 ≈1s（普通模式仅1s预热；No-App用 ADV_FAST_WINDOW_NOAPP_TICKS）
+#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈1000ms，仅日志用
+#define ADV_FAST_WINDOW_NOAPP_TICKS 8000   // ★ fix25: No-App 模式快速窗口 5s（给 OS 足够时间扫描并自动重连）
+#define ADV_SLOW_INT_TICKS          8000    // ★ 低功耗: 慢速广播间隔 =5s（=8000×0.625ms）; 发现变慢+2~3s (fix21: 2s→5s)
 #define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =5000ms，仅日志用
-/* ★ fix28: 超慢广播只在长时间无连接后启用（5min 后切 30s 间隔）。fix27 的 30s 防线太短→设备断连后很快不可发现。 */
-#define ADV_ULTRA_SLOW_DELAY_TICKS  480000  // ★ fix28: 超慢延迟 5min (原 48000=30s)
-#define ADV_ULTRA_SLOW_INT_TICKS    48000   // 超慢广播间隔 30s
+/* ★ fix26 (P12): 超慢广播 — 深度停车后每 30s 发一个广播包。STOP→RESTART 方式切换间隔。 */
+#define ADV_ULTRA_SLOW_INT_TICKS    48000   // ★ fix25: 30s（原 10s）; 超慢广播间隔
 #define ADV_ULTRA_SLOW_INT_MS       (ADV_ULTRA_SLOW_INT_TICKS * 5 / 4) // =30000ms，仅日志用
 #define ADV_ULTRA_SLOW_DELAY_TICKS  48000  // ★ fix25: 30s（原 2min）; 进入慢速后 30s 切超慢
 /* ★ fix26: 已移除 ADV_TX_POWER 宏和所有 LL_SetTxPowerLevel 调用（fix25 疑似为 No-App 配对失败根因）。 */
