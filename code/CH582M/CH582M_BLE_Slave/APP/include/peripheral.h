@@ -84,7 +84,7 @@ extern "C" {
 
 
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
-#define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
+#define DEFAULT_ADVERTISING_INTERVAL     160  // 100ms  ★ EXP(2026-08-04): 普通快窗 50ms→100ms(发现稍慢但广播省电;No-App 快窗仍 20ms 硬编码)
 
 /* ★ v3.36.3-fix28+P15 (P14/P15): fix27 回归修复 + 连接参数优化 ——
  *   ① 断连后加「快重连窗口」：普通 3s(50ms) / No-App 15s(20ms)，过期才降至 5s 慢速。
@@ -94,6 +94,9 @@ extern "C" {
  *     避免双重定时器冲突）。
  *   ④ ★ P15: LATENCY 4→1（fix24 LATENCY=4 每轮 GATT 最慢 1.8s → 服务发现+AUTH 最坏 33s
  *      > 30s 超时 → "连接好久--然后自动断开"）。降为 1 后最慢 720ms/轮 → AUTH<10s 安全。
+ *   ⑤ ★ EXP(2026-08-04): 用户实验参数 — MIN 40→120ms / MAX 400→240ms / LATENCY 1→3 / 普通快窗 50→100ms。
+ *      目的：测"更省电(高 LATENCY) + 仍够快(AUTH<30s)"的边界。最坏(3+1)×240=960ms/轮→AUTH~17s<30s 安全。
+ *      注：RSSI 真实采样率由 SBP_STATE_MACHINE_PERIOD(≈2s) 固定，g_cfgRssiPeriodMs(APP下发)当前为死参数未接线。
  * ★ 实测：普通模式未连接最低 **88µA**（5s STOP→RESTART 生效）；超慢 30s 可进一步省电。
  * ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。 */
 #define ADV_SLOWDOWN_ENABLE          1
@@ -143,8 +146,8 @@ extern "C" {
  *   仅修改此文件中的宏值即可, 会自动传播到:
  *     peripheral.c → 广播数据 / 连接请求 / 参数更新请求
  * ────────────────────────────────────────────────────────────────── */
-#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    32    // 40ms    ★ fix24: 回退 250→40ms（fix23 的 250ms 被手机拒绝，仍用 30ms）
-#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    320   // 400ms   ★ fix24: 回退 2000→400ms，配合 LATENCY 4 达成 iOS 2s 卡线
+#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    96    // 120ms   ★ EXP(2026-08-04): 用户实验—原 40ms→120ms(更积极,手机可能仍拉回)
+#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    192   // 240ms   ★ EXP: 原 400ms→240ms(给手机 120~240ms 选择空间)
 /* ★ fix28-P15 LATENCY 策略（fix28-fixed 实测反馈修正）：
  *   fix24 LATENCY=4 过于激进，每个 GATT round-trip 最慢 5×360ms=1800ms：
  *     服务发现~22s + FF02订阅~3.6s + NONCE~3.6s + AUTH~3.6s = 33s → 超 30s 强断。
@@ -156,7 +159,7 @@ extern "C" {
  *      iOS: (1+1) × 400ms = 800ms ≤ 2s ✓ 充足余量。
  *   ★ 验证：UART log [DIAG] ParamUpd int=XX(XXms) 看实际协商值。
  *   ★ 若仍需更快 → LATENCY=0；若需更省电 → LATENCY=2（AUTH 总时长~15s，仍有 ~15s 余量）。 */
-#define DEFAULT_DESIRED_SLAVE_LATENCY        1     // ★ fix28-P15: 从 4→1（消除 GATT 慢速致 AUTH 30s 超时断开）
+#define DEFAULT_DESIRED_SLAVE_LATENCY        3     // ★ EXP(2026-08-04): 用户实验—原 1→3(更省电,但 GATT 略慢;最坏(3+1)x240=960ms/轮<AUTH死线)
 #define DEFAULT_DESIRED_CONN_TIMEOUT         2000  // 20s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH
