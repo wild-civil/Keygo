@@ -24,7 +24,10 @@ extern "C" {
 // ── TMOS 事件掩码 ──
 #define SBP_START_DEVICE_EVT        0x0001  // 启动设备 (GAP Role)
 #define SBP_PERIODIC_EVT            0x0002  // 周期性任务 (状态机 + 通知)
-#define SBP_READ_RSSI_EVT           0x0004  // 读取 RSSI
+/* ★ fix22: 0x0004 原为 SBP_READ_RSSI_EVT（独立定期读 RSSI，每 500ms 一次唤醒）。
+ *   现 RSSI 读取已合并到 KeyGo_ProcessStateMachine 内联（每 2 tick 读一次），
+ *   消除一个独立睡眠→唤醒周期，省 ~40µA。0x0004 位释放可用。 */
+#define SBP_ADV_ULTRA_SLOW_EVT      0x0004  // ★ fix24: 超长时间无连接 → 切超慢广播（深度停车省电）
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
 /* ★ v3.36.3-fix19 (P6 低功耗): 复用 0x0010 位作为「广播降速」定时器事件。
  *   原 SBP_PHY_UPDATE_EVT(0x0010) 从未作为 TMOS 任务事件被 tmos_start_task/事件处理使用
@@ -56,10 +59,11 @@ extern "C" {
 #define SBP_GPIO_RIDE_EVT         0x0200  // ★ Phase 2: ebike RIDE 双脉冲序列回调（务必避开 0x8000=SYS_EVENT_MSG）
 
 // ── 定时周期 (单位: TMOS tick ≈ 0.625ms) ──
-#define SBP_PERIODIC_EVT_PERIOD        1600   // ~1s  系统状态更新
-#define SBP_READ_RSSI_EVT_PERIOD       800    // ~500ms RSSI 读取
-#define SBP_STATE_MACHINE_PERIOD       200    // ~125ms 状态机轮询
-#define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   连接参数更新
+#define SBP_PERIODIC_EVT_PERIOD        1600   // ~1s  系统状态更新 (P16: 改善RSSI响应, 代价可忽略)
+/* ★ fix22: SBP_READ_RSSI_EVT_PERIOD 已移除 — RSSI 读取合并到状态机内联，不再独立定时 */
+#define SBP_STATE_MACHINE_PERIOD       1600   // ~1s  状态机轮询 (P16: RSSI有效更新从~4s→~2s, 用户体验改善显著)
+#define SBP_PARAM_UPDATE_DELAY         6400   // ~4s   首次连接参数更新延迟（连上后等手机稳定再请求）
+#define SBP_PARAM_UPDATE_PERIOD        48000  // ★ fix23: ~30s 连接参数更新周期性重试（确保手机接受长间隔）
 #define SBP_ADV_RESTART_DELAY          320    // ★ v3.13: ~200ms advertising 恢复延迟（给 BLE Controller 缓冲时间）
 #define SBP_ADV_RESTART_MAX_RETRIES    3      // ★ v3.13: 最多重试 3 次（总计 ~800ms 恢复窗口）
 #define SBP_BATTERY_CHECK_PERIOD        48000  // ★ v3.13: ~30s 电池检测间隔
@@ -79,71 +83,66 @@ extern "C" {
 #define RIDE_EXIT_LOCK_DELAY_TICKS  3200    // ~2000ms  解锁脉冲结束后延迟 2s 输出 LOCK（先解锁退出骑行，隔 2s 再上锁）
 
 
+/* ★ MA(seconds, ticks_per_second): 将「秒」转换为 TMOS tick 数（1 tick ≈ 0.625ms = 1600 tick/s）。
+ *   用法: MA(5, 1600) = 5×1600 = 8000 ticks = 5s。用于广播/连接参数等常量定义的可读性提升。 */
+#define MA(sec, tps)  ((sec) * (tps))
+
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
-#define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms
+#define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms（旧值，已被 ADV_SLOWDOWN_ENABLE 覆盖）
 
-/* ★ v3.36.3-fix19 (P6 低功耗): 断连/上电后「快广播窗口 + 慢速待机」两段式广播。
- *   动机：断连态原一直 50ms 高频广播（bonding.c 自注"20ms 较耗电"），是待机最大耗电点。
- *   策略：上电/断连后先保持快广播 ADV_FAST_WINDOW_TICKS（用户主动靠近时即时发现），
- *         窗口到期切慢速 ADV_SLOW_INT_TICKS（省电），一连上连接即取消定时器。
- *   ★ 一键开关：ADV_SLOWDOWN_ENABLE=0 即完全回到旧行为（恒 50ms 快广播），回归可秒关。
- *   ★ 安全约束：慢速仅影响「可发现性/重连速度」，不改连接参数、不触发任何控制逻辑；
- *         慢速下重连/自动解锁发现变慢约 +1~2s（代价，需真机权衡）。 */
-#define ADV_SLOWDOWN_ENABLE          1      // 1=启用 P6 广播降速；0=关闭(恒快广播，旧行为)
-#define ADV_FAST_WINDOW_TICKS       16000   // ★ 快广播窗口时长 ≈10s（= N×0.625ms）。可按产品调：30s=48000
-#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 4)   // ≈10000ms，仅日志用
-#define ADV_SLOW_INT_TICKS          1600    // ★ 慢速广播间隔 =1s（=1600×0.625ms）。可改 3200=2s 更省但发现更慢
-#define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 4)       // =1000ms，仅日志用
+/* ── 恒定广播（不再降速）──  */
+/* No-App 模式：恒定 150ms 广播              */
+#define ADV_CONST_NOAPP_TICKS        240       // 150 ms（位 256=160ms）
 
-// 连接参数
+/* ★ 当前最优选择：120ms 恒定广播（连接事件 160ms，每个事件完成）*/
+/*   120ms@1200bps≈144bit TX，空中时长≈8%，BLE 协议内最高效组合 */
+/*   P15-final: 使用 120ms 恒定广播 */
+#define ADV_CONST_NORMAL_TICKS     192       // 120 ms（当前最优: 120ms>100ms 且无间隔切换复杂度）
+
+#define ADV_ULTRA_SLOW_DELAY_TICKS     MA(5 * 60, 1600)  // 5 min
+#define ADV_ULTRA_SLOW_INT_TICKS       MA(30,     1600)  // 30 s
+
+/* ★ v3.36.3-fix19 (P6 低功耗): ADV_SLOWDOWN_ENABLE 控制广播策略分支。
+ *   =1 启恒定广播（P15-final: 120ms 普通 / 150ms No-App，不降速），
+ *   =0 回旧行为（恒 DEFAULT_ADVERTISING_INTERVAL）。 */
+#define ADV_SLOWDOWN_ENABLE          1      // 1=启用恒定广播策略；0=关闭(旧行为)
+#define ADV_FAST_WINDOW_TICKS       MA(3,  1600)   // ★ 快广播窗口 ≈3s（仅 No-App 模式用到）
+#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 8)   // ≈1875ms，仅日志用
+#define ADV_FAST_WINDOW_TICKS_NOAPP MA(15, 1600)   // ★ No-App 快广播窗口 ≈15s
+#define ADV_FAST_WINDOW_MS_NOAPP    (ADV_FAST_WINDOW_TICKS_NOAPP * 5 / 8) // ≈9375ms，仅日志用
+#define ADV_SLOW_INT_TICKS          MA(5,  1600)   // ★ 慢速广播间隔 =5s（快速窗口后切此间隔）
+#define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 8)       // =3125ms，仅日志用
+
 /* ──────────────────────────────────────────────────────────────────
- * 连接参数调优 (v3.15 分析记录, 暂未实施)
+ * 连接参数调优 (pm-test P15-final 经验移植到 PCB-V1)
  *
  * 当前值:
- *   MIN interval=6  (7.5ms)  — 激进, 部分国产 ROM 最低只支持 15ms
- *   MAX interval=100 (125ms)
- *   Latency=0                — 每次连接事件必须响应
- *   Timeout=100    (1s)      — 1s 无通信即断开
+ *   MIN interval=128 (160ms)
+ *   MAX interval=256 (320ms)
+ *   Latency=2        — 最多跳 2 个连接事件，每轮 GATT 最慢 ~720ms
+ *   Timeout=2000     — 20s 无通信即断开
  *
- * 待观察指标:
- *   反复出现"扫描到了但连接失败" → 优先改 MIN→12 (15ms)
- *   弱信号环境频繁闪断           → 考虑 Timeout→200 (2s) 或启用 Latency
+ * 选值依据:
+ *   - 160ms MIN: 足够 BLE 稳定通信，向下兼容大部分手机
+ *   - 320ms MAX: 空闲时节省连接事件频率
+ *   - LATENCY=2: 平衡省电与响应速度（AUTH<15s 远低于 30s 死线）
+ *   - 20s TO: (2+1)×320ms×2=1920ms < 20000ms ✓ 充足余量
+ *     iOS: (2+1)×320ms=960ms ≤ 2s ✓ 余量充足
  *
- * 改动方案 A: MIN interval 6→12 (15ms) — 推荐优先实施
- *   + 兼容性大幅提升: 多数国产 ROM 最低 11.25~15ms, 7.5ms 可能被拒绝
- *   + 省电 ~50%: 连接事件频率减半 (133→66 次/s)
- *   + 弱信号更稳: 丢包后有更长重传窗口
- *   - RSSI 采样频率减半 (~80→~40 次/s), 但有 Kalman 滤波器, 足够
- *   - BLE 吞吐量减半 (~17→~8 KB/s), KeyGo 只传几十字节 JSON, 无影响
- *
- * 改动方案 B: Timeout 100→200 (1s→2s) — 视实际情况决定
- *   + 弱信号容错增加: 扛过短时遮挡 (手机放口袋/转身 1~2s)
- *   - 用户走出范围后 APP 要 2s 才知道断连, 体验变差
- *   - 断连自动锁车延迟增加
- *   x 不建议超过 2s (锁控设备 "快速感知断开" 比 "容忍弱信号" 更重要)
- *
- * 备选方案 C: 不改 Timeout, 启用 Latency (e.g. Latency=3)
- *   + 容许多次连接事件不响应, 但物理超时不变
- *   + 即保留 1s 快速检测, 又容忍短时遮挡
- *   x 需两端协商, Android 支持不一
+ * 安全约束验证：
+ *   CONN_TIMEOUT(×10ms) > MAX_INTERVAL(×1.25ms) × (latency+1) × 2
+ *   = 20000ms > 320ms × 3 × 2 = 1920ms ✓
  *
  * 如何改动:
  *   仅修改此文件中的宏值即可, 会自动传播到:
  *     peripheral.c → 广播数据 / 连接请求 / 参数更新请求
  * ────────────────────────────────────────────────────────────────── */
-#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    6     // 7.5ms   连接间隔   = N × 1.25ms     （范围 6~3,200 → 7.5ms~4s）
-#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    100   // 125ms
-/* ★ P3-A（v3.36.3-fix18，低功耗）：从机延迟 0 → 4 + 连接超时 1s → 6s。
- *   从机可"跳过"最多 4 个连续连接事件 → 射频收发次数降至约 1/5，连接态功耗显著下降；
- *   自动解锁最大延迟由 <125ms 升至 <625ms（=125ms×(4+1)），用户基本无感。
- *   ★ 安全约束（必须满足，否则手机会拒绝/频繁断连）：
- *      CONN_TIMEOUT(×10ms) > MAX_INTERVAL(×1.25ms) × (latency+1) × 6
- *      = 125ms × 5 × 6 = 4687.5ms → 此处 600(6s) ✓。
- *      iOS/Android 兼容性：有效间隔(125×5=625ms)≤2s 且 6×625ms=3.75s≤6s ✓。
- *   ★ 仅"建议"参数：手机（尤其 iOS）可协商成更小值，固件自动接受，不会劣化功能。
- *   ★ 回退：若发现连接异常/解锁变慢不可接受，把 SLAVE_LATENCY 改回 0、CONN_TIMEOUT 改回 100 即可。 */
-#define DEFAULT_DESIRED_SLAVE_LATENCY        4
-#define DEFAULT_DESIRED_CONN_TIMEOUT         600   // 6s      连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
+#define DEFAULT_DESIRED_MIN_CONN_INTERVAL    128   // 160ms   连接态待机间隔下限（手机可协商在此~MAX之间）
+#define DEFAULT_DESIRED_MAX_CONN_INTERVAL    256   // 320ms   连接态待机间隔上限（手机可选择 160~320ms）
+/* ★ LATENCY=2: 最多跳过 2 个连接事件。每轮 GATT 最慢 (2+1)×~240=720ms，AUTH 总时长 <15s，远低于 30s 超时死线。
+ *   若仍需更快 → LATENCY=0（追求最小延迟）；更省电 → LATENCY=3（需验证 AUTH 不超时）。 */
+#define DEFAULT_DESIRED_SLAVE_LATENCY        2
+#define DEFAULT_DESIRED_CONN_TIMEOUT         2000  // 20s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
 
 // Company Identifier: WCH
 #define WCH_COMPANY_ID                       0x07D7

@@ -35,3 +35,10 @@ docs/自己看
 
 # 开发板例程灯
 code/CH582M/CH583EVT
+
+# 调试/临时/备份产物
+diff_*.txt
+temp_*.h
+code/CH582M/CH582M_BLE_Slave_proto-final_*/
+code/CH582M/PM/
+code/CH582M/Datasheet_CH582M.pdf

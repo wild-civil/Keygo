@@ -17,7 +17,7 @@
 #include "CH58xBLE_LIB.H"
 #endif
 
-#define DEBUG                         Debug_UART1   // ★ 2026-07-31 临时诊断：打开 [LP] 睡眠日志(见 SLEEP.c)。CLK_OSC32K=1 时 PA10 空闲，可接 UART1(PA9=TX)看日志；改回 CLK_OSC32K=0 前须删此行或改 DEBUG=Debug_UART0/2/3，否则占 32.768K 晶振脚 PA10/PA11。
+// #define DEBUG                         Debug_UART1   // ★ 临时诊断用，生产关闭
 
 #include "CH58x_common.h"
 
@@ -113,7 +113,7 @@
  *   ? 注意：若将来把广播间隔调到 >2.5s 或实现"完全停广播 deep-park"，需重新评估看门狗，
  *     否则长睡会让 g_mainLoopAlive 连续 5 次(~2.5s)不报到 → 误软复位。
  * ★ 调试提示：抓 UART 日志时若发现 PRINT 被睡眠吞掉，临时设回 FALSE 即可（生产固件保持 TRUE）。
- * ★ DCDC_ENABLE 必须保持 FALSE（config.h:82，短路风险，见 MEMORY「关键坑」），与休眠无关。 */
+ * ★ DCDC_ENABLE = TRUE（fix17 启用，自焊板已串电感），与休眠无关。 */
 #ifndef HAL_SLEEP
 #define HAL_SLEEP                           TRUE
 #endif
@@ -167,10 +167,10 @@
 #endif
 
 /* 【RTC】32K 时钟源：0=外部 32.768K 晶振(PA10/PA11)，1=片内 RC 32K
- * ★ 自定义 PCB 实测断连 1.8mA 不睡(片内 RC 32K 不稳/精度差，RTC 睡不了)=> 改走外部晶振。
- *   开发板自带外部 32.768K 晶振，直接可用。焊好晶振后此值必须为 0。 */
+ * ★ 统一选用内部 RC 32K：功耗更低，且外部晶振需额外晶振+2电容，sleep 时必须 remap 脚防浮空耗电。
+ *   CLK_OSC32K=1 时 PA10/PA11 为普通 IO，无浮空风险。 */
 #ifndef CLK_OSC32K
-#define CLK_OSC32K                          0
+#define CLK_OSC32K                          1
 #endif
 
 /* 【内存】协议栈堆 */
@@ -189,7 +189,7 @@
 #define BLE_TX_NUM_EVENT                    1
 #endif
 #ifndef BLE_TX_POWER
-#define BLE_TX_POWER                        LL_TX_POWEER_0_DBM
+#define BLE_TX_POWER                        LL_TX_POWEER_MINUS_3_DBM   // ★ P8: -3dBm 省 ~15% TX 电流，钥匙场景足够
 #endif
 
 /* 【连接数】仅 1 个从机 */

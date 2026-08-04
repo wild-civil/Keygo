@@ -14,6 +14,7 @@
 #include "HAL.h"   // PRINT / tmos_mem*
 #include "keygo_core.h"  // ★ 方案A：KeyGo_CancelUnauthTimer / KeyGo_SendRawNotify 声明
 #include <stdlib.h>   /* ★ v3.36: atoi（Bonding_HandleRssiSetCmd 解析有符号 RSSI 阈值） */
+#include <stdio.h>    /* snprintf */
 
 /* GetMACAddress 是 ISP583.h 提供的宏（FLASH_EEPROM_CMD 封装），经 CONFIG.h 已可见，
  * 直接调用即可，无需也不能做函数前向声明（否则宏展开成非法语法）。 */

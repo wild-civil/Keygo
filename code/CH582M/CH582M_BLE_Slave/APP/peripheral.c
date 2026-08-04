@@ -23,6 +23,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "CH58x_uart.h"   /* ★ 2026-07-16: UART1_RecvString 用于主循环串口命令轮询 (DEBUG) */
+#include <stdio.h>        /* snprintf */
+
+/* ─────────────────────────────────────────────────────────────────
+ * 前向声明 — Peripheral_Init 在 KeyGo_AdvEnterFastWindow 定义前就调用它
+ * ───────────────────────────────────────────────────────────────── */
+static void KeyGo_AdvEnterFastWindow(void);
 
 /* ─────────────────────────────────────────────────────────────────
  * 广播数据
@@ -142,10 +148,6 @@ peripheralConnItem_t peripheralConnList = {GAP_CONNHANDLE_INIT, 0, 0, 0};
 uint8_t  Peripheral_TaskID    = INVALID_TASK_ID;
 static uint8_t advRestartRetryCount = 0;  // ★ v3.13: advertising 重启重试计数器
 static uint16_t peripheralMTU        = ATT_MTU_SIZE;
-/* ★ v3.36.3-fix19 (P6): 记录「快广播」间隔（上电/断连时使用的间隔，普通模式 50ms，
- *   无App HID 模式 20/30ms），供降速→恢复快广播时回填，避免把 HID 模式也降成 50ms。 */
-static uint16_t g_advFastMin = DEFAULT_ADVERTISING_INTERVAL;
-static uint16_t g_advFastMax = DEFAULT_ADVERTISING_INTERVAL;
 
 /* ★ 2026-07-11: FF03 写累积缓冲（文件级静态，供 Peripheral_HandleFF03 追加解析、
  *   并在 Peripheral_LinkTerminated 断连时清空，防止旧残片跨连接误解析）。声明置于
@@ -238,7 +240,7 @@ void Peripheral_Init(void)
 
     PRINT("[INIT] Device Name: %s\n", attDeviceName);
 
-    // ── GAP Role ──
+    // ── GAP Role ── (★ fix27: 先以默认间隔启动广告，广播策略在 Bonding_Init 后统一设置)
     {
         uint8_t  adv_enable          = TRUE;
         uint16_t desired_min         = DEFAULT_DESIRED_MIN_CONN_INTERVAL;
@@ -250,29 +252,6 @@ void Peripheral_Init(void)
         GAPRole_SetParameter(GAPROLE_ADVERT_DATA, advertLen, advertData);
         GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(uint16_t), &desired_min);
         GAPRole_SetParameter(GAPROLE_MAX_CONN_INTERVAL, sizeof(uint16_t), &desired_max);
-    }
-
-    {
-        // ★ v3.34.0 无App模式(HID锚点)：高占空比广播(20ms)加快 OS 后台自动重连发现；
-        //   仅无App模式(g_encRequired=1)启用，普通 App 模式维持默认 50ms 省电。
-        //   ? 量产应加「高占空比 N 秒后转低占空比」降速定时器（见计划文档）。
-        uint8_t  hidMode  = g_encRequired;
-        uint16_t advIntMin = hidMode ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:20ms / 默认:50ms
-        uint16_t advIntMax = hidMode ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 无App:30ms / 默认:50ms
-        g_advFastMin = advIntMin;   // ★ P6: 记录快广播间隔供降速后恢复
-        g_advFastMax = advIntMax;
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, advIntMin);
-        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, advIntMax);
-        GAP_SetParamValue(TGAP_ADV_SCAN_REQ_NOTIFY, ENABLE);
-
-#if ADV_SLOWDOWN_ENABLE
-        /* ★ P6 (fix19): 上电先快广播，窗口到期降速。此时 advertising 尚未启动
-         *   (GAPRole_PeripheralStartDevice 在 SBP_START_DEVICE_EVT 触发)，仅设好参数+起计时，
-         *   广播启动即快间隔，定时器到点(ADV_FAST_WINDOW_TICKS)自动切慢速。 */
-        tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
-        LOGF(LOG_DIAG, "[ADV] power-on fast window %lums, then slow %lums\n",
-              (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
-#endif
     }
 
     // ── GATT Services ──
@@ -330,6 +309,8 @@ void Peripheral_Init(void)
     KeyGo_LoadEncrypt();  // ★ 方案1: 从 DataFlash 恢复 无 App 模式(OS 配对)标志
     KeyGo_LoadPasscode(); // ★ 方案1 扩展: 从 DataFlash 恢复系统配对码(OS passkey)
     Bonding_Init();        // ★ KeyGo 绑定: 载入信任列表 + 配置 Bond Manager（链路加密层，内部据 g_encRequired 设配对模式）
+    /* ★ P15-final: Bonding_Init 后统一按广播策略设置恒定广播间隔（g_encRequired 已就绪） */
+    KeyGo_AdvEnterFastWindow();
     SimpleProfile_RegisterAppCBs(&Peripheral_SimpleProfileCBs);
     GAPRole_BroadcasterSetCB(&Broadcaster_BroadcasterCBs);
 
@@ -528,35 +509,46 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
                 DEFAULT_DESIRED_MIN_CONN_INTERVAL, DEFAULT_DESIRED_MAX_CONN_INTERVAL,
                 DEFAULT_DESIRED_SLAVE_LATENCY, DEFAULT_DESIRED_CONN_TIMEOUT,
                 Peripheral_TaskID);
+        /* ★ fix23: 周期性重试连接参数更新（确保手机接受长间隔/从机延迟）
+         *   首次 ~4s 后请求，之后每 ~30s 重试一次以防手机在 Doze/锁屏后回溯为短间隔。 */
+        tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT, SBP_PARAM_UPDATE_PERIOD);
         return (events ^ SBP_PARAM_UPDATE_EVT);
     }
 
 #if ADV_SLOWDOWN_ENABLE
     if (events & SBP_ADV_SLOWDOWN_EVT) {
-        /* ★ P6 (fix19): 快广播窗口到期 → 切慢速广播以省电。
+        /* ★ P15-final: 快广播窗口到期 → 切慢速广播（5s）。
          *   仅在仍断连态生效（已连接则 advertising 停，切间隔无意义且会被下次断连覆盖）。 */
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
-            // ★ fix20: 切慢速 = 改间隔后用 enable=TRUE 让协议栈以新间隔重启广播。
-            //   官方 HID 例程 hidDevLowAdvertising 同款做法（高/低占空比切换），
-            //   绝不先 FALSE（同 tick 背靠背会竞态卡死广播）。
             uint8_t adv = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
             LOGF(LOG_DIAG, "[ADV] slowed to %lums advertising (standby)\n",
                   (unsigned long)ADV_SLOW_INT_MS);
-            // ★ 保险：慢速切换后重排一次广播健康检查，若切换意外失败可由恢复机制兜底重试。
             tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
+            /* ★ 链式降速: 5min 后进一步切超慢广播（30s）用于深度停车省电 */
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
         }
         return (events ^ SBP_ADV_SLOWDOWN_EVT);
     }
+
+    if (events & SBP_ADV_ULTRA_SLOW_EVT) {
+        /* ★ fix24: 慢速广播持续 5min 后 → 切超慢广播（30s），深度停车省电 */
+        if (!g_deviceConnected) {
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_ULTRA_SLOW_INT_TICKS);
+            GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_ULTRA_SLOW_INT_TICKS);
+            uint8_t adv = TRUE;
+            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
+            LOGF(LOG_DIAG, "[ADV] ultra-slow %lums advertising (deep standby)\n",
+                  (unsigned long)(ADV_ULTRA_SLOW_INT_TICKS * 5 / 8));
+            tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
+        }
+        return (events ^ SBP_ADV_ULTRA_SLOW_EVT);
+    }
 #endif
 
-    if (events & SBP_READ_RSSI_EVT) {
-        GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
-        return (events ^ SBP_READ_RSSI_EVT);
-    }
+    /* ★ fix22: SBP_READ_RSSI_EVT 已移除 — RSSI 读取合并到状态机内联，不再独立定时 */
 
     if (events & SBP_BATTERY_CHECK_EVT) {
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
@@ -815,14 +807,15 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
 
         tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,      SBP_PERIODIC_EVT_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
-        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT,     KeyGo_GetRssiPeriodTicks());
+        /* ★ fix22: SBP_READ_RSSI_EVT 已移除 — RSSI 由状态机内联读取，启动时不再单排定时器 */
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
 
 #if ADV_SLOWDOWN_ENABLE
-        /* ★ P6 (fix19): 一连上连接即取消降速定时器；连接态 advertising 已停，无需切间隔。
+        /* ★ P15-final: 一连上连接即取消降速/超慢降速定时器；连接态 advertising 已停，无需切间隔。
          *   下次断连由 LinkTerminated 重新进入快广播窗口。 */
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);
+        tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);
 #endif
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
@@ -882,22 +875,32 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
     }
 }
 
-/* ★ v3.36.3-fix19→fix20 (P6): 进入「快广播窗口」。
- *   只设置快广播间隔参数并（重）启动降速定时器；【绝不】在此开关广播。
- *   - 上电态：GAPRole_PeripheralStartDevice 会用已设好的快间隔启动广播；
- *   - 断连态：由 Peripheral_LinkTerminated 调 GAPROLE_ADVERT_ENABLED=TRUE 启动。
- *   ★ fix20 修复：此前此处（及慢速处理器）用「FALSE 后立刻 TRUE」背靠背切换广播，
- *     而 GAPROLE_ADVERT_ENABLED 是 GAP 角色任务异步处理的 HCI 命令，同 tick 背靠背会竞态，
- *     可能让广播卡在 OFF → 设备不可发现 → 连不上（官方 HID 例程 hidDevLowAdvertising
- *     切高低占空比也只用 enable=TRUE，从不先 FALSE）。 */
+/* ★ P15-final (移植自 pm-test): 进入「恒定广播」模式。
+ *   断连/上电后设恒定广播间隔；不再启用降速链（降速/SBP_ADV_SLOWDOWN_EVT
+ *   由 Bonding_Init 后的 Peripheral_Init 路径统一调度，此处仅设好快窗参数）。 */
 #if ADV_SLOWDOWN_ENABLE
 static void KeyGo_AdvEnterFastWindow(void)
 {
-    GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, g_advFastMin);
-    GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, g_advFastMax);
-    tmos_start_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT, ADV_FAST_WINDOW_TICKS);
-    LOGF(LOG_DIAG, "[ADV] enter fast window %lums (then slow %lums)\n",
-          (unsigned long)ADV_FAST_WINDOW_MS, (unsigned long)ADV_SLOW_INT_MS);
+    /* ★ P15-final: 恒定广播 —— 不再启动降速定时器。
+     *   降速事件(慢速→超慢)由 Peripheral_Init 的 fast window timer 统一调度。 */
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);   // ★ 取消任何未到期的降速
+
+    if (g_encRequired) {
+        // No-App 模式：恒定 150ms 广播 (平衡可发现性与省电)
+        uint16_t constInt = ADV_CONST_NOAPP_TICKS;
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, constInt);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, constInt);
+        LOGF(LOG_DIAG, "[ADV] CONST %lums (no slowdown, noApp)\n",
+              (unsigned long)(constInt * 5 / 8));
+    } else {
+        // 普通模式：恒定 120ms 广播 (当前最优: 120ms>100ms 且无间隔切换复杂度)
+        uint16_t constInt = ADV_CONST_NORMAL_TICKS;
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, constInt);
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, constInt);
+        LOGF(LOG_DIAG, "[ADV] CONST %lums (no slowdown)\n",
+              (unsigned long)(constInt * 5 / 8));
+    }
 }
 #endif
 
@@ -917,6 +920,10 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         /* ★ 断连：清空绑定会话态（下次连接需重新 AUTH/BIND） */
         Bonding_ConnTerminated();
 
+        /* ★ P14: No-App 模式断连重置配对窗（60s）
+         *   fix27 仅在冷启动开窗，断连后窗口到期就不再开→再连必 PasscodeCB 秒拒。 */
+        if (g_encRequired) Bonding_OpenPairingWindow(60000);
+
         // ★ 方案A（2026-07-12）：断连即清未鉴权计时；重连时重新计（见 LinkEstablished）。
         g_unauthConnStartMs = 0;
 
@@ -925,7 +932,7 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
          *   中断电(peripheral.c:867 → keygo_core.c:652)，继电器模块不耗电。
          *   (连接态这些任务照常运行，不牺牲自动解锁响应——P3 拉长连接间隔/从机延迟未做) */
         tmos_stop_task(Peripheral_TaskID, SBP_PERIODIC_EVT);
-        tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
+        /* ★ fix22: SBP_READ_RSSI_EVT 已移除(合并到状态机) — 不需 stop */
         tmos_stop_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT);
         /* ★ v3.14: 电池检测持续运行（断开后不停），确保广播包电量实时更新——这是断连态唯一的低频保活唤醒(30s)，可接受 */
         tmos_stop_task(Peripheral_TaskID, SBP_GPIO_PULSE_END_EVT);
@@ -968,9 +975,9 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
             }
         }
 
-        // ★ v3.13: 断连立即重启广播；P6(fix19/fix20) 断连后先保持快广播窗口再降速
+        // ★ v3.13: 断连立即重启广播；P15-final 断连后恒定快速广播
 #if ADV_SLOWDOWN_ENABLE
-        KeyGo_AdvEnterFastWindow();   // 设快间隔 + 起降速定时器（不开关广播）
+        KeyGo_AdvEnterFastWindow();   // 设恒定广播间隔（不开关广播）
 #endif
         {
             // ★ 启动/恢复广播（与旧行为一致：仅 enable=TRUE，绝不先 FALSE）。
@@ -1324,11 +1331,7 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
                 uint8_t configChanged = KeyGo_ParseConfig(buf);
                 if (configChanged) {
                     KeyGo_NotifyStatus();  // ★ 配置变更后通知 App 最新状态
-                    // ★ v3.13: 重启 RSSI 读取任务以应用新周期
-                    if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
-                        tmos_stop_task(Peripheral_TaskID, SBP_READ_RSSI_EVT);
-                        tmos_start_task(Peripheral_TaskID, SBP_READ_RSSI_EVT, KeyGo_GetRssiPeriodTicks());
-                    }
+                    /* ★ fix22: RSSI 由状态机内联读取，不再需要独立定时器重启 */
                 }
                 // ★ 同时检查是否包含 rssi key (混合下发)
                 {

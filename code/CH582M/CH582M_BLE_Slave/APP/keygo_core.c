@@ -10,6 +10,7 @@
 #include "gattprofile.h"
 #include "peripheral.h"   // ★ 2026-07-11: 引用 SBP_DEFERRED_RAW_EVT 事件常量
 #include <stdlib.h>   /* atoi */
+#include <stdio.h>    /* snprintf */
 #include "CH58x_common.h"  /* EEPROM_READ / EEPROM_WRITE / EEPROM_ERASE */
 #include "HAL.h"            /* ★ v3.36.1: HAL_GetInterTempValue() 内部温度传感器采样 */
 #include "CH58x_adc.h"      /* ★ v3.36.1: adc_to_temperature_celsius() 校准换算 */
@@ -724,7 +725,8 @@ void KeyGo_ProcessStateMachine(void)
 {
     Bonding_TickPairingWindow();  /* [v3.36.2-fix-2] 配对窗口超时收尾(仅打印) */
     /* ── [OBS_BEGIN] 观测性（①）：加密链路上升沿 + LED 提示驱动 + RSSI 节流打印 ──
-     *   放在函数最前，确保每拍(≈125ms)都执行，不受下方看门狗/冷却提前 return 影响。
+     *   放在函数最前，确保每拍(≈1s, SBP_STATE_MACHINE_PERIOD=1600 ticks)都执行，
+     *   不受下方看门狗/冷却提前 return 影响。
      *   串行 PRINT 由 HAL 条件编译（release 自动剔除）；LED 提示与状态检测始终运行。 ── [OBS_END] */
     if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
         uint8_t encNow = linkDB_State(peripheralConnList.connHandle, LINK_ENCRYPTED) ? 1 : 0;
@@ -754,6 +756,14 @@ void KeyGo_ProcessStateMachine(void)
     } else {
         g_obsLinkEncrypted = 0;
         g_obsRssiTick      = 0;
+    }
+
+    /* ★ [OBS_BEGIN] RSSI 采样触发 — 每拍（≈1s）调一次 GAPRole_ReadRssiCmd，
+     *   异步回调 peripheralRssiCB → KeyGo_RssiProcess 更新 g_rssiUpdated/g_filteredRSSI。
+     *   fix22 前由独立 SBP_READ_RSSI_EVT 定时器触发（每 ~500ms），删除后此处是唯一 RSSI 采样入口。
+     *   放在所有 early-return 之前，确保即使 action/cooldown 也持续采样，回归时数据新鲜。 ── [OBS_END] */
+    if (g_deviceConnected && peripheralConnList.connHandle != GAP_CONNHANDLE_INIT) {
+        GAPRole_ReadRssiCmd(peripheralConnList.connHandle);
     }
 
     /* ★ v3.15-#16: GPIO 脉冲看门狗 — TMOS SBP_GPIO_PULSE_END_EVT 漏触发兜底
@@ -1274,6 +1284,9 @@ void KeyGo_HandleCommand(const char *cmd, uint16_t len)
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.13: RSSI 周期 ms → TMOS ticks 转换
  *   1 TMOS tick ≈ 0.625ms, 所以 ticks = ms * 8 / 5
+ * ★ [DEPRECATED fix22]: SBP_READ_RSSI_EVT 已删除，RSSI 采样改为状态机内联
+ *   GAPRole_ReadRssiCmd 每拍（≈1s）调用，不再需要此函数计算独立定时器周期。
+ *   保留仅为 API 兼容与未来可能的 RSSI 独立定时器回退，当前固件无人调用。
  * ───────────────────────────────────────────────────────────────── */
 uint16_t KeyGo_GetRssiPeriodTicks(void)
 {
