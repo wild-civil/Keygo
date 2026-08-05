@@ -40,14 +40,14 @@
 #define KEYGO_FW_VERSION   "3.36.3-fix28+PCBv1"  /* ★ v3.36.3-fix28+PCBv1 (2026-08-04): pm-test 低功耗优化移植到 PCB-V1。
  * P8/P10/P14/P15/P16 合并移植：
  *   - TX -3dBm 省 ~15% TX 电流（P8 fix22）
- *   - 恒定 120ms 广播替代 50ms（P15-final）
+ *   - 恒定广播替代 50ms（P15-final）：断连态恒 150ms（普通/No-App 统一），不降速以保证可发现性
  *   - 连接参数 160/320ms LATENCY=2（P15-final）
  *   - 状态机 2s→1s + RSSI 内联合并（P16 + P8 fix22）
- *   - ADV_SLOWDOWN_ENABLE 广播策略重写：恒 120ms 普通 / 150ms No-App，不降速
+ *   - ADV_SLOWDOWN_ENABLE 恒定广播策略（2026-08-05 清理：降速链已废弃，见 peripheral.c #if 0）
  *   - No-App 断连重开配对窗（P14 fix28）
  *   - 删 SBP_READ_RSSI_EVT 独立定时器（fix22）
  *   - 连接参数周期性重试 SBP_PARAM_UPDATE_PERIOD（fix23）
- *   - ULTRA_SLOW_EVT 链式降速兜底（fix24 保留）
+ *   - [废弃] ULTRA_SLOW_EVT 链式降速兜底（fix24，2026-08-05 已停用）
  *   - CLK_OSC32K=1 统一内部 RC 32K（更低功耗）
  *   - CLEAN: 删 SLEEP.c [LP] 日志 + SLP_CLK_OFF #if0 + DEBUG=Debug_UART1
  * 引脚布局保持 PCB-V1 原始 PB 映射（非开发板 PA）。

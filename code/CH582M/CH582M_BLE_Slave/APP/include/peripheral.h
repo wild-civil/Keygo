@@ -27,7 +27,7 @@ extern "C" {
 /* ★ fix22: 0x0004 原为 SBP_READ_RSSI_EVT（独立定期读 RSSI，每 500ms 一次唤醒）。
  *   现 RSSI 读取已合并到 KeyGo_ProcessStateMachine 内联（每 2 tick 读一次），
  *   消除一个独立睡眠→唤醒周期，省 ~40µA。0x0004 位释放可用。 */
-#define SBP_ADV_ULTRA_SLOW_EVT      0x0004  // ★ fix24: 超长时间无连接 → 切超慢广播（深度停车省电）
+#define SBP_ADV_ULTRA_SLOW_EVT      0x0004  // [废弃] fix24 超慢广播降速事件；2026-08-05 停用（无任何启动源，处理分支已 #if 0）
 #define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
 /* ★ v3.36.3-fix19 (P6 低功耗): 复用 0x0010 位作为「广播降速」定时器事件。
  *   原 SBP_PHY_UPDATE_EVT(0x0010) 从未作为 TMOS 任务事件被 tmos_start_task/事件处理使用
@@ -66,7 +66,7 @@ extern "C" {
 #define SBP_PARAM_UPDATE_PERIOD        48000  // ★ fix23: ~30s 连接参数更新周期性重试（确保手机接受长间隔）
 #define SBP_ADV_RESTART_DELAY          320    // ★ v3.13: ~200ms advertising 恢复延迟（给 BLE Controller 缓冲时间）
 #define SBP_ADV_RESTART_MAX_RETRIES    3      // ★ v3.13: 最多重试 3 次（总计 ~800ms 恢复窗口）
-#define SBP_BATTERY_CHECK_PERIOD        48000  // ★ v3.13: ~30s 电池检测间隔
+#define SBP_BATTERY_CHECK_PERIOD       48000  // ★ v3.13: ~30s 电池检测间隔
 
 // ── GPIO 脉冲宽度 (TMOS tick, 1 tick ≈ 0.625ms) ──
 /* ★ 人按键手感（2026-07-30）：人按遥控按键一般较慢。解锁/锁车/喇叭改为 ~500ms（模拟真人较慢的单击手感）；
@@ -88,30 +88,37 @@ extern "C" {
 #define MA(sec, tps)  ((sec) * (tps))
 
 // 广播间隔 = N × 0.625ms    （范围 20~10,240 → 12.5ms~6.4s）
-#define DEFAULT_ADVERTISING_INTERVAL     80   // 50ms（旧值，已被 ADV_SLOWDOWN_ENABLE 覆盖）
+// ──────────────────────────────────────────────────────────────────
 
-/* ── 恒定广播（不再降速）──  */
-/* No-App 模式：恒定 150ms 广播              */
-#define ADV_CONST_NOAPP_TICKS        240       // 150 ms（位 256=160ms）
+/* ★ Bonding 配对窗口广播间隔（活跃，非废弃）
+ *   仅在 Bonding_ApplyPairingMode() 配对窗口内临时使用，与断连态恒定广播无关。 */
+#define DEFAULT_ADVERTISING_INTERVAL     80   // 80 ticks = 50ms（非加密配对默认）；加密配对用 32 ticks = 20ms
 
-/* ★ 当前最优选择：120ms 恒定广播（连接事件 160ms，每个事件完成）*/
-/*   120ms@1200bps≈144bit TX，空中时长≈8%，BLE 协议内最高效组合 */
-/*   P15-final: 使用 120ms 恒定广播 */
-#define ADV_CONST_NORMAL_TICKS     192       // 120 ms（当前最优: 120ms>100ms 且无间隔切换复杂度）
+// ── 以下为历史遗留：2026-08-05 已废弃的降速链宏 ────────────────────
+//   当前策略为「断连态恒定广播、不降速」（见 KeyGo_AdvEnterFastWindow
+//   与 ADV_SLOWDOWN_ENABLE），以保证可发现性。慢速/超慢/快窗降速事件
+//   (SBP_ADV_SLOWDOWN_EVT / SBP_ADV_ULTRA_SLOW_EVT) 已无任何地方启动，
+//   故相关处理分支与宏均为死代码。保留此处注释说明其来源，便于将来
+//   若需恢复「超慢广播省电」时参考（但会牺牲可发现性，已否决）。
+// #define ADV_ULTRA_SLOW_DELAY_TICKS     MA(5 * 60, 1600)  // [废弃] 5 min
+// #define ADV_ULTRA_SLOW_INT_TICKS       MA(30,     1600)  // [废弃] 30 s
+// #define ADV_FAST_WINDOW_TICKS       MA(3,  1600)   // [废弃] 快窗 ≈3s（No-App 曾用）
+// #define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 8)
+// #define ADV_FAST_WINDOW_TICKS_NOAPP MA(15, 1600)   // [废弃] No-App 快窗 ≈15s
+// #define ADV_FAST_WINDOW_MS_NOAPP    (ADV_FAST_WINDOW_TICKS_NOAPP * 5 / 8)
+// #define ADV_SLOW_INT_TICKS          MA(5,  1600)   // [废弃] 慢速 5s
+// #define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 8)
 
-#define ADV_ULTRA_SLOW_DELAY_TICKS     MA(5 * 60, 1600)  // 5 min
-#define ADV_ULTRA_SLOW_INT_TICKS       MA(30,     1600)  // 30 s
+/* ── 当前生效：恒定广播（不降速）──  */
+/* 断连态恒定广播，保证手机始终可发现（用户要求，不牺牲可发现性）。
+ * No-App 模式 150ms / 普通模式 120ms（现为统一 150ms，见 keygo_core.h）。 */
+#define ADV_CONST_NOAPP_TICKS        240       // 150 ms
+#define ADV_CONST_NORMAL_TICKS       240       // 150 ms（原 192=120ms，2026-08-05 统一为 150ms）
 
-/* ★ v3.36.3-fix19 (P6 低功耗): ADV_SLOWDOWN_ENABLE 控制广播策略分支。
- *   =1 启恒定广播（P15-final: 120ms 普通 / 150ms No-App，不降速），
- *   =0 回旧行为（恒 DEFAULT_ADVERTISING_INTERVAL）。 */
-#define ADV_SLOWDOWN_ENABLE          1      // 1=启用恒定广播策略；0=关闭(旧行为)
-#define ADV_FAST_WINDOW_TICKS       MA(3,  1600)   // ★ 快广播窗口 ≈3s（仅 No-App 模式用到）
-#define ADV_FAST_WINDOW_MS          (ADV_FAST_WINDOW_TICKS * 5 / 8)   // ≈1875ms，仅日志用
-#define ADV_FAST_WINDOW_TICKS_NOAPP MA(15, 1600)   // ★ No-App 快广播窗口 ≈15s
-#define ADV_FAST_WINDOW_MS_NOAPP    (ADV_FAST_WINDOW_TICKS_NOAPP * 5 / 8) // ≈9375ms，仅日志用
-#define ADV_SLOW_INT_TICKS          MA(5,  1600)   // ★ 慢速广播间隔 =5s（快速窗口后切此间隔）
-#define ADV_SLOW_INT_MS             (ADV_SLOW_INT_TICKS * 5 / 8)       // =3125ms，仅日志用
+/* ★ ADV_SLOWDOWN_ENABLE: 保留为真以启用「恒定广播」分支。
+ *   历史含义曾含降速链，现恒定广播路径下该宏仅作占位，
+ *   慢速/超慢分支已在 peripheral.c 中注释为死代码。 */
+#define ADV_SLOWDOWN_ENABLE          1
 
 /* ──────────────────────────────────────────────────────────────────
  * 连接参数调优 (pm-test P15-final 经验移植到 PCB-V1)

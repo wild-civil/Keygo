@@ -515,33 +515,31 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         return (events ^ SBP_PARAM_UPDATE_EVT);
     }
 
-#if ADV_SLOWDOWN_ENABLE
+/* ── 2026-08-05 清理：降速链（慢速/超慢）已废弃 ──────────────────────
+ * 以下 SBP_ADV_SLOWDOWN_EVT / SBP_ADV_ULTRA_SLOW_EVT 处理分支为死代码：
+ * KeyGo_AdvEnterFastWindow() 在断连态主动 tmos_stop_task 取消这两个事件，
+ * 且全工程无任何地方 tmos_start_task 启动它们。当前策略为「恒定广播不降速」
+ * （保证可发现性），故降速逻辑不再生效。保留注释以免误用，如需恢复
+ * 「超慢广播省电」须先解决可发现性权衡。原代码见 git history(fix24/fix28)。
+ * ─────────────────────────────────────────────────────────────────── */
+#if 0
     if (events & SBP_ADV_SLOWDOWN_EVT) {
-        /* ★ P15-final: 快广播窗口到期 → 切慢速广播（5s）。
-         *   仅在仍断连态生效（已连接则 advertising 停，切间隔无意义且会被下次断连覆盖）。 */
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_SLOW_INT_TICKS);
             uint8_t adv = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-            LOGF(LOG_DIAG, "[ADV] slowed to %lums advertising (standby)\n",
-                  (unsigned long)ADV_SLOW_INT_MS);
             tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
-            /* ★ 链式降速: 5min 后进一步切超慢广播（30s）用于深度停车省电 */
             tmos_start_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT, ADV_ULTRA_SLOW_DELAY_TICKS);
         }
         return (events ^ SBP_ADV_SLOWDOWN_EVT);
     }
-
     if (events & SBP_ADV_ULTRA_SLOW_EVT) {
-        /* ★ fix24: 慢速广播持续 5min 后 → 切超慢广播（30s），深度停车省电 */
         if (!g_deviceConnected) {
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADV_ULTRA_SLOW_INT_TICKS);
             GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADV_ULTRA_SLOW_INT_TICKS);
             uint8_t adv = TRUE;
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv);
-            LOGF(LOG_DIAG, "[ADV] ultra-slow %lums advertising (deep standby)\n",
-                  (unsigned long)(ADV_ULTRA_SLOW_INT_TICKS * 5 / 8));
             tmos_start_task(Peripheral_TaskID, SBP_ADV_RESTART_EVT, SBP_ADV_RESTART_DELAY);
         }
         return (events ^ SBP_ADV_ULTRA_SLOW_EVT);
@@ -811,12 +809,10 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
 
-#if ADV_SLOWDOWN_ENABLE
-        /* ★ P15-final: 一连上连接即取消降速/超慢降速定时器；连接态 advertising 已停，无需切间隔。
-         *   下次断连由 LinkTerminated 重新进入快广播窗口。 */
+        /* ★ 2026-08-05：以下 stop 调用现为冗余（降速事件已无启动源，见上方 #if 0 分支），
+         *   保留作防御性清理无害。连接态 advertising 已停，无需切间隔。 */
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);
         tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);
-#endif
 
         PRINT("Connected %x - Int %x\n", event->connectionHandle, event->connInterval);
         PRINT("[OBS] CONNECTED (noAppMode=%d)\n", g_encRequired);
@@ -875,16 +871,13 @@ static const char *KeyGo_DiscReasonStr(uint8_t r)
     }
 }
 
-/* ★ P15-final (移植自 pm-test): 进入「恒定广播」模式。
- *   断连/上电后设恒定广播间隔；不再启用降速链（降速/SBP_ADV_SLOWDOWN_EVT
- *   由 Bonding_Init 后的 Peripheral_Init 路径统一调度，此处仅设好快窗参数）。 */
-#if ADV_SLOWDOWN_ENABLE
+/* ★ 进入「恒定广播」模式（P15-final 移植自 pm-test，2026-08-05 清理注释）。
+ *   断连/上电后设恒定广播间隔，不降速以保证可发现性。
+ *   下方 stop 调用为防御性清理（降速事件已无启动源）。 */
 static void KeyGo_AdvEnterFastWindow(void)
 {
-    /* ★ P15-final: 恒定广播 —— 不再启动降速定时器。
-     *   降速事件(慢速→超慢)由 Peripheral_Init 的 fast window timer 统一调度。 */
     tmos_stop_task(Peripheral_TaskID, SBP_ADV_ULTRA_SLOW_EVT);
-    tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);   // ★ 取消任何未到期的降速
+    tmos_stop_task(Peripheral_TaskID, SBP_ADV_SLOWDOWN_EVT);   // 防御性清理（降速事件已废弃）
 
     if (g_encRequired) {
         // No-App 模式：恒定 150ms 广播 (平衡可发现性与省电)
@@ -902,7 +895,6 @@ static void KeyGo_AdvEnterFastWindow(void)
               (unsigned long)(constInt * 5 / 8));
     }
 }
-#endif
 
 static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
 {

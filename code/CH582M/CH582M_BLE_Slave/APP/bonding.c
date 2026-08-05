@@ -283,10 +283,14 @@ void Bonding_ApplyPairingMode(void)
     GAPBondMgr_SetParameter(GAPBOND_ERASE_AUTO, sizeof(uint8_t), &eraseAuto);
     PRINT("[BOND] ERASE_AUTO = disabled (multi-phone safe)\n");
 
-    /* ★ v3.34.0 无App模式(HID锚点)同步广播占空比：
+    /* ★ [v3.34.0 历史，2026-08-05 停用] 无App模式(HID锚点)同步广播占空比：
      *   encRequired=1 → 高占空比(20/30ms)加快 OS 后台自动重连；
      *   encRequired=0 → 恢复默认 50ms 省电。
-     *   注：持续 20ms 较耗电；量产应加「高占空比 N 秒后转低占空比」降速定时器。 */
+     *   停用原因：上电/Bonding_Init 后紧接着 KeyGo_AdvEnterFastWindow() 会覆写广播间
+     *   隔为恒定 150ms；ENCRYPT 命令路径在已连接态设间隔不触发广播，断连后同样被
+     *   Peripheral_LinkTerminated→KeyGo_AdvEnterFastWindow 覆盖。两条路径下本段代码
+     *   设定的广播间隔从未实际生效，属死代码。保留以供将来恢复高占空比配对窗口时参考。 */
+#if 0
     {
         uint16_t advIntMin = g_encRequired ? 32 : DEFAULT_ADVERTISING_INTERVAL;  // 20ms / 50ms
         uint16_t advIntMax = g_encRequired ? 48 : DEFAULT_ADVERTISING_INTERVAL;  // 30ms / 50ms
@@ -295,6 +299,7 @@ void Bonding_ApplyPairingMode(void)
         PRINT("[BOND] adv interval = %s duty (encRequired=%d)\n",
               g_encRequired ? "HIGH(20/30ms)" : "NORMAL(50ms)", g_encRequired);
     }
+#endif
 }
 
 /*********************************************************************
