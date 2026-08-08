@@ -161,7 +161,9 @@
          ★ v3.36.3fix11.6: v-show→v-if，防御 MP 上 connected 过渡态时卡片残余（_onUniBtAdapterStateChange
          在设 btState='off' 与 _handleBtOff→connected=false 之间,DOM 可能暂存 v-show 的 display:none 未刷）。
          v-if 在 connected 变为 truthy 时将卡片彻底从 DOM 移除，消除跨端渲染不一致。 -->
-    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDevicesList.length">
+    <!-- 整个重连卡片容器绑 @tap=onListTap：点卡片内任意空白(含「已知设备」标题、列表空隙)→ 收起展开项。
+         连接/删除/⋯ 按钮均 @tap.stop 拦截，不会冒泡到这里，故不会误收起。 -->
+    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDevicesList.length" @tap="onListTap">
       <!-- 多设备：展开为可滚动列表 -->
       <template v-if="bleStore.knownDevicesList.length > 1">
         <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
@@ -183,10 +185,16 @@
             <!-- @touchstart="onItemTouchStart($event)" -->
             <!-- @touchmove="onItemTouchMove($event)" -->
             <!-- @touchend="onItemTouchEnd($event, d.mac)" -->
-            <!-- 背后操作层(默认/删除) -->
+            <!-- 背后操作层(默认/取消默认 + 删除)。已默认设备显示「取消默认」，否则「默认」。 -->
             <view class="known-item-back">
-              <view v-if="!d.isDefault" class="back-btn back-default" @tap.stop="handleSetDefault(d.mac)">默认</view>
-              <view class="back-btn back-remove" @tap.stop="handleRemoveDevice(d.mac)">删除</view>
+              <view class="back-btn back-default" @tap.stop="handleSetDefault(d.mac)">
+                <text class="back-icon">{{ d.isDefault ? '✓' : '☆' }}</text>
+                <text>{{ d.isDefault ? '取消默认' : '默认' }}</text>
+              </view>
+              <view class="back-btn back-remove" @tap.stop="handleRemoveDevice(d.mac)">
+                <text class="back-icon">🗑</text>
+                <text>删除</text>
+              </view>
             </view>
             <!-- 前景内容层(随左滑位移)。@tap: 已展开时点空白处(非按钮)→收起；
                  连接/删除/⋯ 按钮用 @tap.stop 拦截，不会触发收起。 -->
@@ -647,11 +655,18 @@ async function handleReconnect(targetMac) {
   }
 }
 
-// ★ 2026-07-23 ④: 把指定设备设为默认(在重连列表中置顶)
+// ★ 2026-07-23 ④: 默认设备切换(toggle)。
+//   点非默认设备 → 设为默认；点已默认设备 → 取消默认(回到无默认状态)。
 function handleSetDefault(mac) {
   if (!mac) return
-  bleStore.setDefaultDevice(mac)
-  toast.success('已设为默认设备')
+  const key = String(mac).replace(/:/g, '').toUpperCase()
+  if ((bleStore.defaultDeviceId || '') === key) {
+    bleStore.clearDefaultDevice()
+    toast.success('已取消默认设备')
+  } else {
+    bleStore.setDefaultDevice(mac)
+    toast.success('已设为默认设备')
+  }
 }
 
 // ★ 2026-08-09 P1-②: 从已知设备列表主动删除一台 KeyGo（清本地全部痕迹：已知集合/自定义名/默认/重连锚点）
@@ -1094,27 +1109,36 @@ async function handleSetName() {
 .known-item {
   position: relative;
   overflow: hidden;
+  background: var(--bg-card-alt);   /* 背后层底色：前景左移时露出的底层，避免刺眼亮边 */
   border-top: 1rpx solid var(--border);
 }
 .known-item:first-child { border-top: none; }
 /* 背后操作层：铺在右侧，前景左移时露出 */
 .known-item-back {
   position: absolute;
-  top: 0; right: 0; bottom: 0;
+  top: 8rpx; right: 8rpx; bottom: 8rpx;
   display: flex;
   align-items: stretch;
+  gap: 8rpx;
+  border-radius: 16rpx;
+  overflow: hidden;
 }
 .back-btn {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 4rpx;
   width: 84px;            /* px：与脚本 backWidth(168px=2*84) 对应，露出两个按钮 */
   color: #fff;
-  font-size: 24rpx;
+  font-size: 22rpx;
+  line-height: 1.2;
+  transition: transform 0.12s ease, filter 0.12s ease;
 }
-.back-default { background: var(--text-muted); }
+.back-icon { font-size: 30rpx; line-height: 1; }
+.back-default { background: var(--accent); }
 .back-remove { background: #e64340; }
-.back-btn:active { opacity: 0.8; }
+.back-btn:active { transform: scale(0.94); filter: brightness(0.9); }
 /* 前景内容层：默认铺满，左滑 translateX 露出背后 */
 .known-item-front {
   position: relative;

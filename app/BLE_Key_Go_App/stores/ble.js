@@ -2834,6 +2834,13 @@ export const useBleStore = defineStore('ble', {
         try { uni.setStorageSync('ble_default_device_id', key) } catch (e) {}
       },
 
+      // ★ 2026-08-09 P1-②(改): 取消默认(回到「无默认设备」状态)。
+      //   用于已默认设备的「取消默认」入口；清空 defaultDeviceId 即不置顶任何一台。
+      clearDefaultDevice() {
+        this.defaultDeviceId = ''
+        try { uni.removeStorageSync('ble_default_device_id') } catch (e) {}
+      },
+
       // 自定义名 + 出厂名组合显示，例如「爱车 ( KeyGo-5E3D0C )」。
       //   仅当两者都存在且不同才加括号；否则回退单个值(避免「爱车 ( 爱车 )」这类冗余)。
       _formatDisplayName(custom, factory) {
