@@ -41,8 +41,9 @@ static const uint8_t battLevelUUID[ATT_BT_UUID_SIZE] = {
 static const gattAttrType_t battService = { ATT_BT_UUID_SIZE, battServUUID };
 
 static uint8_t battLevelProps = GATT_PROP_READ | GATT_PROP_NOTIFY;
-/* Init 立即采样 → 广播前即为真实电量; 此处仅作编译初值 */
-static uint8_t batteryLevel    = 0;
+/* Init 立即采样 → 广播前即为真实电量; 编译初值 255(不支持)，待 Battery_Init 首采覆盖：
+ * V03(无分压)首采命中<100仍为255，V04首采覆盖为真实百分比，避免开机瞬态误报0% */
+static uint8_t batteryLevel    = 255;
 
 static gattCharCfg_t battLevelClientCharCfg[GATT_MAX_NUM_CONN];
 
@@ -231,6 +232,12 @@ void Battery_ADC_Init(void)
          *        4.200V(满电推估adc≈2544)→2544×4.242-6590=4202mV→100%✓
          *        3.600V(空电推估adc≈2403)→2403×4.242-6590=3604mV→0%✓
          * 后续若偏差 >5pp, 补采第3点验证线性度。 */
+        /* ★ 2026-08-09 (C方案路线B): 开机采样同样识别无分压 → 255(不支持)。
+         *   与 Battery_UpdateLevel 保持一致, 避免 V03 开机即报 0%。 */
+        if (adcVal < 100) {
+            batteryLevel = 255;
+            PRINT("[BATT] Init: no ext-battery divider (adcVal=%d<100) → 255 (unsupported)\n", adcVal);
+        } else {
         batt_mV = (uint32_t)adcVal * 4242 / 1000 - 6590;
         if (batt_mV >= BAT_ADC_FULL_MV) {
             batteryLevel = 100;
@@ -241,6 +248,7 @@ void Battery_ADC_Init(void)
                                      / (BAT_ADC_FULL_MV - BAT_ADC_EMPTY_MV));
         }
         PRINT("[BATT] Init: adcVal=%d, batt_mV=%d, level=%d%%\n", adcVal, batt_mV, batteryLevel);
+        }
 
         R8_ADC_CFG     = savedCfg;
         R8_ADC_CHANNEL = savedChannel;
@@ -277,7 +285,21 @@ void Battery_UpdateLevel(void)
         /* 关闸门 */
         GPIOB_ResetBits(BAT_ADC_EN_PIN);
 
-        /* 饱和保护: 接近 4095 说明分压未上电/PA3 浮空, 跳过更新 */
+        /* ★ 2026-08-09 (C方案路线B): 无分压自动识别。
+         *   V03 没画分压电路 → PA3 浮空 → adcVal≈0(<100)。
+         *   V04 正常分压 → adcVal≈1950~2550(空电3.6V对应~2403，远高于100，安全)。
+         *   adcVal<100 = 浮空无电池 → batteryLevel=255(不支持)，App 显示"不支持"。
+         *   adcVal>=4000 = 饱和(分压未上电/PA3拉满) → 跳过更新(保持上次合法值)。 */
+        if (adcVal < 100) {
+            if (batteryLevel != 255) {
+                batteryLevel = 255;
+                PRINT("[BATT] no ext-battery divider (adcVal=%d<100) → report 255 (unsupported)\n", adcVal);
+                Battery_Notify();
+            }
+            R8_ADC_CFG     = savedCfg;
+            R8_ADC_CHANNEL = savedChannel;
+            return;
+        }
         if (adcVal >= 4000) {
             PRINT("[BATT][WARN] ADC saturated (val=%d), skip update\n", adcVal);
             R8_ADC_CFG     = savedCfg;
