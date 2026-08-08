@@ -99,7 +99,7 @@
  *     以区分是电源纹波问题还是固件逻辑问题。旁路接法下 FALSE 亦安全（电感等效导线，仅无收益）。
  */
 #ifndef DCDC_ENABLE
-#define DCDC_ENABLE                         TRUE
+#define DCDC_ENABLE                         FALSE
 #endif
 
 /* 【SLEEP】低功耗休眠开关 —— P1+P2 (2026-07-30, v3.36.3-fix12) 已启用
@@ -210,21 +210,34 @@ extern const uint8_t MacAddr[6];
  *   V04 (在途): PB3=BAT_ADC_EN(闸门 GPIO 输出), PA3/AIN6=BAT_ADC(模拟输入)。
  *   打 V04 板时, 在 MRS 预处理(或下方) #define BOARD_HAS_EXT_BAT_ADC 即启用外部采样。
  * ───────────────────────────────────────────────────────────────── */
-//#define BOARD_HAS_EXT_BAT_ADC            /* ← V04 打板后取消注释启用 */
+#define BOARD_HAS_EXT_BAT_ADC             /* ← V04 已打板且焊接 R27/R28=51k+51k 分压, 启用外部电池 ADC */
 
 #ifdef BOARD_HAS_EXT_BAT_ADC
 #define BAT_ADC_EN_PIN                  GPIO_Pin_3   // PB3 → BAT_ADC_EN (闸门输出)
-#define BAT_ADC_EN_ACTIVE_LEVEL         1            /* TODO: 1=高有效 / 0=低有效, 按原理图确认 */
-#define BAT_ADC_EN_SETTLE_MS            5            // 拉高 EN 后等待分压稳定(ms)
+#define BAT_ADC_EN_ACTIVE_LEVEL         1            /* ★ 高有效: PB3高→NMOS栅极高→NMOS导通→PMOS栅极拉低→PMOS导通→分压上电; 拉高PB3=开闸 */
+#define BAT_ADC_EN_SETTLE_MS            200          // ★ 拉高 EN 后等待分压稳定: 51k+51k 分压 + PA3 端 100nF 电容 → RC≈5ms; 但 CH582M 外部 ADC 单次采样前模拟通道切换+采样电容充电需额外时间, 且从 Sleep 唤醒时模拟域起来也需时间。实测 50ms 偶发饱和(100%), 提到 200ms 留足余量。
 #define BAT_ADC_AIN_PIN                 GPIO_Pin_3   // PA3 → AIN6 (BAT_ADC 模拟输入)
 #define BAT_ADC_CHANNEL                 CH_EXTIN_6   // PA3 对应 ADC 外部通道 6
 #define BAT_ADC_REF_MV                  1050         // CH582M 内部基准 1.05V
-#define BAT_ADC_PGA_DIV                 2            // ★ 10k/10k → 节点满电=4.2*(10/20)=2.1V = PGA_1_2(÷2)满量程2.1V → 量程利用率~28.6%(比PGA_1_4的14%翻倍)
-/* 分压: 上(R1,接Vbat)=10k, 下(R2,接GND)=10k → Vnode=Vbat*10/20=Vbat/2 → Vbat=Vnode*2
- *   ADC 12-bit: batt_mV = adcVal*REF*PGA_DIV/4096 * (Vbat/Vnode) */
-#define BAT_ADC_VBAT_PER_VNODE_X1000   2000         // Vbat/Vnode 比值 ×1000 (10k/10k 分压 → Vbat=Vnode*2)
+#define BAT_ADC_PGA_DIV                 4            // ★ 51k/51k(1:1)分压→节点=Vbat/2≈2.1V(满电); PGA_1_4(÷4)→ADC输入0.525V, 量程利用率~50%
+/* 分压: 上(R27,接Vbat)=51k, 下(R28,接GND)=51k → Vnode=Vbat/2 → Vbat=Vnode*2
+ *   ★ 实际 adcVal 包含 DC 偏移(实测 4.0V 时 adcVal≈2497, 理论值≈1952, 偏移~545counts),
+ *     原因待查(可能分压电阻容差/PCB 漏电路径/PGA 非理想增益)。
+ *     当前使用两点经验校准 batt_mV=adcVal×4242/1000-6590, 不再依赖理论 Vnode 比值。
+ *     详见 battery_service.c Battery_Init 换算注释。 */
+#define BAT_ADC_VBAT_PER_VNODE_X1000   2000         // Vbat/Vnode 比值 ×1000 (51k/51k 分压 → Vbat=Vnode*2)
 #define BAT_ADC_FULL_MV                 4200         // 100% 对应电池电压(mV)
-#define BAT_ADC_EMPTY_MV                3000         // 0% 对应电池电压(mV)
+#define BAT_ADC_EMPTY_MV                3600         // 0% 对应电池电压(mV) — 3.6V 为软件预警线(平台期末端), 非真截止, 留~10-15%余量防"显示5%瞬间关机"
+/* ★ 调试宏(默认关): 定义后 PB3(EN) 常高, 分压网络持续上电, 便于万用表量电池节点电压定位硬件/固件问题。
+ *   正常 Release 必须注释掉, 否则分压常通一直漏电。 */
+// #define BAT_ADC_EN_ALWAYS_ON
+
+/* ★ 诊断宏(默认开, 验证后请注释): 定义后电量值 = adcVal/41 (0~4095 → 0~99),
+ *   直接把"ADC 原始采样值"塞进电量特征让 App 显示, 无需串口即可一刀两断定位:
+ *     - 显示≈47 (4.0V 时 adcVal≈1940/41≈47) → ADC 正确采到 1.99V, 问题在换算(可排除)
+ *     - 显示≈99 → ADC 饱和(adcVal≈4095), 模拟路由仍没接通
+ *   ★ 注意: 开启时 App 显示的是"原始值映射", 不是真实电量%! 验证完必须关。 */
+// #define BAT_ADC_DEBUG_RAW
 #endif
 
 #endif

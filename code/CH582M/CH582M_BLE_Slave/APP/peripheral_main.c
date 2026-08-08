@@ -188,8 +188,13 @@ int main(void)
 #if(defined(HAL_SLEEP)) && (HAL_SLEEP == TRUE)
     /* ★2026-07-31 修复：CLK_OSC32K=0 用外部 32.768K 晶振(PA10/PA11)时，此二脚是晶振专用，
      *   绝不能配成数字 GPIO（输入上拉会破坏起振 → RTC 无时钟 → 永远不睡）。
-     *   故从 GPIO_Pin_All 中排除 PA10/PA11；CLK_OSC32K=1(片内RC)时它们可作普通 IO，排除后浮空也无害。 */
-    GPIOA_ModeCfg(GPIO_Pin_All & ~(GPIO_Pin_10 | GPIO_Pin_11), GPIO_ModeIN_PU);
+     *   故从 GPIO_Pin_All 中排除 PA10/PA11；CLK_OSC32K=1(片内RC)时它们可作普通 IO，排除后浮空也无害。
+     * ★2026-08-08 修复：PA3 是 V04 外部电池 ADC(AIN6)，焊接了 R27/R28=51k+51k 分压网。
+     *   若把 PA3 配成数字输入上拉(GPIO_ModeIN_PU)，内部施密特缓冲器会把 ~Vbat/2 的模拟中点
+     *   判成中间态、CMOS 缓冲器反复翻转振荡 → mA 级漏电（实测 3mA+）。
+     *   必须从 GPIO_Pin_All 排除 PA3，使其保持复位后的浮空高阻(模拟输入态)；
+     *   启用 BOARD_HAS_EXT_BAT_ADC 时 Battery_ADC_Init() 会进一步显式配 GPIO_ModeIN_Floating。 */
+    GPIOA_ModeCfg(GPIO_Pin_All & ~(GPIO_Pin_3 | GPIO_Pin_10 | GPIO_Pin_11), GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
 #endif
 #ifdef DEBUG
