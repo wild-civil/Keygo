@@ -495,7 +495,7 @@ export const useBleStore = defineStore('ble', {
      *   （CSS 组件标记了 v3.15-css，注释掉 emoji 行即可启用） */
     batteryIcon: (state) => {
       if (state.batteryLevel < 0) return '❓'   // 未知（连接重置后 / 超时未取）
-      if (state.batteryLevel === 255) return '🚫' // 固件声明不支持电量（如 V03 无 ADC）
+      if (state.batteryLevel === 255) return '🔋' // 固件声明不支持电量（如 V03 无 ADC），用电池图标 + "不支持"文案表达，比 🚫 更明确
       if (state.batteryLevel >= 75) return '🔋'
       if (state.batteryLevel >= 50) return '🔋'
       if (state.batteryLevel >= 25) return '🔋'
