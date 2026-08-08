@@ -2140,7 +2140,9 @@ export const useBleStore = defineStore('ble', {
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
-      this._touchKnownDevice(deviceId) // ★ 2026-07-23 ②: 记录到已知设备集合
+      // ★ 2026-08-09 P1-①: 不再在连接成功时无条件记录已知设备。
+      //   已知设备 = 本机通过 AUTH/BIND 鉴权的设备（真 owner），见 AUTH:OK / BIND:OK 处 _touchKnownDevice。
+      //   否则任何连过的陌生设备都会污染"重新连接"卡片。
       if (!this.deviceName) {
         this.deviceName = this._resolveFactoryName(this.deviceId)
       }
@@ -2753,13 +2755,26 @@ export const useBleStore = defineStore('ble', {
         try { uni.setStorageSync('ble_advertised_names', this._advertisedNames) } catch (e) {}
       },
 
-      // ★ 2026-07-23 ②: 记录一台"连过的设备"到 knownDevices 集合(多设备记忆)。
-      //   仅成功连接(_finalizeConnection)时调用；陌生设备永不进集合。
+      // ★ 2026-08-09 P1-①: 记录"已知设备"——本机已通过 AUTH 鉴权 / BIND 绑定的设备(真 owner)。
+      //   仅在 AUTH:OK / BIND:OK 时调用(见对应解析分支)；连接成功(_finalizeConnection)不再无条件记录，
+      //   避免陌生/未绑定设备污染 knownDevices → "重新连接"卡片。
+      //   ★ 反向清理: 设备复位/主动解绑时由 _forgetDeviceKey / UNBIND:OK 调 _removeKnownDevice 移除。
       _touchKnownDevice(mac) {
         if (!mac) return
         const key = String(mac).replace(/:/g, '').toUpperCase()
         const next = { ...(this.knownDevices || {}) }
         next[key] = { mac, lastConnectedAt: Date.now() }
+        this.knownDevices = next
+        try { uni.setStorageSync('ble_known_devices', next) } catch (e) {}
+      },
+
+      // ★ 2026-08-09 P1-①: 从已知设备集合移除(设备复位/主动解绑后不再是有效 owner)。
+      _removeKnownDevice(mac) {
+        if (!mac) return
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        const next = { ...(this.knownDevices || {}) }
+        if (!next[key]) return
+        delete next[key]
         this.knownDevices = next
         try { uni.setStorageSync('ble_known_devices', next) } catch (e) {}
       },
@@ -3951,6 +3966,9 @@ export const useBleStore = defineStore('ble', {
         //   持久化抑制标记，恢复后续自动重连（含 App 重启）。否则该标记一旦写入便
         //   永久屏蔽自动重连，导致正常 owner 在重烧固件/瞬时超时后无法自动重连（舒适模式失效）。
         this._clearUnboundKicked()
+        // ★ 2026-08-09 P1-①: AUTH:OK = 本机已通过该设备鉴权（真 owner），记为已知设备。
+        //   陌生人/未绑定连接永远到不了 AUTH:OK，故不会污染 knownDevices。
+        this._touchKnownDevice(this.deviceId)
         // ★ v3.33.0: AUTH 成功 = 安全通道已建立（链路加密 + 会话鉴权均就绪）。
         //   重连时 _finalizeConnection 里的 _syncConfigToDevice 可能因 FF01 加密门控在链路加密前
         //   抢跑失败，此处补发一次，确保断电重启后阈值被可靠回推（T4 核心）。
@@ -3974,6 +3992,8 @@ export const useBleStore = defineStore('ble', {
       } else if (text.startsWith('BIND:OK')) {
         this.isBound = true
         this.bindHint = '绑定成功'
+        // ★ 2026-08-09 P1-①: BIND:OK = 首绑/接管成功（新 owner），记为已知设备。
+        this._touchKnownDevice(this.deviceId)
         // ★ 2026-07-14 修复：绑定成功即 owner，清除被踢抑制标记（见 AUTH:OK 处说明）
         this._clearUnboundKicked()
         // ★ 2026-07-14 修复：设备按键复位后重绑，_finalizeConnection 的配置推送可能抢跑失败，
@@ -4009,6 +4029,8 @@ export const useBleStore = defineStore('ble', {
          *   避免并发场景下迟到的 UNBIND:OK 把刚设好的 key 清掉（见 _acquireBindLock）。 */
         if (!B._bindInProgress) B._bindKey = null
         this.bindHint = '已解绑'
+        // ★ 2026-08-09 P1-①: 用户主动解绑 → 不再是有效 owner → 移出已知设备集合
+        this._removeKnownDevice(this.deviceId)
         _resolveWaiter('UNBIND', true)
       } else if (text.startsWith('UNBIND:FAIL')) {
         this.bindHint = '解绑失败：需先绑定'
@@ -4296,6 +4318,8 @@ export const useBleStore = defineStore('ble', {
       if (this.serialNumber) this._clearBindKey(this.serialNumber)
       this.needsRebind = true
       this.bindHint = reason || '设备已重置，请重新绑定'
+      // ★ 2026-08-09 P1-①: 设备已失效(复位/解绑)，不再是有效 owner → 移出已知设备集合
+      this._removeKnownDevice(this.deviceId)
       uni.showToast({ title: '设备已重置，请重新绑定', icon: 'none', duration: 3000 })
     },
 
