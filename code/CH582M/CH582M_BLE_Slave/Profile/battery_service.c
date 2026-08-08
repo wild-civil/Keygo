@@ -208,19 +208,30 @@ void Battery_ADC_Init(void)
         R8_ADC_CFG     = RB_ADC_POWER_ON | RB_ADC_BUF_EN | (0 << 6) | (0 << 4);
         R8_ADC_CHANNEL = BAT_ADC_CHANNEL;
 
-        /* 先读"闸门关闭"的浮空基线 (V03/V04 此时 PA3 均浮空) */
-        R8_ADC_CONVERT = RB_ADC_START;
-        while (R8_ADC_CONVERT & RB_ADC_START);
-        adcValIdle = R16_ADC_DATA & RB_ADC_DATA;
+        /* ★ 2026-08-09 修复(C方案 V03 误报 0%): 浮空 PA3 单次采样噪声大，开/关 PB3 前后
+         *   两次采样 Δ 可能随机 ≥200 → 误判"有分压" → 两点校准算出 0%。
+         *   物理事实: V03 无分压+无 100nF → PA3 纯高阻浮空, 多次平均后 Δ 趋近 0；
+         *           V04 有分压+PA3 端 100nF → 开闸后迅速稳定到低阻抗 Vbat/2, 平均不改 Δ(巨大)。
+         *   故改用"多次采样平均"消除浮空噪声: 平均后浮空 Δ 远小于阈值, 分压 Δ 仍巨大 → 可靠区分。 */
+        uint8_t  i;
+        uint32_t sumIdle = 0, sumAfter = 0;
+        for (i = 0; i < 4; i++) {           // 闸门关闭: 浮空基线(平均 4 次)
+            R8_ADC_CONVERT = RB_ADC_START;
+            while (R8_ADC_CONVERT & RB_ADC_START);
+            sumIdle += (R16_ADC_DATA & RB_ADC_DATA);
+        }
+        adcValIdle = (uint16_t)(sumIdle / 4);
 
         /* 开闸门上电分压 */
         GPIOB_SetBits(BAT_ADC_EN_PIN);
         DelayMs(BAT_ADC_EN_SETTLE_MS);
 
-        /* 再读"闸门开启"后的采样值 */
-        R8_ADC_CONVERT = RB_ADC_START;
-        while (R8_ADC_CONVERT & RB_ADC_START);
-        adcVal = R16_ADC_DATA & RB_ADC_DATA;
+        for (i = 0; i < 4; i++) {           // 闸门开启: 分压采样(平均 4 次)
+            R8_ADC_CONVERT = RB_ADC_START;
+            while (R8_ADC_CONVERT & RB_ADC_START);
+            sumAfter += (R16_ADC_DATA & RB_ADC_DATA);
+        }
+        adcVal = (uint16_t)(sumAfter / 4);
 
         /* 关闸门省电 */
 #ifndef BAT_ADC_EN_ALWAYS_ON
@@ -241,14 +252,16 @@ void Battery_ADC_Init(void)
          *        3.600V(空电推估adc≈2403)→2403×4.242-6590=3604mV→0%✓
          * 后续若偏差 >5pp, 补采第3点验证线性度。 */
         /* ★ 2026-08-09 (C方案路线B升级): 用"开/关闸门前后 ΔadcVal"判定是否有分压电路。
-         *   V03 无分压 → 开/关 PB3 前后 PA3 都浮空 → Δ 很小(<200)；
-         *   V04 有分压 → 开 PB3 后 PA3=Vbat/2(adcVal~1755~2047)，关前浮空 → Δ 很大(>1000)。
-         *   单行阈值判定(<100)会漏判浮空漂到中间值的 V03，Δ 法 100% 可靠。
-         *   阈值 200: V04 空电 adcVal≈1755 远高于; V03 浮空 Δ 通常<100。 */
-        if ((adcVal > adcValIdle ? adcVal - adcValIdle : adcValIdle - adcVal) < 200) {
+         *   V03 无分压 → 开/关 PB3 前后 PA3 均浮空(纯高阻, 无 100nF) → 4 次平均后 Δ 趋近 0；
+         *   V04 有分压 → 开 PB3 后 PA3=Vbat/2(adcVal~1755~2544, PA3 端 100nF 低阻抗驱动)，
+         *               关前浮空 → 平均后 Δ 仍巨大(>1200)。
+         *   ★ 已由"单次采样"升级为"4 次平均"消除浮空噪声(2026-08-09): 平均前浮空单次 Δ
+         *     可能随机 ≥200 致 V03 误报 0%; 平均后浮空 Δ 远小于阈值, 分压 Δ 不变 → 可靠区分。
+         *   阈值 300: V04 空电 adcVal≈1755 远高于平均后浮空 Δ(<50), 留足余量。 */
+        if ((adcVal > adcValIdle ? adcVal - adcValIdle : adcValIdle - adcVal) < 300) {
             batteryLevel = 255;
             PRINT("[BATT] Init: no ext-battery divider (idle=%d, after=%d, Δ<%d) → 255 (unsupported)\n",
-                  adcValIdle, adcVal, 200);
+                  adcValIdle, adcVal, 300);
         } else {
         batt_mV = (uint32_t)adcVal * 4242 / 1000 - 6590;
         if (batt_mV >= BAT_ADC_FULL_MV) {
@@ -287,27 +300,36 @@ void Battery_UpdateLevel(void)
         GPIOA_ModeCfg(BAT_ADC_AIN_PIN, GPIO_ModeIN_Floating);
         R8_ADC_CFG     = RB_ADC_POWER_ON | RB_ADC_BUF_EN | (0 << 6) | (0 << 4);
         R8_ADC_CHANNEL = BAT_ADC_CHANNEL;
-        R8_ADC_CONVERT = RB_ADC_START;
-        while (R8_ADC_CONVERT & RB_ADC_START);
-        adcValIdle = R16_ADC_DATA & RB_ADC_DATA;
+
+        /* ★ 2026-08-09 修复(C方案 V03 误报 0%): 同 Battery_Init, 多次平均消除浮空噪声。 */
+        uint8_t  i;
+        uint32_t sumIdle = 0, sumAfter = 0;
+        for (i = 0; i < 4; i++) {
+            R8_ADC_CONVERT = RB_ADC_START;
+            while (R8_ADC_CONVERT & RB_ADC_START);
+            sumIdle += (R16_ADC_DATA & RB_ADC_DATA);
+        }
+        adcValIdle = (uint16_t)(sumIdle / 4);
 
         /* 开闸门上电分压 */
         GPIOB_SetBits(BAT_ADC_EN_PIN);
         DelayMs(BAT_ADC_EN_SETTLE_MS);
 
-        /* 再读"闸门开启"后的采样值 */
-        R8_ADC_CONVERT = RB_ADC_START;
-        while (R8_ADC_CONVERT & RB_ADC_START);
-        adcVal = R16_ADC_DATA & RB_ADC_DATA;
+        for (i = 0; i < 4; i++) {
+            R8_ADC_CONVERT = RB_ADC_START;
+            while (R8_ADC_CONVERT & RB_ADC_START);
+            sumAfter += (R16_ADC_DATA & RB_ADC_DATA);
+        }
+        adcVal = (uint16_t)(sumAfter / 4);
 
         /* 关闸门 */
         GPIOB_ResetBits(BAT_ADC_EN_PIN);
 
-        /* ★ 2026-08-09 (C方案路线B升级): 用"开/关闸门前后 ΔadcVal"判定是否有分压电路。
-         *   V03 无分压 → 开/关 PB3 前后 PA3 都浮空 → Δ 很小(<200)；
-         *   V04 有分压 → 开 PB3 后 PA3=Vbat/2(adcVal~1755~2047)，关前浮空 → Δ 很大(>1000)。
-         *   单行阈值(<100)会漏判浮空漂到中间值的 V03，Δ 法 100% 可靠。 */
-        if ((adcVal > adcValIdle ? adcVal - adcValIdle : adcValIdle - adcVal) < 200) {
+        /* ★ 2026-08-09 (C方案路线B升级 + 多次平均修复): 用"开/关闸门前后 ΔadcVal(4 次平均)"判定是否有分压。
+         *   V03 无分压 → 开/关 PB3 前后 PA3 均浮空(纯高阻, 无 100nF) → 平均后 Δ 趋近 0；
+         *   V04 有分压 → 开闸后 PA3=Vbat/2(低阻抗 100nF 驱动, adcVal~1755~2544) → 平均后 Δ 仍巨大(>1200)。
+         *   阈值 300: 平均后浮空 Δ 远小于此, 分压 Δ 不变, 留足余量防 V03 误报 0%。 */
+        if ((adcVal > adcValIdle ? adcVal - adcValIdle : adcValIdle - adcVal) < 300) {
             if (batteryLevel != 255) {
                 batteryLevel = 255;
                 PRINT("[BATT] no ext-battery divider (idle=%d, after=%d, Δ<%d) → report 255 (unsupported)\n",
