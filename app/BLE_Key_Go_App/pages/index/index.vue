@@ -166,19 +166,32 @@
       <template v-if="bleStore.knownDevicesList.length > 1">
         <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
         <scroll-view class="known-list" scroll-y>
-          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac">
-            <view class="reconnect-info">
-              <text class="reconnect-name">{{ d.displayName }}</text>
-              <text class="reconnect-mac">{{ d.mac }}</text>
-              <view v-if="d.customName || d.isDefault" class="device-tags">
-                <text v-if="d.customName" class="device-alias-tag">已命名</text>
-                <text v-if="d.isDefault" class="device-default-tag">默认</text>
-              </view>
+          <!-- ★ 2026-08-09 P1-②(改): iOS 风左滑。前景 foreground 层随手指左移，露出背后 default/remove 按钮；
+               右侧 ⋯ 图标点击弹 ActionSheet 作为「不知道能左滑」用户的兜底入口（与左滑功能互补，UI 不同）。
+               openMac 记录当前展开项，互斥(一项展开收起其他)。单设备卡不走左滑(见下方 template)。 -->
+          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac"
+            @touchstart="onItemTouchStart($event)"
+            @touchmove="onItemTouchMove($event)"
+            @touchend="onItemTouchEnd($event, d.mac)">
+            <!-- 背后操作层(默认/删除) -->
+            <view class="known-item-back">
+              <view v-if="!d.isDefault" class="back-btn back-default" @tap.stop="handleSetDefault(d.mac)">默认</view>
+              <view class="back-btn back-remove" @tap.stop="handleRemoveDevice(d.mac)">删除</view>
             </view>
-            <view class="known-item-actions">
-              <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
-              <button v-if="!d.isDefault" class="default-btn" @tap="handleSetDefault(d.mac)">默认</button>
-              <button class="remove-btn" @tap="handleRemoveDevice(d.mac)">删除</button>
+            <!-- 前景内容层(随左滑位移) -->
+            <view class="known-item-front" :style="{ transform: (openMac === d.mac ? 'translateX(-' + backWidth + 'px)' : 'translateX(0)') }">
+              <view class="reconnect-info">
+                <text class="reconnect-name">{{ d.displayName }}</text>
+                <text class="reconnect-mac">{{ d.mac }}</text>
+                <view v-if="d.customName || d.isDefault" class="device-tags">
+                  <text v-if="d.customName" class="device-alias-tag">已命名</text>
+                  <text v-if="d.isDefault" class="device-default-tag">默认</text>
+                </view>
+              </view>
+              <view class="known-item-actions">
+                <button class="reconnect-btn" @tap.stop="handleReconnect(d.mac)">连接</button>
+                <text class="more-btn" @tap.stop="openItemMenu(d.mac)">⋯</text>
+              </view>
             </view>
           </view>
         </scroll-view>
@@ -381,6 +394,62 @@ function openBindModal() {
     return
   }
   bindModalVisible.value = true
+}
+
+// ★ 2026-08-09 P1-②(改): 多设备列表 iOS 风左滑状态。
+//   openMac: 当前展开(露出背后操作)的设备 MAC，互斥(只一个)；''=全收起。
+//   backWidth: 背后操作层宽度(px)，由 CSS 决定(rpx→px 需运行时量，这里给估值 168px=两个按钮)。
+//   手势：touchstart 记起点+当前 openMac；touchmove 锁定首个明显方向(纵→判滚动不处理，横→位移)；
+//   touchend 超阈值则展开/收起。scroll-view 的纵向滚动由「先纵向则不认横滑」规避冲突。
+const openMac = ref('')
+const backWidth = 168
+let _touchStartX = 0
+let _touchStartY = 0
+let _touchDir = ''        // '' | 'h' | 'v'
+let _touchStartOpen = ''
+
+function onItemTouchStart(e) {
+  _touchStartX = e.touches[0].clientX
+  _touchStartY = e.touches[0].clientY
+  _touchDir = ''
+  _touchStartOpen = openMac.value
+}
+function onItemTouchMove(e) {
+  const dx = e.touches[0].clientX - _touchStartX
+  const dy = e.touches[0].clientY - _touchStartY
+  // 首个明显位移(>8px)锁定方向，之后不再切换，避免斜滑抖动
+  if (!_touchDir && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+    _touchDir = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v'
+  }
+  if (_touchDir === 'v') return   // 纵向滚动，不干预(让 scroll-view 处理)
+  if (_touchDir !== 'h') return
+  e.stopPropagation && e.stopPropagation()
+}
+function onItemTouchEnd(e, mac) {
+  if (_touchDir !== 'h') { _touchDir = ''; return }  // 非横滑(含纵向/未动)不处理
+  const dx = (e.changedTouches[0].clientX) - _touchStartX
+  // 从右向左滑(dx<0)达阈值 → 展开；向右滑或不足 → 收起
+  if (dx < -40) openMac.value = mac
+  else if (dx > 40 || _touchStartOpen === mac) openMac.value = ''   // 已展开时轻滑回也收起
+  else if (_touchStartOpen === mac) openMac.value = mac
+  _touchDir = ''
+}
+
+// ★ ⋯ 图标 / 长按的兜底入口：弹 ActionSheet（设为默认/删除/取消）。
+//   与左滑功能互补——左滑是 iOS 原生感，⋯ 给不知道能左滑的用户一个明示入口。
+function openItemMenu(mac) {
+  if (!mac) return
+  const item = bleStore.knownDevicesList.find(d => d.mac === mac)
+  const isDefault = item && item.isDefault
+  const buttons = []
+  if (!isDefault) buttons.push({ text: '设为默认', action: () => handleSetDefault(mac) })
+  buttons.push({ text: '删除设备', action: () => handleRemoveDevice(mac), color: '#e64340' })
+  uni.showActionSheet({
+    itemList: buttons.map(b => b.text),
+    itemColor: buttons.length > 1 ? '#000000' : '#e64340',
+    success: (res) => { if (buttons[res.tapIndex]) buttons[res.tapIndex].action() },
+    fail: () => {}
+  })
 }
 
 // ★ 2026-07-14: 设备复位/被其他手机解绑后，store 置 needsRebind → 自动弹首绑界面
@@ -1004,28 +1073,55 @@ async function handleSetName() {
 }
 .reconnect-btn:active { opacity: 0.7; }
 
-/* ★ 2026-07-23 ②④: 多设备重连列表 */
+/* ★ 2026-07-23 ②④ / 2026-08-09 改: 多设备重连列表（iOS 风左滑） */
 .known-list { max-height: 320rpx; margin-top: 10rpx; }
+/* 外层：相对定位 + 溢出隐藏，承载「前景层 + 背后操作层」 */
 .known-item {
+  position: relative;
+  overflow: hidden;
+  border-top: 1rpx solid var(--border);
+}
+.known-item:first-child { border-top: none; }
+/* 背后操作层：铺在右侧，前景左移时露出 */
+.known-item-back {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  display: flex;
+  align-items: stretch;
+}
+.back-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 84px;            /* px：与脚本 backWidth(168px=2*84) 对应，露出两个按钮 */
+  color: #fff;
+  font-size: 24rpx;
+}
+.back-default { background: var(--text-muted); }
+.back-remove { background: #e64340; }
+.back-btn:active { opacity: 0.8; }
+/* 前景内容层：默认铺满，左滑 translateX 露出背后 */
+.known-item-front {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 18rpx 0;
-  border-top: 1rpx solid var(--border);
+  background: var(--card-bg, #fff);   /* 盖住背后层，避免位移前透出 */
+  transition: transform 0.2s ease;
+  will-change: transform;
 }
-.known-item:first-child { border-top: none; }
 .known-item-actions { display: flex; align-items: center; flex: 0 0 auto; margin-left: 16rpx; }
-.default-btn {
-  margin-left: 12rpx;
-  width: auto;
-  background: transparent;
+.more-btn {
+  margin-left: 16rpx;
+  width: 48rpx;
+  text-align: center;
+  font-size: 36rpx;
   color: var(--text-muted);
-  border: 1rpx solid var(--border);
-  border-radius: 20rpx;
-  padding: 12rpx 20rpx;
-  font-size: 22rpx;
+  line-height: 1;
 }
-.default-btn:active { opacity: 0.7; }
+.more-btn:active { opacity: 0.6; }
 .remove-btn {
   margin-left: 12rpx;
   width: auto;
