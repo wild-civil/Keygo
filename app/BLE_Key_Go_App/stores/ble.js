@@ -3669,7 +3669,19 @@ export const useBleStore = defineStore('ble', {
     async _repairConnection() {
       if (this._repairing) return
       const targetId = this.deviceId
-      if (!targetId || !this.connected) return
+      if (!targetId) return
+      // ★ 2026-08-09: 先复核系统真实连接状态（getBLEDeviceServices 探活）。
+      //   日志曾出现「系统已确认断连(connected=false) 后 _statusStaleTimer 仍触发本函数」
+      //   对已死连接强行 closeBLEConnection+重建 GATT，制造混乱且打断在途 AUTH 握手。
+      //   若系统已真断，直接转常规重连，不再走 GATT 重建路径。
+      const alive = await this._verifyConnection(targetId, 1500).catch(() => false)
+      if (!alive) {
+        console.warn('[Store] ⚠ 状态过期但系统已真断 → 放弃 GATT 重建，转常规重连')
+        this.connected = false
+        this.statusStale = true
+        if (typeof this._scheduleReconnect === 'function') this._scheduleReconnect(0)
+        return
+      }
       this._repairing = true
       console.warn('[Store] ⚠ 连接存活但状态过期 → 强制重建 GATT 上下文以恢复 FF02 订阅')
       try {
@@ -3844,7 +3856,18 @@ export const useBleStore = defineStore('ble', {
      */
     _maybeAutoAuth(attempt = 1) {
       if (this.sessionAuthed) { this._autoAuthState = 'idle'; return }
-      if (B._bindInProgress || !B._bindKey || !this.connected) return
+      // ★ 2026-08-09 修复：!B._bindKey（本机无该设备绑定密钥）原静默 return，无任何提示。
+      //   后果：连上后 authed 永远 false → 固件 30s 超时强断，用户只看到"连上又被踢"，
+      //   完全不知道是"本机未绑定"导致。改为显式置 need-bind 状态 + bindHint，让 UI 立即告知用户。
+      if (!B._bindKey) {
+        if (!B._bindInProgress) {
+          this._autoAuthState = 'need-bind'
+          this.bindHint = '设备未绑定，请先绑定'
+          console.warn('[BIND] 本机无绑定密钥，无法自动鉴权 → 需用户手动绑定（否则固件 30s 超时强断）')
+        }
+        return
+      }
+      if (B._bindInProgress || !this.connected) return
       if (B._autoAuthRunning) return
       B._autoAuthRunning = true
       const MAX_TRIES = 4
