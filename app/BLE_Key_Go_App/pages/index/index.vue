@@ -29,7 +29,8 @@
         <text class="rssi-unit">dBm</text>
       </view>
       <!-- ★ v3.36.1: 电池电量 — 缩小整行，置于「已连接」框(🔗)内底部；断开后 batteryLevel 重置为 -1 自动隐藏 --> <!-- 2026-07-25: 电池卡加 connected 守卫(bleStore.connected)，未连接不再显示旧电量 -->
-      <view class="card-batt" v-if="bleStore.connected && bleStore.batteryLevel >= 0" :class="bleStore.batteryColor"> 
+      <!-- ★ 2026-08-09 (P0-①): 显示条件新增 batteryLevel===255(固件不支持电量)，让其显示 🚫+不支持，而非整块隐藏 -->
+      <view class="card-batt" v-if="bleStore.connected && (bleStore.batteryLevel >= 0 || bleStore.batteryLevel === 255)" :class="bleStore.batteryColor"> 
         <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
         <text class="batt-text">{{ bleStore.batteryText }}</text>
       </view>
@@ -811,6 +812,8 @@ async function handleSetName() {
 .card-batt.batt-mid    { background: rgba(255, 169, 0, 0.15);  color: var(--accent-yellow); }
 .card-batt.batt-low    { background: rgba(255, 69, 58, 0.15);  color: var(--accent-red); }
 .card-batt.batt-unknown { background: rgba(142, 142, 147, 0.15); color: var(--text-muted); }
+/* ★ 2026-08-09 (P0-①): 固件声明不支持电量(V03 无 ADC) — 橙色警示区分于未知灰 */
+.card-batt.batt-unsupported { background: rgba(255, 169, 0, 0.15); color: var(--accent-yellow); }
 
 .temp-card {
   background: var(--bg-card);

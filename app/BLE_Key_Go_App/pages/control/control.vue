@@ -91,7 +91,8 @@
           <!-- ▼ ★ v3.15: 电池电量 — 默认 emoji 图标
                如需切换为 CSS 电池组件，注释下面 18 行，取消注释 19~24 行 -->
           <!-- ★ 2026-07-24: 改 v-show，避免重连期间电量从-1→100 时块状节点挂载打断 swiper 手势 -->  <!-- 2026-07-25: 控制页电池同样加 connected 守卫(bleStore.connected)，保留 v-show 不破坏 swiper 手势 -->
-          <view class="car-battery" :class="bleStore.batteryColor" v-show="bleStore.connected && bleStore.batteryLevel >= 0"> 
+          <!-- ★ 2026-08-09 (P0-①): 显示条件新增 ===255(固件不支持电量)，让其显示 🚫+不支持 -->
+          <view class="car-battery" :class="bleStore.batteryColor" v-show="bleStore.connected && (bleStore.batteryLevel >= 0 || bleStore.batteryLevel === 255)"> 
             <text class="batt-icon">{{ bleStore.batteryIcon }}</text>
             <text class="batt-text">{{ bleStore.batteryText }}</text>
           </view>
@@ -646,6 +647,8 @@ async function onToggleProxRide(v) {
 .car-battery.batt-mid    { background: rgba(255, 169, 0, 0.15);  color: var(--accent-yellow); }
 .car-battery.batt-low    { background: rgba(255, 69, 58, 0.15);  color: var(--accent-red); }
 .car-battery.batt-unknown { background: rgba(142, 142, 147, 0.15); color: var(--text-muted); }
+/* ★ 2026-08-09 (P0-①): 固件声明不支持电量(V03 无 ADC) — 橙色警示区分于未知灰 */
+.car-battery.batt-unsupported { background: rgba(255, 169, 0, 0.15); color: var(--accent-yellow); }
 
 
 /* ===== 信息网格 ===== */

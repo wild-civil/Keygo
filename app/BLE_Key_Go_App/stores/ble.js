@@ -494,7 +494,8 @@ export const useBleStore = defineStore('ble', {
      *   若想切换为 CSS 组件，修改 control.vue 模板中的电池区域
      *   （CSS 组件标记了 v3.15-css，注释掉 emoji 行即可启用） */
     batteryIcon: (state) => {
-      if (state.batteryLevel < 0) return '❓'
+      if (state.batteryLevel < 0) return '❓'   // 未知（连接重置后 / 超时未取）
+      if (state.batteryLevel === 255) return '🚫' // 固件声明不支持电量（如 V03 无 ADC）
       if (state.batteryLevel >= 75) return '🔋'
       if (state.batteryLevel >= 50) return '🔋'
       if (state.batteryLevel >= 25) return '🔋'
@@ -504,14 +505,16 @@ export const useBleStore = defineStore('ble', {
     // ★ v3.14: 电池颜色 class（用于 CSS 动态色）
     batteryColor: (state) => {
       if (state.batteryLevel < 0) return 'batt-unknown'
+      if (state.batteryLevel === 255) return 'batt-unsupported' // V03 无 ADC：不支持电量
       if (state.batteryLevel >= 75) return 'batt-high'
       if (state.batteryLevel >= 25) return 'batt-mid'
       return 'batt-low'
     },
 
-    // ★ v3.14: 电池文字（百分比或 "---"）
+    // ★ v3.14: 电池文字（百分比 / "---" 未知 / "不支持"）
     batteryText: (state) => {
       if (state.batteryLevel < 0) return '---'
+      if (state.batteryLevel === 255) return '不支持' // 固件明确无电量采集能力
       return state.batteryLevel + '%'
     },
   },
@@ -724,14 +727,19 @@ export const useBleStore = defineStore('ble', {
         }
 
         // ★ v3.14: 电池电量 Notify (0x2A19) — 固件电压变化时实时推送
+        // ★ 2026-08-09 (P0-①): 扩展合法值域 — 255=固件声明不支持电量(V03无ADC)，需单独识别，不能走 <=100 分支
         if (res.deviceId === this.deviceId &&
             (res.characteristicId || '').toUpperCase() === BATT_SERVICE.levelCharUUID.toUpperCase()) {
           try {
             const level = new Uint8Array(res.value)[0]
-            if (level <= 100) {
+            if (level === 255) {
+              this.batteryLevel = 255
+              console.log('[Store] 电池电量: 固件不支持 (255)')
+            } else if (level <= 100) {
               this.batteryLevel = level
               console.log('[Store] 电池电量更新 (Notify):', level + '%')
             }
+            // level 为 101~254 之间非法值 → 忽略，保持当前态（连接重置后为 -1 → 显示 ---）
           } catch {} // 字节解析失败，忽略
         }
       })
@@ -2128,6 +2136,7 @@ export const useBleStore = defineStore('ble', {
       this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 新连接重置签名会话态
+      this.batteryLevel = -1   // ★ 2026-08-09 (P0-①): 连接起点重置电量→未知(---)，杜绝跨板粘连(V04 6% 残留到 V03)
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
       this.lastDeviceId = deviceId
@@ -2354,15 +2363,22 @@ export const useBleStore = defineStore('ble', {
       //       KeyGo_电量长时间不显示_根因分析.md §3.1。
       await new Promise(r => setTimeout(r, 2500)) // 先等状态 Notify 把电量送上来
       if (this.deviceId !== deviceId || !this.connected) return
-      if (this.batteryLevel >= 0) return // Notify/广播已覆盖，跳过冗余读
+      // ★ 2026-08-09 (P0-①): 仅当已拿到合法百分比(0~100)才跳过读取；
+      //   -1(未知)=需继续尝试；255(不支持)=固件已声明，无需再读但也不覆盖
+      if (this.batteryLevel >= 0 && this.batteryLevel <= 100) return
 
       // ★ 2026-07-24: 重试 3 次（退避 800ms），覆盖手机 GATT 缓存瞬态缺 READ 位导致的偶发失败
+      // ★ 2026-08-09 (P0-①): 兜底读取也识别 255(不支持)，避免只支持 Read 的固件(如 V03)卡在 ---
       const MAX_RETRY = 3
       for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
-        if (this.batteryLevel >= 0) break // 重试途中被 Notify/广播补到，提前退出
+        if (this.batteryLevel >= 0 && this.batteryLevel <= 100) break // 重试途中被 Notify/广播补到合法值，提前退出
         try {
           const level = await readBatteryLevel(deviceId, 5000)
-          if (level >= 0 && level <= 100) {
+          if (level === 255) {
+            this.batteryLevel = 255
+            console.log('[Store] GATT 电池电量: 固件不支持 (255, 第' + attempt + '次兜底)')
+            break
+          } else if (level >= 0 && level <= 100) {
             this.batteryLevel = level
             console.log('[Store] GATT 电池电量(兜底, 第' + attempt + '次):', level + '%')
             break
@@ -2943,11 +2959,11 @@ export const useBleStore = defineStore('ble', {
           console.log('[Store] 设备指纹（广播包）:', this.fingerprint)
         }
 
-        // ★ v3.14: 从扫描缓存中提取电池电量（广播包 Service Data）
-        if (cached && cached.batteryLevel >= 0) {
-          this.batteryLevel = cached.batteryLevel
-          console.log('[Store] 电池电量（广播包）:', this.batteryLevel + '%')
-        }
+        // ★ v3.14/v3.36.3: 扫描缓存电量曾用于预填充，但会导致跨板粘连
+        //   (V04 6% 残留到 V03) 与过期值误显。2026-08-09 (P0-①): 连接起点已在
+        //   _finalizeConnection 重置 batteryLevel=-1，此处不再用扫描缓存覆盖，
+        //   改由 _fetchBatteryLevel(2.5s 兜底) + Notify 给出权威值。
+        //   （扫描缓存电量仅作历史记录保留，不参与本次显示）
 
         uni.setStorageSync('ble_device_id', deviceId)
         // ★ 2026-07-22: 同步持久化"已知设备"记忆（手动断开时保留，用于"重新连接"按钮）
