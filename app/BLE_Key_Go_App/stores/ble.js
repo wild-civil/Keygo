@@ -2779,6 +2779,53 @@ export const useBleStore = defineStore('ble', {
         try { uni.setStorageSync('ble_known_devices', next) } catch (e) {}
       },
 
+      /**
+       * ★ 2026-08-09 P1-②: 用户在「已知设备」列表主动删除一台 KeyGo。
+       *   与自动失效(_removeKnownDevice 仅清 knownDevices)不同，这里要把一台设备
+       *   在手机本地的全部痕迹彻底清理，避免「删了还残留自定义名/默认标记/重连锚点」：
+       *   ① knownDevices / ble_known_devices（已知集合）
+       *   ② _customNamesByMac / ble_device_custom_names（按 MAC 的自定义名）
+       *   ③ 若删的是默认设备 → defaultDeviceId / ble_default_device_id（回退到其余设备首项，无则清空）
+       *   ④ 若删的是当前重连锚点(knownDeviceId/lastDeviceId) → 清 ble_last_device_id / lastDeviceId
+       *   @param {string} mac 设备 MAC（含冒号或去冒号皆可）
+       *   @returns {boolean} true=确实删掉了（以前在已知集合里）
+       */
+      removeKnownDevice(mac) {
+        if (!mac) return false
+        const key = String(mac).replace(/:/g, '').toUpperCase()
+        const existed = !!(this.knownDevices && this.knownDevices[key])
+        // ① 移出已知集合
+        this._removeKnownDevice(key)
+
+        // ② 清按 MAC 的自定义名
+        if (this._customNamesByMac && this._customNamesByMac[key]) {
+          const names = { ...(this._customNamesByMac || {}) }
+          delete names[key]
+          this._customNamesByMac = names
+          try { uni.setStorageSync('ble_device_custom_names', names) } catch (e) {}
+        }
+
+        // ③ 清默认设备标记（删的是默认 → 回退到其余设备首项，无则清空）
+        if (this.defaultDeviceId === key) {
+          const rest = Object.keys(this.knownDevices || {})
+          if (rest.length) {
+            this.defaultDeviceId = rest[0]
+            try { uni.setStorageSync('ble_default_device_id', rest[0]) } catch (e) {}
+          } else {
+            this.defaultDeviceId = ''
+            try { uni.removeStorageSync('ble_default_device_id') } catch (e) {}
+          }
+        }
+
+        // ④ 清重连锚点（删的是当前已知/最近设备 → 不再自动重连它）
+        if (this.knownDeviceId === key || this.lastDeviceId === key) {
+          this.lastDeviceId = ''
+          try { uni.removeStorageSync('ble_last_device_id') } catch (e) {}
+        }
+
+        return existed
+      },
+
       // ★ 2026-07-23 ④: 把某台设为默认设备(在重连列表中置顶)。
       setDefaultDevice(mac) {
         if (!mac) return

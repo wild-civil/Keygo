@@ -178,6 +178,7 @@
             <view class="known-item-actions">
               <button class="reconnect-btn" @tap="handleReconnect(d.mac)">连接</button>
               <button v-if="!d.isDefault" class="default-btn" @tap="handleSetDefault(d.mac)">默认</button>
+              <button class="remove-btn" @tap="handleRemoveDevice(d.mac)">删除</button>
             </view>
           </view>
         </scroll-view>
@@ -190,7 +191,10 @@
           <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
           <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
         </view>
-        <button class="reconnect-btn" @tap="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
+        <view class="single-actions">
+          <button class="reconnect-btn" @tap="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
+          <button class="remove-btn" @tap="handleRemoveDevice(bleStore.knownDeviceId)">删除设备</button>
+        </view>
       </template>
     </view>
 
@@ -564,6 +568,23 @@ function handleSetDefault(mac) {
   if (!mac) return
   bleStore.setDefaultDevice(mac)
   toast.success('已设为默认设备')
+}
+
+// ★ 2026-08-09 P1-②: 从已知设备列表主动删除一台 KeyGo（清本地全部痕迹：已知集合/自定义名/默认/重连锚点）
+function handleRemoveDevice(mac) {
+  if (!mac) return
+  uni.showModal({
+    title: '删除设备',
+    content: '将从此手机移除该 KeyGo（含自定义名称），设备端绑定不受影响。确定删除？',
+    confirmText: '删除',
+    confirmColor: '#e64340',
+    success: (res) => {
+      if (!res.confirm) return
+      const ok = bleStore.removeKnownDevice(mac)
+      if (ok) toast.success('已删除')
+      else toast.info('该设备不在已知列表')
+    }
+  })
 }
 
 // ★ 2026-07-23: 扫描列表展示名，有自定义名时组合为「自定义名 ( 出厂名 )」，否则出厂名
@@ -1005,6 +1026,18 @@ async function handleSetName() {
   font-size: 22rpx;
 }
 .default-btn:active { opacity: 0.7; }
+.remove-btn {
+  margin-left: 12rpx;
+  width: auto;
+  background: transparent;
+  color: #e64340;
+  border: 1rpx solid rgba(230, 67, 64, 0.5);
+  border-radius: 20rpx;
+  padding: 12rpx 20rpx;
+  font-size: 22rpx;
+}
+.remove-btn:active { opacity: 0.7; background: rgba(230, 67, 64, 0.08); }
+.single-actions { display: flex; align-items: center; gap: 16rpx; margin-top: 16rpx; }
 .device-default-tag {
   align-self: flex-start;
   margin-top: 4rpx;
