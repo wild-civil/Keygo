@@ -331,8 +331,23 @@ async function handleStatus() {
 }
 
 // ★ 2026-07-22/23: 手动断开后一键重新连接（可指定 targetMac 用于多设备列表）
+// ★ P0-② (2026-08-09): 无 targetMac（重连已断开的当前设备）→ 走 reconnectDisconnected()，
+//   显式清除 dormant + 用 lastDeviceId 直连，保证「断开后必能重连」。
 async function handleReconnect(targetMac) {
-  const id = targetMac || bleStore.knownDeviceId
+  if (!targetMac) {
+    uni.showLoading({ title: '连接中...', mask: true })
+    try {
+      const ok = await bleStore.reconnectDisconnected()
+      uni.hideLoading()
+      if (ok) toast.success('连接成功')
+      else toast.error('连接失败，请重试')
+    } catch (e) {
+      uni.hideLoading()
+      toast.error('连接失败，请重试')
+    }
+    return
+  }
+  const id = targetMac
   if (!id) return
   uni.showLoading({ title: '连接中...', mask: true })
   try {

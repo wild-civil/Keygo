@@ -3014,6 +3014,12 @@ export const useBleStore = defineStore('ble', {
 
       this._scanAborted = true
       const targetId = this.deviceId
+      // ★ P0-② (2026-08-09): 重连锚点——断开前先保留 lastDeviceId，确保「断开后必能重连」
+      //   即使后续 deviceId 被清空、重连按钮也能凭 lastDeviceId / ble_last_device_id 直连。
+      if (targetId) this.lastDeviceId = targetId
+      // ★ P0-②: disconnectDevice API 无论成败都必须完成状态清理（见下方 finally 语义），
+      //   否则 API 抛错直接 return 会残留半连接态（connected=true / deviceId 残留 / 监听器未销毁）
+      //   → UI 卡「连接中」且无法重连。这里仅做 GATT 断开尝试，失败仅告警，不阻断清理。
       if (targetId) {
         try {
           await disconnectDevice(targetId)
@@ -3033,8 +3039,8 @@ export const useBleStore = defineStore('ble', {
             try { uni.onBLEConnectionStateChange(handler) } catch { done() }
           })
         } catch (err) {
-          console.error('[Store] 断开连接 API 调用失败', err)
-          return false
+          // ★ P0-②: API 失败也不 return，继续做状态清理，保证断开后状态确定一致、可重连
+          console.error('[Store] 断开连接 API 调用失败（仍继续清理状态）', err)
         }
       }
       // ★ v3.6: 精准清理全局监听器，避免泄残留 listener
@@ -3042,6 +3048,8 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.17: 用户主动断开 → 停止前台服务
       this._stopForegroundService()
       this.connected = false
+      // ★ P0-②: 保留 lastDeviceId（重连直连锚点）；清空 deviceId 仅表示「当前无活动连接」，
+      //   不破坏重连能力（重连入口用 lastDeviceId）。
       this.deviceId = ''
       this.deviceName = ''
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 主动断开重置签名会话态
@@ -3069,6 +3077,51 @@ export const useBleStore = defineStore('ble', {
       }
 
       return true
+    },
+
+    /**
+     * ★ P0-② (2026-08-09): 用户主动「重新连接」统一入口。
+     *
+     * 场景：用户先点「断开连接」(disconnect → reconnectMode='dormant' + deviceId='')，
+     * 再点「重新连接」。此时：
+     *   - reconnectMode 仍是 'dormant'（用户主动断开的语义），本方法需显式清除，
+     *     恢复后续异常断连的自动重连能力（避免连上后再次掉线却因 dormant 不自动重连）。
+     *   - deviceId 已清空，但 lastDeviceId（断开时保留）/ ble_last_device_id 仍在，
+     *     作为重连直连锚点。
+     *
+     * 流程：清 dormant + 递增 guard（使在途旧 session 失效）→ 预清理旧句柄 → connect(lastDeviceId)。
+     *
+     * @returns {Promise<boolean>} true=重连成功
+     */
+    async reconnectDisconnected() {
+      const targetId = this.lastDeviceId || uni.getStorageSync('ble_last_device_id') || this.deviceId
+      if (!targetId) {
+        console.warn('[Store] 重新连接失败：无已知设备锚点（lastDeviceId 为空）')
+        return false
+      }
+      // ★ 清除「用户主动断开」抑制，恢复自动重连能力
+      this.reconnectMode = 'idle'
+      this._reconnectGuard++
+      // ★ 预清理可能残留的系统连接句柄，避免「已连接却连不上」假死
+      try {
+        await new Promise((resolve) => {
+          uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() })
+        })
+      } catch (e) { /* ignore */ }
+      try {
+        console.log('[Store] 用户主动重新连接:', targetId)
+        const ok = await this.connect(targetId, this.deviceName)
+        if (ok) {
+          console.log('[Store] 重新连接成功')
+          return true
+        }
+        return false
+      } catch (e) {
+        console.error('[Store] 重新连接失败', e?.message || e)
+        // ★ 失败也保留 lastDeviceId，允许再次点击「重新连接」
+        this.connected = false
+        return false
+      }
     },
 
     /**
