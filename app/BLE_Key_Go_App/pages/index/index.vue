@@ -165,21 +165,33 @@
       <!-- 多设备：展开为可滚动列表 -->
       <template v-if="bleStore.knownDevicesList.length > 1">
         <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
-        <scroll-view class="known-list" scroll-y>
+        <scroll-view class="known-list" scroll-y @tap="onListTap">
           <!-- ★ 2026-08-09 P1-②(改): iOS 风左滑。前景 foreground 层随手指左移，露出背后 default/remove 按钮；
-               右侧 ⋯ 图标点击弹 ActionSheet 作为「不知道能左滑」用户的兜底入口（与左滑功能互补，UI 不同）。
-               openMac 记录当前展开项，互斥(一项展开收起其他)。单设备卡不走左滑(见下方 template)。 -->
-          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac"
-            @touchstart="onItemTouchStart($event)"
-            @touchmove="onItemTouchMove($event)"
-            @touchend="onItemTouchEnd($event, d.mac)">
+               右侧 ⋯ 图标点击=toggleItem 滑动展开(与左滑同一套 UI，不再弹 ActionSheet)；
+               已展开时点前景空白/列表空白→收起。openMac 记录当前展开项，互斥(一项展开收起其他)。
+               单设备卡不走左滑(见下方 template)。 -->
+          <!--
+            ★ 2026-08-09 临时注释：左滑手势(从右向左滑露出 默认/删除) 已禁用。
+            原因：在 uni-app 的 <scroll-view> 内，手写 touch 判定无法真正拦住原生纵向滚动——
+            scroll-view 在更底层捕获 touch 事件，子元素 e.stopPropagation() 对原生滚动无效，
+            导致「横向意图被锁定后，屏幕仍在纵向滑动」两者并发。该冲突在可滚动列表里近乎无解
+            （除非自实现虚拟滚动），故先撤掉左滑，保留 ⋯ 点击滑出 作为唯一展开入口（更稳定、零冲突）。
+            如日后要恢复，需改用 catch:touchmove 拦截 + 自实现滚动，或把列表改为非滚动容器。
+            相关函数 onItemTouchStart/Move/End 已一并注释保留，便于日后回滚。
+          -->
+          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac">
+            <!-- @touchstart="onItemTouchStart($event)" -->
+            <!-- @touchmove="onItemTouchMove($event)" -->
+            <!-- @touchend="onItemTouchEnd($event, d.mac)" -->
             <!-- 背后操作层(默认/删除) -->
             <view class="known-item-back">
               <view v-if="!d.isDefault" class="back-btn back-default" @tap.stop="handleSetDefault(d.mac)">默认</view>
               <view class="back-btn back-remove" @tap.stop="handleRemoveDevice(d.mac)">删除</view>
             </view>
-            <!-- 前景内容层(随左滑位移) -->
-            <view class="known-item-front" :style="{ transform: (openMac === d.mac ? 'translateX(-' + backWidth + 'px)' : 'translateX(0)') }">
+            <!-- 前景内容层(随左滑位移)。@tap: 已展开时点空白处(非按钮)→收起；
+                 连接/删除/⋯ 按钮用 @tap.stop 拦截，不会触发收起。 -->
+            <view class="known-item-front" :style="{ transform: (openMac === d.mac ? 'translateX(-' + backWidth + 'px)' : 'translateX(0)') }"
+              @tap="onFrontTap(d.mac)">
               <view class="reconnect-info">
                 <text class="reconnect-name">{{ d.displayName }}</text>
                 <text class="reconnect-mac">{{ d.mac }}</text>
@@ -190,7 +202,7 @@
               </view>
               <view class="known-item-actions">
                 <button class="reconnect-btn" @tap.stop="handleReconnect(d.mac)">连接</button>
-                <text class="more-btn" @tap.stop="openItemMenu(d.mac)">⋯</text>
+                <text class="more-btn" @tap.stop="toggleItem(d.mac)">⋯</text>
               </view>
             </view>
           </view>
@@ -396,60 +408,63 @@ function openBindModal() {
   bindModalVisible.value = true
 }
 
-// ★ 2026-08-09 P1-②(改): 多设备列表 iOS 风左滑状态。
+// ★ 2026-08-09 P1-②(改): 多设备列表「⋯ 点击滑出」状态。
 //   openMac: 当前展开(露出背后操作)的设备 MAC，互斥(只一个)；''=全收起。
 //   backWidth: 背后操作层宽度(px)，由 CSS 决定(rpx→px 需运行时量，这里给估值 168px=两个按钮)。
-//   手势：touchstart 记起点+当前 openMac；touchmove 锁定首个明显方向(纵→判滚动不处理，横→位移)；
-//   touchend 超阈值则展开/收起。scroll-view 的纵向滚动由「先纵向则不认横滑」规避冲突。
+//   展开入口：⋯ 图标点击(toggleItem) → 同一套 translateX 滑动 UI。
+//   收起入口：① 已展开点前景空白处(onFrontTap) ② 点列表空白(onListTap) ③ ⋯ 再点(toggleItem 互斥)。
+//   ★ 左滑手势已禁用(见 template 内注释)：uni-app scroll-view 内手写 touch 无法拦住原生纵向滚动，
+//     导致横滑与屏幕纵滑并发。onItemTouchStart/Move/End 暂注释保留，便于日后回滚。
 const openMac = ref('')
 const backWidth = 168
-let _touchStartX = 0
-let _touchStartY = 0
-let _touchDir = ''        // '' | 'h' | 'v'
-let _touchStartOpen = ''
 
-function onItemTouchStart(e) {
-  _touchStartX = e.touches[0].clientX
-  _touchStartY = e.touches[0].clientY
-  _touchDir = ''
-  _touchStartOpen = openMac.value
-}
-function onItemTouchMove(e) {
-  const dx = e.touches[0].clientX - _touchStartX
-  const dy = e.touches[0].clientY - _touchStartY
-  // 首个明显位移(>8px)锁定方向，之后不再切换，避免斜滑抖动
-  if (!_touchDir && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-    _touchDir = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v'
-  }
-  if (_touchDir === 'v') return   // 纵向滚动，不干预(让 scroll-view 处理)
-  if (_touchDir !== 'h') return
-  e.stopPropagation && e.stopPropagation()
-}
-function onItemTouchEnd(e, mac) {
-  if (_touchDir !== 'h') { _touchDir = ''; return }  // 非横滑(含纵向/未动)不处理
-  const dx = (e.changedTouches[0].clientX) - _touchStartX
-  // 从右向左滑(dx<0)达阈值 → 展开；向右滑或不足 → 收起
-  if (dx < -40) openMac.value = mac
-  else if (dx > 40 || _touchStartOpen === mac) openMac.value = ''   // 已展开时轻滑回也收起
-  else if (_touchStartOpen === mac) openMac.value = mac
-  _touchDir = ''
-}
+// // —— 以下为左滑手势实现(2026-08-09 起禁用，保留待回滚) ——
+// let _touchStartX = 0
+// let _touchStartY = 0
+// let _touchDir = ''        // '' | 'h' | 'v'
+// let _touchStartOpen = ''
+// let _touchMoved = false   // 本回合是否发生过有效横滑(用于区分「点击」与「滑动」)
+// function onItemTouchStart(e) {
+//   _touchStartX = e.touches[0].clientX
+//   _touchStartY = e.touches[0].clientY
+//   _touchDir = ''
+//   _touchStartOpen = openMac.value
+//   _touchMoved = false
+// }
+// function onItemTouchMove(e) {
+//   const dx = e.touches[0].clientX - _touchStartX
+//   const dy = e.touches[0].clientY - _touchStartY
+//   if (!_touchDir && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+//     _touchDir = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v'
+//   }
+//   if (_touchDir === 'v') return
+//   if (_touchDir !== 'h') return
+//   _touchMoved = true
+//   e.stopPropagation && e.stopPropagation()
+// }
+// function onItemTouchEnd(e, mac) {
+//   if (_touchDir !== 'h') { _touchDir = ''; return }
+//   const dx = (e.changedTouches[0].clientX) - _touchStartX
+//   if (dx < -40) openMac.value = mac
+//   else if (_touchStartOpen === mac) openMac.value = ''
+//   _touchDir = ''
+// }
 
-// ★ ⋯ 图标 / 长按的兜底入口：弹 ActionSheet（设为默认/删除/取消）。
-//   与左滑功能互补——左滑是 iOS 原生感，⋯ 给不知道能左滑的用户一个明示入口。
-function openItemMenu(mac) {
+// ★ ⋯ 图标点击：展开/收起切换(toggle)——同一套滑动 UI 的唯一展开入口。
+function toggleItem(mac) {
   if (!mac) return
-  const item = bleStore.knownDevicesList.find(d => d.mac === mac)
-  const isDefault = item && item.isDefault
-  const buttons = []
-  if (!isDefault) buttons.push({ text: '设为默认', action: () => handleSetDefault(mac) })
-  buttons.push({ text: '删除设备', action: () => handleRemoveDevice(mac), color: '#e64340' })
-  uni.showActionSheet({
-    itemList: buttons.map(b => b.text),
-    itemColor: buttons.length > 1 ? '#000000' : '#e64340',
-    success: (res) => { if (buttons[res.tapIndex]) buttons[res.tapIndex].action() },
-    fail: () => {}
-  })
+  openMac.value = openMac.value === mac ? '' : mac
+}
+
+// ★ 前景空白处(非按钮)点击：若该项已展开 → 收起；否则无动作。
+//   连接/删除/⋯ 按钮均带 @tap.stop，不会冒泡到这里。
+function onFrontTap(mac) {
+  if (openMac.value === mac) openMac.value = ''   // 已展开 → 收起
+}
+
+// ★ 列表空白(scroll-view 自身)点击：收起所有展开项。
+function onListTap() {
+  if (openMac.value) openMac.value = ''
 }
 
 // ★ 2026-07-14: 设备复位/被其他手机解绑后，store 置 needsRebind → 自动弹首绑界面
@@ -1108,7 +1123,7 @@ async function handleSetName() {
   align-items: center;
   justify-content: space-between;
   padding: 18rpx 0;
-  background: var(--card-bg, #fff);   /* 盖住背后层，避免位移前透出 */
+  background: var(--bg-card);   /* 盖住背后层，避免位移前透出；用主题卡片色同步夜间模式 */
   transition: transform 0.2s ease;
   will-change: transform;
 }
