@@ -166,7 +166,10 @@
     <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDevicesList.length" @tap="onListTap">
       <!-- 多设备：展开为可滚动列表 -->
       <template v-if="bleStore.knownDevicesList.length > 1">
-        <text class="reconnect-label">已知设备 ({{ bleStore.knownDevicesList.length }})</text>
+        <view class="reconnect-label">
+          <text class="reconnect-title">已知设备</text>
+          <text class="reconnect-count">({{ bleStore.knownDevicesList.length }})</text>
+        </view>
         <scroll-view class="known-list" scroll-y @tap="onListTap">
           <!-- ★ 2026-08-09 P1-②(改): iOS 风左滑。前景 foreground 层随手指左移，露出背后 default/remove 按钮；
                右侧 ⋯ 图标点击=toggleItem 滑动展开(与左滑同一套 UI，不再弹 ActionSheet)；
@@ -235,7 +238,10 @@
           <view class="known-item-front" :style="{ transform: (openMac === bleStore.knownDeviceId ? 'translateX(-' + backWidth + 'px)' : 'translateX(0)') }"
             @tap="onFrontTap(bleStore.knownDeviceId)">
             <view class="reconnect-info">
-              <text class="reconnect-label">已知设备</text>
+              <view class="reconnect-label">
+                <text class="reconnect-title">已知设备</text>
+                <text class="reconnect-count">({{ bleStore.knownDevicesList.length }})</text>
+              </view>
               <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
               <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
               <view v-if="bleStore.customNameForMac(bleStore.knownDeviceId) || isDefaultDevice(bleStore.knownDeviceId)" class="device-tags">
@@ -1116,7 +1122,13 @@ async function handleSetName() {
   box-sizing: border-box;
 }
 .reconnect-info { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; } /* ★ flex:1 占满剩余空间 → 强制把按钮顶到最右 */
-.reconnect-label { font-size: 22rpx; color: var(--text-muted); margin-bottom: 6rpx; }
+/* ★ 2026-08-12: 对齐控制页观感 —— "已知设备"一行，(N) 在其正下方居中。
+   用 inline-flex 让容器宽度收缩到"已知设备"四个字宽度（不撑满卡片），
+   内部 column + 居中 → (N) 以四字中心对齐（落在"知""设"下方），而非整行居中。
+   字号/颜色同控制页：22rpx / text-tertiary。 */
+.reconnect-label { display: inline-flex; flex-direction: column; align-items: center; gap: 2rpx; margin-bottom: 8rpx; margin-right: 12rpx;}
+.reconnect-title { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; }
+.reconnect-count { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; }
 .reconnect-name { font-size: 28rpx; color: var(--text-primary); font-weight: 600; line-height: 1.3; }
 .reconnect-mac { font-size: 22rpx; color: var(--text-tertiary); margin-top: 2rpx; }
 .reconnect-btn {
