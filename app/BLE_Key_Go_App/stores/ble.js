@@ -138,7 +138,7 @@ import {
 } from '@/utils/geofence.js'
 
 // ★ v3.27-fix: 命令写队列 + GATT 冲突检测（提取到 utils/command-queue.js）
-import { enqueueWrite, isGattConflict } from '@/utils/command-queue.js'
+import { enqueueWrite, enqueueRead, isGattConflict } from '@/utils/command-queue.js'
 // ★ 用户可读错误文案集中管理（提取到 utils/readable-errors.js）
 import { throwError, ERROR_MSGS } from '@/utils/readable-errors.js'
 // ★ ②: 绑定层模块级状态（提取到 stores/ble-binding.js，通过 B 命名空间对象访问）
@@ -240,6 +240,19 @@ export const useBleStore = defineStore('ble', {
       //   仅在设备复位(_forgetDeviceKey / bn=0)时清零，强制重绑后首推；重连不重置(per-phone 存 Flash 不丢)。
       _lastPushedUnlock: null,
       _lastPushedLock: null,
+      // ★ 2026-08-12 合并版: GATT 写就绪标志 + AUTH:OK 后挂起写队列。
+      //   加密握手刚完成时 OS 对 FF01/FF03 的 WRITE 属性缓存可能尚未就绪（瞬时窗口），
+      //   此刻硬写必撞 10007 并触发无效重试。正确做法是「等 AUTH:OK 后首帧 FF02 到达」再写——
+      //   FF02 能送达 = GATT 通道完全可用 = OS 属性缓存已刷新，10007 概率趋零。
+      //   _gattWriteReady=false 表示尚未收到首帧 FF02；_postAuthWritesPending 表示 AUTH:OK 后
+      //   有配置/RSSI 写挂起待发；_postAuthWriteTimer 是 800ms 超时兜底（首帧 FF02 不来也强制发）。
+      _gattWriteReady: false,
+      _postAuthWritesPending: false,
+      _postAuthWriteTimer: null,
+      // ★ 2026-08-13 第七刀: 「AUTH:OK 后下发链」是否仍在进行中（含 FF01 写完后 250ms 才发的 FF03 尾巴）。
+      //   _postAuthWritesPending 在 flush 一开始就置 false，不足以表达「整条链收尾」，故独立此标志。
+      //   电池兜底读取(_fetchBatteryLevel) 据此让位，避免 read 抢占 Android 单一 GATT 事务槽。
+      _postAuthWritesInFlight: false,
 
     // ★ v3.27: 命令节流（防连点并发写同一特征值导致 GATT busy 丢命令）
     _cmdBusy: false,             // 命令发送中（串行化，同一时刻只允许一条）
@@ -1270,6 +1283,12 @@ export const useBleStore = defineStore('ble', {
         return
       }
 
+      // ★ 2026-08-12 合并版: 断连时清掉挂起写定时器与标记，避免掉线后还向旧连接发 FF01/FF03 写。
+      this._postAuthWritesPending = false
+      this._gattWriteReady = false
+      this._postAuthWritesInFlight = false   // ★ 第七刀: 断连复位，避免电池读被永久卡住
+      if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+
       // ★ 2026-07-17 诊断埋点：断连即刻记录「会话画像」，配合固件串口 [DIAG]/reason 定位断连性质：
       //   - 存活极短(<数秒) + authed=false → 大概率「未鉴权 30s 强断」或 AUTH 未完成即被踢；
       //   - 存活较久后掉线 + authed=true  → 大概率监督超时(1s)/信道问题(锁屏/Doze)；
@@ -1981,6 +2000,8 @@ export const useBleStore = defineStore('ble', {
               setDebugReconnectResult(true, '\u4eae\u5c4f\u8fde\u63a5\u6210\u529f')
               this.connected = true
               this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置（防止沿用上一连接的去重标志）
+              this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
+              if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
               this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 亮屏修复连上后重置 RSSI 显示态
               this.lastDeviceId = targetId
               this._rememberAdvertisedName(targetId, device.name)
@@ -2133,6 +2154,8 @@ export const useBleStore = defineStore('ble', {
       this.connected = true
       this._connectedAtMs = Date.now()   // ★ 2026-07-17 诊断埋点：记录会话起点，供 _handleDisconnect 算存活时长
       this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
+      this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
+      if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
       this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 新连接重置签名会话态
@@ -2203,7 +2226,16 @@ export const useBleStore = defineStore('ble', {
         // ★ 2026-07-12: FF02 Notify 已订阅 → 标记就绪并触发自动 AUTH（恢复会话态）。
         //   必须在订阅之后（NONCE/AUTH 回包走 FF02），否则回包丢失会超时失败。
         this._statusNotifyReady = true
-        this._maybeAutoAuth()
+        // ★ 2026-08-12 加速修订: 订阅成功后不要立刻发 NONCE。NONCE 是连接后最早的写
+        //   (走 FF03 write 属性)，此时 OS 对 FF03 的 WRITE 属性 GATT 缓存往往还没热
+        //   (尤其重连场景系统重建 GATT 缓存)，立刻硬发会连爆 10007×3 + 400ms×2 退避 → 拖 ~2.3s。
+        //   加 300ms 热身延时，让写缓存刷新好再发，NONCE 一次成功，握手快 ~2s。
+        //   与合并版(AUTH:OK 后 FF02/500ms)理念一致: 别在最猛窗口硬写。
+        const _targetId = targetId
+        setTimeout(() => {
+          if (this.deviceId !== _targetId || !this.connected) return
+          this._maybeAutoAuth()
+        }, 300)
       } catch (_) {}
     },
 
@@ -2363,8 +2395,25 @@ export const useBleStore = defineStore('ble', {
       //       届时外部 ADC 电平会变化 → 变化 Notify 才生效；但重连后电平≈上次值仍会长时间不推，
       //       故那轮务必把连接即推送一并做掉。详见 docs/03-复盘与问题分析/4-硬件与专项分析/
       //       KeyGo_电量长时间不显示_根因分析.md §3.1。
+      // ★ 2026-08-13 第七刀: 电池兜底读取必须让位给「AUTH:OK 后配置下发(FF01/FF03)」。
+      //   实测根因: Android GATT 事务槽读写共用，本函数的 read 与配置下发的 write 并发
+      //   → 后提交者被框架拒 → uni-app 映射成 10007 property not support（误导性错误码）。
+      //   日志铁证: 每次 10007 都精确落在一次电池 read 的飞行窗口内；read 一结束写立刻成功。
+      //   双保险: ① 下方所有 read 已改走 enqueueRead 与写共用同一串行链（治本）；
+      //          ② 此处再等 _postAuthWritesPending 落幕，避免电池读长期占用事务槽把
+      //             配置下发挤到后面排队（治时序，保证「绑定验证 → 配置下发」这条主链最快）。
       await new Promise(r => setTimeout(r, 2500)) // 先等状态 Notify 把电量送上来
       if (this.deviceId !== deviceId || !this.connected) return
+      // 等待 AUTH:OK 后的挂起写全部下发完毕（最多再等 4s，防极端情况饿死电池读取）
+      // _postAuthWritesPending = 还没开始 flush；_postAuthWritesInFlight = flush 中(含 FF03 尾巴)
+      {
+        const _waitStart = Date.now()
+        while ((this._postAuthWritesPending || this._postAuthWritesInFlight)
+               && Date.now() - _waitStart < 4000) {
+          await new Promise(r => setTimeout(r, 150))
+          if (this.deviceId !== deviceId || !this.connected) return
+        }
+      }
       // ★ 2026-08-09 (P0-①): 仅当已拿到合法百分比(0~100)才跳过读取；
       //   -1(未知)=需继续尝试；255(不支持)=固件已声明，无需再读但也不覆盖
       if (this.batteryLevel >= 0 && this.batteryLevel <= 100) return
@@ -2375,7 +2424,9 @@ export const useBleStore = defineStore('ble', {
       for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
         if (this.batteryLevel >= 0 && this.batteryLevel <= 100) break // 重试途中被 Notify/广播补到合法值，提前退出
         try {
-          const level = await readBatteryLevel(deviceId, 5000)
+          // ★ 2026-08-13 第七刀: 经 GATT 事务队列排队（与 FF01/FF03 写共用同一条链），
+          //   杜绝 read/write 并发抢 Android 单一事务槽 → 消除 10007 property not support。
+          const level = await enqueueRead(() => readBatteryLevel(deviceId, 5000))
           if (level === 255) {
             this.batteryLevel = 255
             console.log('[Store] GATT 电池电量: 固件不支持 (255, 第' + attempt + '次兜底)')
@@ -2998,6 +3049,8 @@ export const useBleStore = defineStore('ble', {
         this.deviceName = this._resolveFactoryName(deviceId, deviceName)
         this.connected = true
         this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
+        this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
+        if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
         this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 手动连上后重置 RSSI 显示态
         this.lastDeviceId = deviceId
 
@@ -3480,6 +3533,9 @@ export const useBleStore = defineStore('ble', {
      *   c=connected  st=state  r=rssi  f=filteredRssi  d2=customDeviceName
      */
     _parseSingleStatus(jsonStr) {
+      // ★ 2026-08-12: 固件有时把命令回执(RSSISET:OK 等)经 FF02 Notify 通道透传下来，
+      //   这类串无 '{' 会被下方 tryParseJSON 判为解析失败并刷噪声。先按前缀过滤，直接忽略。
+      if (typeof jsonStr === 'string' && jsonStr.indexOf('RSSISET:') === 0) return
       // ★ 2026-07-18: 固件把命令回执前缀(SETPASS:OK / ENCRYPT:OK / ENCRYPT:OFF)拼在同一 Notify 的
       //   status JSON 前；若 _charHandler 未识别(白名单漏配)而整串透传下来，这里兜底再截一次首 '{'。
       let _ps = jsonStr
@@ -3502,6 +3558,14 @@ export const useBleStore = defineStore('ble', {
       // ★ 2026-07-30: 每收到一包 FF02 即刷新「心跳」时间戳（用于断连活性判别）。
       //   较旧实现(仅含 f 字段时刷新) 更稳——部分状态包无 f 会漏判。
       this._lastFf02AnyMs = Date.now()
+      // ★ 2026-08-13 第六刀: AUTH:OK 包已自带「短延时 120ms」flush(见 _armPostAuthWrites)，此处
+      //   首帧加速仅作「更快」优化——若下一包 FF02 在 120ms 内先到，则提前 flush。FF02 是 notify
+      //   (只读属性)，不能单独证明 FF01/FF03(write 属性)缓存已就绪，但作为加速信号无害(触发后仍有
+      //   utils/ble.js 重试自愈)。主路径已由 _armPostAuthWrites 的 120ms 短延时保证确定性。
+      if (this.sessionAuthed && this._postAuthWritesPending && !this._gattWriteReady) {
+        console.log('[Store] 首帧 FF02 到达(加速触发)，下发 AUTH:OK 后挂起写')
+        this._flushPostAuthWrites()
+      }
       // 若正处于「断连事件后的活性缓刑」中，收到 FF02 即证明链接真活 → 假断连，撤销缓刑。
       if (this._disconnectProbing) {
         this._disconnectProbing = false
@@ -3986,6 +4050,11 @@ export const useBleStore = defineStore('ble', {
         if (!done) { done = true; _resolveWaiter('NONCE', null) }
       }, 4000)
       try {
+        // ★ 2026-08-13 第七刀: 移除此前的 300ms 前置热身延时。
+        //   该延时基于「10007 = OS 写属性缓存没热」这一**错误前提**（2026-08-12 第三刀），
+        //   实际根因是 Android GATT 事务槽读写共用、并发提交被拒（详见 command-queue.js 注释）。
+        //   当时它"看似有效"，只是碰巧把 NONCE 写错开了序列号 read 的飞行窗口而已。
+        //   现在读写已统一经 enqueueWrite/enqueueRead 串行化，延时纯属浪费 → 每次连接省 300ms。
         await enqueueWrite(() => rawSendCommand(this.deviceId, 'NONCE'))
       } catch (e) {
         clearTimeout(timer)
@@ -4023,14 +4092,11 @@ export const useBleStore = defineStore('ble', {
         // ★ 2026-08-09 P1-①: AUTH:OK = 本机已通过该设备鉴权（真 owner），记为已知设备。
         //   陌生人/未绑定连接永远到不了 AUTH:OK，故不会污染 knownDevices。
         this._touchKnownDevice(this.deviceId)
-        // ★ v3.33.0: AUTH 成功 = 安全通道已建立（链路加密 + 会话鉴权均就绪）。
-        //   重连时 _finalizeConnection 里的 _syncConfigToDevice 可能因 FF01 加密门控在链路加密前
-        //   抢跑失败，此处补发一次，确保断电重启后阈值被可靠回推（T4 核心）。
-        //   会话已建立 + 串行化(_configWriteBusy/_configSyncPending)保证不重复、不竞态。
-        this._syncConfigToDevice()
-        // ★ v3.36(2026-07-17): AUTH 成功后下发本机 RSSI 阈值 → 固件写入「当前 owner」的
-        //   rssiUnlock/rssiLock，实现 per-phone 阈值跟随（每台手机用自己的解锁/上锁阈值）。
-        this._pushRssiThresholds()
+        // ★ 2026-08-12 合并版: AUTH 成功后需要下发「配置(FF01) + 本机 RSSI 阈值(FF03)」，
+        //   但加密握手刚完成、OS 对 GATT WRITE 属性缓存可能尚未就绪，此刻硬写必撞 10007。
+        //   不再立即写，而是「挂起等 AUTH:OK 后首帧 FF02 到达」(FF02 能送达=通道完全可用)再发；
+        //   同时挂 800ms 超时兜底(首帧 FF02 不来也强制发)。详见 _armPostAuthWrites / _flushPostAuthWrites。
+        this._armPostAuthWrites()
         B._sessionSalt = B._lastNonce      // ★ P0-2: 用本次握手 nonce 作为 C1 会话盐
         B._cmdSeq = 0
         _resolveWaiter('AUTH', true)
@@ -4337,17 +4403,111 @@ export const useBleStore = defineStore('ble', {
      *   之后自动解锁/上锁按「这台手机自己的阈值」判定（不同手机发射功率/天线不同，全局阈值不通用）。
      *   仅 fwsec≥2 生效；经写队列串行化，避免与配置/命令写抢 GATT 通道。回包 RSSISET:OK/FAIL:*。
      */
-    _pushRssiThresholds() {
-      if (this.fwSec < 2 || !this.deviceId || !this.connected) return
-      const u = this.unlockThreshold, l = this.lockThreshold
-      // ★ 2026-07-19 P1: 去重——与上次成功下发的 per-phone 阈值相同则跳过。
-      //   阈值已持久化于设备 Flash，无需重复写；既省一次 GATT 写，也消除 AUTH 宽限期内 10007 瞬时窗口噪声。
-      if (this._lastPushedUnlock === u && this._lastPushedLock === l) {
-        console.log('[Store] RSSISET 跳过(阈值未变): ' + u + ':' + l)
+    /**
+     * ★ 2026-08-12 合并版: AUTH:OK 后挂起「配置 + RSSI 阈值」写。
+     *   加密握手刚完成时 OS 对 GATT WRITE 属性缓存可能尚未就绪，此刻硬写 FF01/FF03 必撞 10007。
+     *   挂起标记 + 启 800ms 超时兜底；等 AUTH:OK 后首帧 FF02 到达(_parseSingleStatus 触发 _flushPostAuthWrites)
+     *   再真正下发——FF02 能送达即证明 GATT 通道完全可用、OS 缓存已刷新，10007 概率趋零。
+     */
+    _armPostAuthWrites() {
+      this._gattWriteReady = false
+      this._postAuthWritesPending = true
+      if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      // ★ 2026-08-13 第六刀(决定性): AUTH:OK 包本身就是 FF02 实时 notify，已证明 FF02 通道通。
+      //   之前依赖「下一包 FF02 到达(3541 首帧加速)」触发 flush——但 AUTH:OK 解析时 _postAuthWritesPending
+      //   还 false(4074 行在解析后才设)，AUTH:OK 这包错过自我触发；之后下一包 FF02 时机不可控(实测重连
+      //   有 ~480ms 空窗)→ fallback 1000ms 保底，慢。
+      //   正解: 既然 AUTH:OK 已到(FF02 实时包)，直接启「短延时 120ms」flush——既留热身窗口(避 10007)，
+      //   又不等不确定的下一包。每次 AUTH:OK 都走此路径，与第一次(首帧加速)一样快且确定。
+      //   - 快系统: 3541 首帧加速若更早到则提前 flush(更快)；否则 120ms 短延时兜底。
+      //   - 慢系统: 120ms 短延时必触发，不再等 480ms+ 空窗 → 快 ~880ms。
+      //   - 1000ms 保底保留作双保险(防极端情况 120ms 内也崩)。
+      //   触发后若仍偶发 10007，由 utils/ble.js 既有 400ms×2 重试自愈，功能无损。
+      const _targetId = this.deviceId
+      setTimeout(() => {
+        if (this.deviceId !== _targetId || !this.connected) return
+        if (this._postAuthWritesPending) {
+          console.log('[Store] AUTH:OK 后短延时(120ms)下发挂起写（FF02 已验证，不等下一包）')
+          this._flushPostAuthWrites()
+        }
+      }, 120)
+      this._postAuthWriteTimer = setTimeout(() => {
+        this._postAuthWriteTimer = null
+        if (this._postAuthWritesPending) {
+          console.log('[Store] 1000ms 延时保底，下发挂起写（FF02 未提前触发或不可靠）')
+          this._flushPostAuthWrites()
+        }
+      }, 1000)
+      console.log('[Store] AUTH:OK 后写已挂起（AUTH:OK 即 FF02 已验证 + 120ms 短延时 / 首帧加速 / 1000ms 保底）')
+    },
+
+    /**
+     * ★ 2026-08-12 合并版: 首帧 FF02 到达 / 超时兜底时，执行 AUTH:OK 后的挂起写。
+     *   仅下发一次（_postAuthWritesPending 幂等），且下发前再校验连接态。
+     */
+    async _flushPostAuthWrites() {
+      if (!this._postAuthWritesPending) return
+      this._postAuthWritesPending = false
+      this._gattWriteReady = true
+      // ★ 2026-08-13 第七刀: _postAuthWritesPending 在此刻即置 false，但 FF03 还要等
+      //   「FF01 落地 + 250ms」才发，整条链尚未收尾。故另立 _postAuthWritesInFlight，
+      //   供电池兜底读取(_fetchBatteryLevel)判断「配置下发主链是否真正结束」，
+      //   避免电池 read 抢占 GATT 事务槽把 FF03 挤掉（10007 根因）。
+      this._postAuthWritesInFlight = true
+      if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (!this.connected || !this.deviceId) {
+        console.log('[Store] 挂起写跳过（已掉线/无设备）')
+        this._postAuthWritesInFlight = false
         return
       }
+      console.log('[Store] GATT 写就绪，下发 AUTH:OK 后挂起写')
+      // ① 配置补发（FF01）：AUTH 成功 = 安全通道已建立，重连时 _finalizeConnection 的抢跑写可能失败，
+      //    此处可靠补发；串行化(_configWriteBusy/_configSyncPending)保证不重复、不竞态。
+      //    await 等其真正写入完成（成功/失败都算落地），再发 FF03。
+      await this._syncConfigToDevice()
+      // ② 本机 RSSI 阈值（FF03）：per-phone 阈值跟随，best-effort。
+      //    ★ 2026-08-12 关键修订(第三刀修正): FF01 与 FF03 是两条不同 write 特征，Android 对它们的
+      //      WRITE 属性缓存分别刷新、不同步。固定延时(300ms)不可靠——系统热身慢时 FF01 自己都撞 10007
+      //      重试到 ~400ms 才成，FF03 的 300ms 定时反而比 FF01 成功更早发 → 仍撞窗。
+      //      正解: 事件驱动串行——等 FF01 真正落地后再延 250ms 发 FF03，FF03 永远在 FF01 写完后发，
+      //      绝不抢窗口，与系统热身速度无关。
+      const _targetId = this.deviceId
+      setTimeout(async () => {
+        if (this.deviceId !== _targetId || !this.connected) {
+          this._postAuthWritesInFlight = false
+          return
+        }
+        try {
+          await this._pushRssiThresholds()
+        } finally {
+          // ★ 第七刀: FF03 落地(成功/失败均算) → 整条 AUTH:OK 后下发链收尾，
+          //   放行电池兜底读取去占用 GATT 事务槽。
+          this._postAuthWritesInFlight = false
+        }
+      }, 250)
+    },
+
+    // ★ 2026-08-13 第七刀: 返回 Promise（跳过时返回已 resolve），使 _flushPostAuthWrites 可 await 到落地。
+    _pushRssiThresholds() {
+      if (this.fwSec < 2 || !this.deviceId || !this.connected) return Promise.resolve()
+      const u = this.unlockThreshold, l = this.lockThreshold
+      // ★ 2026-07-19 P1: 去重——与上次成功下发的 per-phone 阈值相同则跳过。
+      //   阈值已存于设备 Flash(g_cfg)，无需重复写；既省一次 GATT 写，也消除噪声。
+      //   （注：App 侧 _lastPushed* 是运行时 RAM 标记，重连保留、App 冷启才清空，非来自设备 Flash。）
+      if (this._lastPushedUnlock === u && this._lastPushedLock === l) {
+        console.log('[Store] RSSISET 跳过(阈值未变): ' + u + ':' + l)
+        return Promise.resolve()
+      }
+      return this._doPushRssi(u, l)
+    },
+
+    // ★ 2026-08-12: RSSISET 实际下发（抽出便于挂起/即时两路复用）
+    // ★ 2026-08-13 第七刀: 返回 Promise（原为 fire-and-forget），使调用方能 await 到「FF03 真正落地」。
+    //   _flushPostAuthWrites 依赖此以准确清除 _postAuthWritesInFlight，否则电池读会在 FF03 落地前
+    //   被放行 → 又抢 GATT 事务槽 → 10007 重现。仍不向外抛错（best-effort 语义不变）。
+    _doPushRssi(u, l) {
       const cmd = 'RSSISET:' + u + ':' + l
-      enqueueWrite(() => rawSendCommand(this.deviceId, cmd))
+      return enqueueWrite(() => rawSendCommand(this.deviceId, cmd))
         .then(() => { this._lastPushedUnlock = u; this._lastPushedLock = l })
         .catch(() => {})
     },

@@ -9,6 +9,11 @@
  *   - 新增 deviceNamePrefix 用于名字前缀匹配
  */
 
+// ★ 2026-08-13 第七刀: GATT 事务串行队列（command-queue.js 为零依赖底层模块，无循环引用风险）。
+//   Android BluetoothGatt 同一时刻只允许一个未完成事务(read/write 共用事务槽)，
+//   并发提交会被框架拒绝并被 uni-app 映射成误导性的 errCode 10007 property not support。
+import { enqueueRead } from './command-queue.js'
+
 // BLE GATT 服务 UUID（与 KeyGo 设备固件一致）
 export const BLE_CONFIG = {
   deviceNamePrefix: 'KeyGo',                                    // ★ v2.2: 前缀匹配，设备名为 KeyGo-XXXXXX
@@ -1112,7 +1117,8 @@ export function readSerialNumber(deviceId, timeoutMs = 3000) {
      *    用于诊断"property not support"到底是因为固件没 FF04，还是手机端没发现。
      */
     const doRead = () => {
-      readBLECharacteristicValue(deviceId, BLE_CONFIG.serviceUUID, BLE_CONFIG.serialCharUUID)
+      // ★ 2026-08-13 第七刀: 经 GATT 事务队列排队，避免与 NONCE(FF03 写)等并发抢事务槽。
+      enqueueRead(() => readBLECharacteristicValue(deviceId, BLE_CONFIG.serviceUUID, BLE_CONFIG.serialCharUUID))
         .catch((err) => {
           if (!resolved) {
             resolved = true
