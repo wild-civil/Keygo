@@ -39,6 +39,7 @@ import {
   getBluetoothAdapterState,
   openBluetoothAdapterOnly,       // ★ 冷启动修复：仅打开适配器（不申请权限）
   getBLEDeviceServices,          // ★ used by _verifyConnection
+  getBLEDeviceCharacteristics,    // ★ 第八刀(方案C): NONCE 前预热 FF03 写属性，消除重连后 10007
   getBLEDeviceRSSI,               // ★ 2026-07-30: 无线电层实时探活（假断连判定）
   onBluetoothAdapterStateChange,
   startScan,
@@ -4050,11 +4051,20 @@ export const useBleStore = defineStore('ble', {
         if (!done) { done = true; _resolveWaiter('NONCE', null) }
       }, 4000)
       try {
-        // ★ 2026-08-13 第七刀: 移除此前的 300ms 前置热身延时。
-        //   该延时基于「10007 = OS 写属性缓存没热」这一**错误前提**（2026-08-12 第三刀），
-        //   实际根因是 Android GATT 事务槽读写共用、并发提交被拒（详见 command-queue.js 注释）。
-        //   当时它"看似有效"，只是碰巧把 NONCE 写错开了序列号 read 的飞行窗口而已。
-        //   现在读写已统一经 enqueueWrite/enqueueRead 串行化，延时纯属浪费 → 每次连接省 300ms。
+        // ★ 2026-08-13 第八刀(方案C): NONCE(FF03) 写属性预热。
+        //   手动断开→重连后是**全新的 GATT 连接**，Android 对 FF03 的 WRITE 属性缓存会被清空，
+        //   首帧 NONCE 写几乎必撞 10007（日志实证：09.488/09.892 各失败一次 → 10.302 才成功，~0.8s）。
+        //   根因不是并发（此处无并发读），而是重连后 OS 写属性表未就绪。
+        //   预热手段：发 NONCE 前先查一次 FF03 的特征列表(getBLEDeviceCharacteristics)，
+        //   该查询会让 OS 重新确认 FF03 的 properties(含 WRITE)，从而预热写属性。
+        //   走 enqueueRead 队列（read 性质，不与 NONCE 写并发）；失败仅降级跳过，绝不阻塞 NONCE。
+        try {
+          await enqueueRead(() => getBLEDeviceCharacteristics(this.deviceId, BLE_CONFIG.serviceUUID))
+          console.log('[BIND] FF03 写属性预热完成(特征表已确认)')
+        } catch (e) {
+          console.warn('[BIND] FF03 预热查询失败(降级跳过):', e?.message || e)
+        }
+        // ★ 2026-08-13 第七刀: 移除此前的 300ms 前置热身延时（前提已证伪，纯浪费）。
         await enqueueWrite(() => rawSendCommand(this.deviceId, 'NONCE'))
       } catch (e) {
         clearTimeout(timer)

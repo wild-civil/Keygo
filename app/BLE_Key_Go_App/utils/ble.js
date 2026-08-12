@@ -161,6 +161,20 @@ function requestAndroidPermissions() {
       return
     }
 
+    // ★ 2026-08-13 第八刀(方案A): 已授权短路。
+    //   用户手动断开→重连（或 App 切后台再回前台→onShow→prepareForAutoConnect）都会再次走 initBluetooth，
+    //   每次都重跑 plus.android.requestPermissions（即便权限早已授予，系统仍要走一轮异步回调，固定 ~3s 前置延迟）。
+    //   这是「第一次快、后面每次慢」的三大瓶颈之首（重连前白等 3s）。
+    //   首次全量申请成功(granted)后写 keygo_perms_granted=1；此后直接短路返回，不再弹系统权限流程。
+    //   注意：granted=false 分支(用户吊销/系统收回)不写此标记 → 下次仍走全量申请，自动恢复能力。
+    try {
+      if (uni.getStorageSync('keygo_perms_granted') === 1) {
+        console.log('[BLE] 权限已授权(短路)：跳过重复申请')
+        resolve({ granted: true, denied: [] })
+        return
+      }
+    } catch (e) { /* 存储不可用则走全量申请 */ }
+
     console.log('[BLE] ★★★ 进入 Android 权限申请 ★★★')
     console.log('[BLE] plus.os.name=' + plus.os.name + ', plus.os.version=' + plus.os.version)
 
@@ -201,6 +215,10 @@ function requestAndroidPermissions() {
           console.log('[BLE] requestPermissions 回调 - granted:', JSON.stringify(result.granted), 'deniedAlways:', JSON.stringify(result.deniedAlways), 'deniedPresent:', JSON.stringify(result.deniedPresent))
           const denied = (result.deniedAlways || []).concat(result.deniedPresent || [])
           console.log('[BLE] 权限最终结果 - 被拒绝的权限:', JSON.stringify(denied))
+          // ★ 第八刀(方案A): 全量申请成功→写标记，供后续短路
+          if (denied.length === 0) {
+            try { uni.setStorageSync('keygo_perms_granted', 1) } catch (e) {}
+          }
           resolve({ granted: denied.length === 0, denied })
         },
         (err) => {
