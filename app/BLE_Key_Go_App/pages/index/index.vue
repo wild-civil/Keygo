@@ -181,7 +181,7 @@
             如日后要恢复，需改用 catch:touchmove 拦截 + 自实现滚动，或把列表改为非滚动容器。
             相关函数 onItemTouchStart/Move/End 已一并注释保留，便于日后回滚。
           -->
-          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac">
+          <view class="known-item" v-for="d in bleStore.knownDevicesList" :key="d.mac" :class="{ 'is-open': openMac === d.mac }">
             <!-- @touchstart="onItemTouchStart($event)" -->
             <!-- @touchmove="onItemTouchMove($event)" -->
             <!-- @touchend="onItemTouchEnd($event, d.mac)" -->
@@ -216,17 +216,38 @@
           </view>
         </scroll-view>
       </template>
-      <!-- 单设备：维持原单卡 -->
+      <!-- 单设备：与多设备列表统一交互(⋯ 滑出 默认/取消默认 + 删除)。
+           注：单卡无 scroll-view 包裹，reconnect-card 已绑 @tap=onListTap，点空白天然可收起。 -->
       <template v-else>
-        <view class="reconnect-info">
-          <text class="reconnect-label">已知设备</text>
-          <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
-          <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
-          <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
-        </view>
-        <view class="single-actions">
-          <button class="reconnect-btn" @tap="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
-          <button class="remove-btn" @tap="handleRemoveDevice(bleStore.knownDeviceId)">删除设备</button>
+        <view class="known-item single-item" :class="{ 'is-open': openMac === bleStore.knownDeviceId }">
+          <!-- 背后操作层：单设备默认/取消默认 + 删除 -->
+          <view class="known-item-back">
+            <view class="back-btn back-default" @tap.stop="handleSetDefault(bleStore.knownDeviceId)">
+              <text class="back-icon">{{ isDefaultDevice(bleStore.knownDeviceId) ? '✓' : '☆' }}</text>
+              <text>{{ isDefaultDevice(bleStore.knownDeviceId) ? '取消默认' : '默认' }}</text>
+            </view>
+            <view class="back-btn back-remove" @tap.stop="handleRemoveDevice(bleStore.knownDeviceId)">
+              <text class="back-icon">🗑</text>
+              <text>删除</text>
+            </view>
+          </view>
+          <!-- 前景内容层：信息 + 重新连接 + ⋯ -->
+          <view class="known-item-front" :style="{ transform: (openMac === bleStore.knownDeviceId ? 'translateX(-' + backWidth + 'px)' : 'translateX(0)') }"
+            @tap="onFrontTap(bleStore.knownDeviceId)">
+            <view class="reconnect-info">
+              <text class="reconnect-label">已知设备</text>
+              <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
+              <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
+              <view v-if="bleStore.customNameForMac(bleStore.knownDeviceId) || isDefaultDevice(bleStore.knownDeviceId)" class="device-tags">
+                <text v-if="bleStore.customNameForMac(bleStore.knownDeviceId)" class="device-alias-tag">已命名</text>
+                <text v-if="isDefaultDevice(bleStore.knownDeviceId)" class="device-default-tag">默认</text>
+              </view>
+            </view>
+            <view class="known-item-actions">
+              <button class="reconnect-btn" @tap.stop="handleReconnect(bleStore.knownDeviceId)">重新连接</button>
+              <text class="more-btn" @tap.stop="toggleItem(bleStore.knownDeviceId)">⋯</text>
+            </view>
+          </view>
         </view>
       </template>
     </view>
@@ -462,6 +483,14 @@ const backWidth = 168
 function toggleItem(mac) {
   if (!mac) return
   openMac.value = openMac.value === mac ? '' : mac
+}
+
+// ★ 判断某 MAC 是否当前默认设备(mac 规范化：去冒号大写)。
+//   多设备列表项用 d.isDefault 字段，单设备卡无该字段故用此函数。
+function isDefaultDevice(mac) {
+  if (!mac) return false
+  const key = String(mac).replace(/:/g, '').toUpperCase()
+  return (bleStore.defaultDeviceId || '') === key
 }
 
 // ★ 前景空白处(非按钮)点击：若该项已展开 → 收起；否则无动作。
@@ -1113,6 +1142,7 @@ async function handleSetName() {
   border-top: 1rpx solid var(--border);
 }
 .known-item:first-child { border-top: none; }
+.single-item { margin-top: 10rpx; }   /* 单设备卡与多设备列表首项视觉间距一致 */
 /* 背后操作层：铺在右侧，前景左移时露出 */
 .known-item-back {
   position: absolute;
@@ -1122,7 +1152,11 @@ async function handleSetName() {
   gap: 8rpx;
   border-radius: 16rpx;
   overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.2s ease;
 }
+/* ② 展开时背后层渐入，强化「滑出菜单」的视觉反馈 */
+.known-item.is-open .known-item-back { opacity: 1; }
 .back-btn {
   display: flex;
   flex-direction: column;
@@ -1148,8 +1182,12 @@ async function handleSetName() {
   justify-content: space-between;
   padding: 18rpx 0;
   background: var(--bg-card);   /* 盖住背后层，避免位移前透出；用主题卡片色同步夜间模式 */
-  transition: transform 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
   will-change: transform;
+}
+/* ② 展开视觉提示：已展开项前景层加投影，暗示「可点外部收起」且强化层次 */
+.known-item.is-open .known-item-front {
+  box-shadow: -6rpx 0 16rpx rgba(0, 0, 0, 0.18);
 }
 .known-item-actions { display: flex; align-items: center; flex: 0 0 auto; margin-left: 16rpx; }
 .more-btn {
@@ -1161,18 +1199,6 @@ async function handleSetName() {
   line-height: 1;
 }
 .more-btn:active { opacity: 0.6; }
-.remove-btn {
-  margin-left: 12rpx;
-  width: auto;
-  background: transparent;
-  color: #e64340;
-  border: 1rpx solid rgba(230, 67, 64, 0.5);
-  border-radius: 20rpx;
-  padding: 12rpx 20rpx;
-  font-size: 22rpx;
-}
-.remove-btn:active { opacity: 0.7; background: rgba(230, 67, 64, 0.08); }
-.single-actions { display: flex; align-items: center; gap: 16rpx; margin-top: 16rpx; }
 .device-default-tag {
   align-self: flex-start;
   margin-top: 4rpx;
