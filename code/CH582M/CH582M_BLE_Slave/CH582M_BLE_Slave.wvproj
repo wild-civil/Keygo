@@ -137,9 +137,7 @@
 					"preprocessor": {
 						"do_not_search_system_directories": false,
 						"preprocess_only": false,
-						"defined_symbols": [
-							"DEBUG=1"
-						],
+						"defined_symbols": [],
 						"undefined_symbols": []
 					},
 					"includes": {
