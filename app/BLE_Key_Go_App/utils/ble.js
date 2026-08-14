@@ -12,7 +12,7 @@
 // ★ 2026-08-13 第七刀: GATT 事务串行队列（command-queue.js 为零依赖底层模块，无循环引用风险）。
 //   Android BluetoothGatt 同一时刻只允许一个未完成事务(read/write 共用事务槽)，
 //   并发提交会被框架拒绝并被 uni-app 映射成误导性的 errCode 10007 property not support。
-import { enqueueRead } from './command-queue.js'
+import { enqueueRead, enqueueWrite } from './command-queue.js'
 
 // BLE GATT 服务 UUID（与 KeyGo 设备固件一致）
 export const BLE_CONFIG = {
@@ -890,7 +890,12 @@ export function getBLEDeviceCharacteristics(deviceId, serviceId) {
  * @param {string} characteristicId 特征值 UUID
  * @param {string} value 要写入的值
  */
-export function writeBLECharacteristicValue(deviceId, serviceId, characteristicId, value) {
+export function writeBLECharacteristicValue(deviceId, serviceId, characteristicId, value, opts = {}) {
+  // retries: 10007 本地重试次数（默认 2，兼容既有路径）。
+  //   注意：底层 400ms 重试会让每笔写撞 10007 时阻塞 ~0.8s 才 reject，对「连接后第一笔写(冷窗口)」
+  //   极不友好（跨过冷窗口很慢）。NONCE/AUTH 等连接早期写应传 retries:0，把重试节奏交给上层
+  //   密集快速重试（见 stores/ble.js _requestNonce），更快命中热窗口。
+  const _retries = (opts && typeof opts.retries === 'number') ? opts.retries : _WRITE_10007_RETRIES
   return new Promise((resolve, reject) => {
     // 将字符串转为 ArrayBuffer
     const buffer = stringToArrayBuffer(value)
@@ -922,7 +927,7 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
               '| char=', _uuid, '| val=', JSON.stringify(_valPreview), '| len=', value ? value.length : 0)
           }
           // ★ 2026-07-18: 10007 瞬时窗口（GATT 缓存刷新 / 加密握手）→ 先重试自愈，不急于弹引导。
-          if (_isPropertyNotSupport(err) && tryNo < _WRITE_10007_RETRIES) {
+          if (_isPropertyNotSupport(err) && tryNo < _retries) {
             console.warn('[BLE] 10007 疑似瞬时窗口，' + (tryNo + 1) + '/' + _WRITE_10007_RETRIES
               + ' 重试（' + _WRITE_10007_RETRY_DELAY + 'ms 后）…')
             setTimeout(() => _attempt(tryNo + 1), _WRITE_10007_RETRY_DELAY)
@@ -968,7 +973,12 @@ export function readBLECharacteristicValue(deviceId, serviceId, characteristicId
  * @param {boolean} enable 是否启用
  */
 export function notifyBLECharacteristicValueChange(deviceId, serviceId, characteristicId, enable = true) {
-  return new Promise((resolve, reject) => {
+  // ★ 2026-08-13 第八刀补：notifyBLECharacteristicValueChange 本质是「写 CCCD descriptor」，
+  //   Android GATT 事务槽是 read / write / **descriptor(notify 使能)** 三者共用。
+  //   此前它裸发、绕过 enqueueWrite 队列，于是与队列内 FF03 写(NONCE/AUTH/RSSISET)并发抢同一槽
+  //   → 10007 property not support。证据：首连也撞 10007，且每次 10007 都落在 Notify 使能的飞行窗口内。
+  //   现纳入 enqueueWrite 队列，与所有写/读串行，10007 从源头消失。
+  return enqueueWrite(() => new Promise((resolve, reject) => {
     uni.notifyBLECharacteristicValueChange({
       deviceId,
       serviceId,
@@ -983,7 +993,7 @@ export function notifyBLECharacteristicValueChange(deviceId, serviceId, characte
         reject(err)
       }
     })
-  })
+  }))
 }
 
 /**
@@ -1060,6 +1070,9 @@ export async function sendConfig(deviceId, config) {
   // ★ v3.24: 自动锁使能 (autolock) — 手动模式由 Store 下发 0 关闭固件 RSSI 自动锁
   //   注意：此前漏加此字段，导致手动模式下 autolock=0 被静默丢弃，固件仍保持自动锁！
   if (config.autolock !== undefined) parts.push(`autolock=${config.autolock}`)
+  // ★ 2026-08-14: 钥匙供电策略 kpm — 0=TIMEOUT(15s) / 1=HOLD_UNTIL_LOCK(默认)
+  //   设备级参数，与 cooldown_ms 同模式：用户改了才下发，固件存 DataFlash
+  if (config.kpm !== undefined) parts.push(`kpm=${config.kpm}`)
 
   const value = parts.join(' ')
   if (!value) return
@@ -1077,7 +1090,7 @@ export async function sendConfig(deviceId, config) {
  * @param {string} deviceId
  * @param {string} command 'UNLOCK' | 'LOCK' | 'TRUNK' | 'STATUS'
  */
-export function sendCommand(deviceId, command) {
+export function sendCommand(deviceId, command, opts = {}) {
   // ★ v3.1: 只大写命令前缀（冒号前），保护中文参数不被 toUpperCase() 破坏
   const colonIdx = command.indexOf(':')
   const safeCommand = colonIdx > 0
@@ -1088,7 +1101,8 @@ export function sendCommand(deviceId, command) {
     deviceId,
     BLE_CONFIG.serviceUUID,
     BLE_CONFIG.commandCharUUID,
-    safeCommand
+    safeCommand,
+    opts
   )
 }
 

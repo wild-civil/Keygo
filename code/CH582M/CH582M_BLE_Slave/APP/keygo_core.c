@@ -22,6 +22,7 @@ extern uint8_t Peripheral_TaskID;   // ★ 2026-07-11: 跨文件启动延迟发�
  *   采用「自动电源管理」: 收到命令才上电, 空闲 KEY_POWER_HOLD_MS 后自动断电。 */
 static uint8_t g_powerOn = 0;
 static uint32_t g_powerOffAtMs = 0;   // 自动断电截止时刻(ms)
+static uint8_t g_powerHoldForever = 0; // ★ 2026-08-14: HOLD_UNTIL_LOCK 模式标志=1 时 KeysPowerCheck 跳过断电
 
 /* ─────────────────────────────────────────────────────────────────
  * 宏定义 (模块内部)
@@ -132,6 +133,8 @@ uint8_t  g_cfgKalmanR           = 15;    // 卡尔曼滤波器 R 值 (范围 1~5
 
 uint8_t  g_encRequired       = 0;     // ★ 方案1: 无 App 模式(OS 系统配对)使能标志
 uint32_t g_sysPasscode        = 123456u; // ★ 方案1 扩展: 系统配对码(OS SMP passkey)，默认 123456，与绑定码独立
+// ★ 2026-08-14: 钥匙供电策略模式 0=TIMEOUT(15s) / 1=HOLD_UNTIL_LOCK(默认)。存 DataFlash buf[15]
+uint8_t  g_cfgKeyPowerMode    = KEY_POWER_MODE;
 
 /* ─────────────────────────────────────────────────────────────────
  * 模块内部状态 (仅 keygo_core 可见)
@@ -555,6 +558,16 @@ void KeyGo_GPIO_PulseEnd(void)
         tmos_start_task(Peripheral_TaskID, SBP_RIDE_EXIT_LOCK_EVT, RIDE_EXIT_LOCK_DELAY_TICKS);
         PRINT("[LOCK] ride-exit unlock pulse done, schedule lock evt\n");
     }
+    /* ★ 2026-08-14: HOLD_UNTIL_LOCK 模式, 锁车脉冲结束即断电(保持态终止)
+     *   仅当本次脉冲是 LOCK 动作(g_keyState==KSTATE_LOCKED)且处于保持态才断;
+     *   Unlock/Ride/Trunk/Other 脉冲结束保持通电, 由 KEY_POWER_MODE 策略决定后续。 */
+    if (g_powerHoldForever && g_keyState == KSTATE_LOCKED) {
+        KeyGo_KeyPower(0);
+        g_powerOn = 0;
+        g_powerHoldForever = 0;
+        g_powerOffAtMs = 0;
+        PRINT("[POWER] key power-OFF (locked, HOLD_UNTIL_LOCK)\n");
+    }
     PRINT("[KEY] pulse end\n");
 }
 
@@ -570,7 +583,11 @@ void KeyGo_KeyPower(uint8_t on)
     }
 }
 
-/* ★ 自动电源管理: 命令到来时确保钥匙已上电(PB0→PMOS导通), 并刷新空闲断电计时 */
+/* ★ 自动电源管理: 命令到来时确保钥匙已上电(PB0→PMOS导通), 并刷新空闲断电计时
+ *   ★ 2026-08-14: KEY_POWER_MODE 决定保持策略
+ *     TIMEOUT(0): 上电后固定保持 KEY_POWER_TIMEOUT_MS, 到期自动断电
+ *     HOLD_UNTIL_LOCK(1, 默认): 解锁/骑行上电后 g_powerHoldForever=1 (永不断电),
+ *       直到 KeyGo_Lock 发出的脉冲结束(PulseEnd 检测到 KSTATE_LOCKED)才断电 */
 void KeyGo_EnsureKeyPower(void)
 {
     if (!g_powerOn) {
@@ -579,17 +596,25 @@ void KeyGo_EnsureKeyPower(void)
         DelayMs(KEY_POWER_SETTLE_MS);   // 等待钥匙 MCU 上电稳定(POR)
         PRINT("[POWER] key powered ON (PB0)\n");
     }
-    g_powerOffAtMs = Peripheral_GetSystemMs() + KEY_POWER_HOLD_MS;
+    if (g_cfgKeyPowerMode == 0) {
+        g_powerHoldForever = 0;
+        g_powerOffAtMs = Peripheral_GetSystemMs() + KEY_POWER_TIMEOUT_MS;
+    } else {
+        // HOLD_UNTIL_LOCK: 保持通电, 由锁车/断连兜底锁触发断电
+        g_powerHoldForever = 1;
+        g_powerOffAtMs = 0;
+    }
 }
 
-/* ★ 周期性调用: 空闲超过 KEY_POWER_HOLD_MS 则自动断电省电 */
+/* ★ 周期性调用: TIMEOUT 模式空闲超时自动断电; HOLD 模式跳过(由锁车断电) */
 void KeyGo_KeyPowerCheck(void)
 {
+    if (g_powerHoldForever) return;   // HOLD_UNTIL_LOCK: 不通电截止, 等锁车断电
     if (g_powerOn && (int32_t)(Peripheral_GetSystemMs() - g_powerOffAtMs) >= 0) {
         KeyGo_KeyPower(0);
         g_powerOn = 0;
         g_powerOffAtMs = 0;
-        PRINT("[POWER] key auto power-OFF (idle %ums)\n", KEY_POWER_HOLD_MS);
+        PRINT("[POWER] key auto power-OFF (idle %ums)\n", KEY_POWER_TIMEOUT_MS);
     }
 }
 
@@ -656,6 +681,7 @@ void KeyGo_ResetState(void)
     KeyGo_KeyPower(0);
     g_powerOn = 0;
     g_powerOffAtMs = 0;
+    g_powerHoldForever = 0;   // ★ 2026-08-14: 清保持标志, 断连即终止 HOLD_UNTIL_LOCK 通电
 }
 
 static float UpdateKalman(float measurement)
@@ -961,7 +987,7 @@ void KeyGo_NotifyStatus(void)
     int16_t tC = KeyGo_ReadTemperatureC();
 
     int n = snprintf(json, sizeof(json),
-        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"ou\":%d,\"ol\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d,\"conn\":%d,\"enc\":%d,\"t\":%d,\"er\":%d}",
+        "{\"c\":1,\"st\":\"%s\",\"r\":%d,\"f\":%d,\"d2\":\"%s\",\"cd\":%d,\"kr\":%d,\"al\":%d,\"bn\":%d,\"v\":\"%s\",\"uc\":%d,\"lc\":%d,\"ucnt\":%d,\"lcnt\":%d,\"th\":%d,\"ou\":%d,\"ol\":%d,\"m\":%d,\"pair\":%d,\"fwsec\":%d,\"conn\":%d,\"enc\":%d,\"t\":%d,\"er\":%d,\"kpm\":%d}",
         g_keyState == KSTATE_LOCKED   ? "LOCKED"   :
         g_keyState == KSTATE_UNLOCKED ? "UNLOCKED" :
         g_keyState == KSTATE_RIDE     ? "RIDE"     : "ACTION",
@@ -985,7 +1011,8 @@ void KeyGo_NotifyStatus(void)
         (int)g_deviceConnected,      // ★ 观测性(①): 连接状态
         (int)encNow,                 // ★ 观测性(①): 加密链路(OS bonded 重连)状态
         (int)tC,                    // ★ v3.36.1: TSENSE 内部芯片温度（摄氏度整数）
-        (int)g_ebikeProxMode);      // ★ 2026-07-19: 电瓶车靠近骑行偏好 0=仅解锁 / 1=骑行
+        (int)g_ebikeProxMode,       // ★ 2026-07-19: 电瓶车靠近骑行偏好 0=仅解锁 / 1=骑行
+        (int)g_cfgKeyPowerMode);    // ★ 2026-08-14: 钥匙供电模式 0=TIMEOUT(15s) / 1=HOLD_UNTIL_LOCK
 
 
     if (n > 0 && n < (int)sizeof(json)) {
@@ -1331,6 +1358,7 @@ uint8_t KeyGo_ParseConfig(const char *line)
 
     uint8_t changed = 0;
     uint8_t cooldown_changed = 0;   // ★ v3.12: 仅 cooldown_ms 变更时写 Flash（设备级参数）
+    uint8_t kpm_changed = 0;        // ★ 2026-08-14: 钥匙供电模式变更时写 Flash（设备级参数）
     const char *p = line;
 
     while (*p) {
@@ -1420,20 +1448,32 @@ uint8_t KeyGo_ParseConfig(const char *line)
                 PRINT("[CONFIG] autolock=%d\n", g_cfgAutoLockEnable);
             }
         }
+        // ★ 2026-08-14: 钥匙供电策略 kpm (长度 3) — 0=TIMEOUT(15s) / 1=HOLD_UNTIL_LOCK(默认)
+        //   设备级参数, 写入 DataFlash, 所有手机共用
+        else if (keyLen == 3 && KEYGO_STREQ(p, "kpm", 3)) {
+            uint8_t m = (val == 0) ? 0 : 1;   // 越界/非0 → 视为 HOLD(1)
+            if (g_cfgKeyPowerMode != m) {
+                g_cfgKeyPowerMode = m;
+                kpm_changed = 1;
+                changed = 1;
+                PRINT("[CONFIG] keyPowerMode=%d\n", g_cfgKeyPowerMode);
+            }
+        }
 
         p = valEnd;
     }
 
     if (changed) {
-        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d interval=%d kr=%d\n",
+        PRINT("[CONFIG] updated: unlock=%d lock=%d uc=%d lc=%d dlock=%d interval=%d kr=%d kpm=%d\n",
               g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
-              g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgRssiPeriodMs, g_cfgKalmanR);
+              g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgRssiPeriodMs, g_cfgKalmanR, g_cfgKeyPowerMode);
         // ★ 配置变更后重置计数器，避免旧阈值下的累积计数影响新阈值判断
         g_unlockCounter = 0;
         g_lockCounter   = 0;
         // ★ v3.12: 仅 cooldown_ms 写 DataFlash（设备级参数，所有手机共用）
         //   unlock/lock/uc/lc/dlock/interval 仅存 RAM，由手机每次连接后下发（per-phone 个性化）
-        if (cooldown_changed) {
+        // ★ 2026-08-14: kpm(钥匙供电模式) 同为设备级参数, 变更也写 Flash
+        if (cooldown_changed || kpm_changed) {
             KeyGo_SaveConfig();
         }
     }
@@ -1621,9 +1661,24 @@ void KeyGo_LoadConfig(void)
     if (g_cfgLockCount < COUNT_MIN || g_cfgLockCount > COUNT_MAX)               g_cfgLockCount       = 3;
     if (g_cfgDisconnectLockMs > DLOCK_MAX_MS)                                   g_cfgDisconnectLockMs = 5000;
 
-    PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d\n",
+    // ★ 2026-08-14: 读取钥匙供电模式 (buf[15])
+    //   旧格式(无此字节) buf[15]=0 → 视为 HOLD_UNTIL_LOCK(1) 以兼容旧设备默认行为;
+    //   实际 0 也合法(TIMEOUT), 但旧设备未写该字节=0 应映射到默认 HOLD(1)。
+    //   判定: buf[15]==1 → HOLD; buf[15]==0 → 旧格式未初始化 → 默认 HOLD(1); 其他 → 默认 HOLD(1)
+    {
+        uint8_t m = buf[15];
+        if (m == 0) {
+            g_cfgKeyPowerMode = KEY_POWER_MODE;   // 旧格式/未初始化 → 编译期默认(=1 HOLD)
+        } else if (m == 1) {
+            g_cfgKeyPowerMode = 1;
+        } else {
+            g_cfgKeyPowerMode = 1;   // 越界兜底 HOLD
+        }
+    }
+
+    PRINT("[CONFIG] Loaded from flash: unlock=%d lock=%d uc=%d lc=%d dlock=%d cooldown_ms=%d kpm=%d\n",
           g_cfgUnlockThreshold, g_cfgLockThreshold, g_cfgUnlockCount,
-          g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgManualCooldownMs);
+          g_cfgLockCount, g_cfgDisconnectLockMs, g_cfgManualCooldownMs, g_cfgKeyPowerMode);
 }
 
 void KeyGo_SaveConfig(void)
@@ -1657,7 +1712,10 @@ void KeyGo_SaveConfig(void)
     buf[13] = (uint8_t)(g_cfgManualCooldownMs);
     buf[14] = (uint8_t)(g_cfgManualCooldownMs >> 8);
 
-    // Checksum: XOR over first 12 bytes（不含 cooldownMs，保持向后兼容）
+    // ★ 2026-08-14: 钥匙供电模式存于 buf[15]（旧格式为 padding=0，兼容）
+    buf[15] = (g_cfgKeyPowerMode == 0) ? 0 : 1;
+
+    // Checksum: XOR over first 12 bytes（不含 cooldownMs/buf[15]，保持向后兼容）
     buf[12] = 0;
     for (uint8_t i = 0; i < 12; i++) buf[12] ^= buf[i];
 

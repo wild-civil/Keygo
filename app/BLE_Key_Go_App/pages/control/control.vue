@@ -218,6 +218,19 @@
         <view class="config-desc" style="margin-top:10rpx;">模式存于设备，切换后重启仍保持；首次使用建议在「帮助」页了解二者差异。</view>
       </view>
 
+      <!-- ★ 2026-08-14/15: 钥匙供电策略（设备级参数，FF02 kpm 字段，改了即时下发固件存 DataFlash，所有手机共用；UI 风格对齐 RSSI 冷却时长） -->
+      <view class="rssi-sim-section" v-if="bleStore.connected">
+        <view class="rssi-sim-title">🔋 钥匙供电策略（设备级）</view>
+        <view class="rssi-sim-hint">给车钥匙供电的引脚(KEY_POWER/PB0)何时断电：解锁后保持=通电到锁车/断连；限时 15 秒=解锁后仅通电 15 秒自动断电。</view>
+        <view class="kpm-presets">
+          <button class="kpm-preset" hover-class="none" :class="{ active: localKeyPowerMode === 1 }"
+            @tap="onKeyPowerModeChange(1)">🔓 解锁后保持到锁车</button>
+          <button class="kpm-preset" hover-class="none" :class="{ active: localKeyPowerMode === 0 }"
+            @tap="onKeyPowerModeChange(0)">⏱ 限时 15 秒</button>
+        </view>
+        <view class="rssi-sim-sub-hint">⚠ 设备级配置：修改后写入设备 Flash，所有连接此设备的手机共用此值</view>
+      </view>
+
       <!-- ★ 2026-07-19 / v3.36.2: 电瓶车「靠近直接进入骑行模式」偏好（仅电瓶车模式可见）。
            固件 RSSI 状态机驱动「靠近自动解锁」；开启后靠近即通电骑行(而非仅解锁)。
            偏好存固件 DataFlash(经 EPRX 命令下发)，无App模式(手机 App 不在场)也生效。详见设计文档。
@@ -268,6 +281,7 @@ const themeClass = computed(() => themeStore.themeClass)
 onShow(() => {
   themeStore.applyNavBar()
   bleStore.flushStagedDisplay()   // ★ 2026-07-24: 回前台立即提交最新暂存显示，避免回放历史
+  syncKeyPowerModeFromDevice()     // ★ 2026-08-14: 进入控制页时校正钥匙供电本地态（未初始化才校正）
 })
 
 async function handleUnlock() {
@@ -407,10 +421,40 @@ async function handleDeviceModeChange(mode) {
   }
 }
 
+// ★ 2026-08-14: 钥匙供电策略（从 config 页迁至 control 页，与 cooldown/模式 同属设备级 DataFlash 参数）
+//   本地 ref 驱动 active：点击立即更新 → 不闪；FF02 周期回显仅在未初始化(-1)时校正一次
+const localKeyPowerMode = ref(-1)
+const keyPowerText = computed(() => {
+  const v = localKeyPowerMode.value
+  if (v === -1) return '同步中…'
+  return v === 0 ? '限时 15 秒' : '解锁后保持'
+})
+async function onKeyPowerModeChange(mode) {
+  if (localKeyPowerMode.value === mode) return
+  localKeyPowerMode.value = mode   // 乐观更新，先点亮按钮防闪烁
+  try {
+    uni.showLoading({ title: '下发中...' })
+    await bleStore.updateConfig({ kpm: mode })
+    uni.hideLoading()
+    toast.success(mode === 1 ? '已设为：解锁后保持通电' : '已设为：限时 15 秒通电')
+  } catch (err) {
+    uni.hideLoading()
+    toast.error('下发失败，请检查连接')
+  }
+}
+// FF02 仅在本地未初始化(-1)时校正一次（设备真实值）
+function syncKeyPowerModeFromDevice() {
+  if (localKeyPowerMode.value === -1 && bleStore.keyPowerMode !== -1) {
+    localKeyPowerMode.value = bleStore.keyPowerMode
+  }
+}
+
 // ★ 2026-07-19: 电瓶车「靠近直接进入骑行模式」偏好（固件 g_ebikeProxMode 镜像）。
 //   仅电瓶车模式可见/有意义；car 模式 UI 隐藏且下发会被固件 DENY 兜底。详见设计文档。
 const proxRideVisual = ref(bleStore.ebikeProxMode)
 watch(() => bleStore.ebikeProxMode, (v) => { proxRideVisual.value = v })
+// ★ 2026-08-14: FF02 周期回显 keyPowerMode 变化时，仅在本地未初始化(-1)时校正一次，避免覆盖用户点击
+watch(() => bleStore.keyPowerMode, () => { syncKeyPowerModeFromDevice() })
 async function onToggleProxRide(v) {
   if (v === proxRideVisual.value) return
   proxRideVisual.value = v   // 视觉立即翻转
@@ -781,8 +825,8 @@ async function onToggleProxRide(v) {
 .rssi-sim-sub-hint {
   font-size: 18rpx;
   color: var(--accent-orange);
-  margin-bottom: 12rpx;
-  margin-top: -12rpx;
+  margin-bottom: 6rpx;
+  margin-top: 6rpx;
 }
 
 .rssi-presets {
@@ -829,6 +873,35 @@ async function onToggleProxRide(v) {
   color: var(--text-muted);
   line-height: 1.5;
   margin-left: 8rpx;
+}
+
+/* ★ 2026-08-14: 钥匙供电策略预设按钮（从 config 页迁移，风格与 cooldown 的 rssi-preset 类似） */
+.kpm-presets {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 16rpx;
+  flex-wrap: wrap;
+}
+.kpm-preset {
+  flex: 1;
+  min-width: 240rpx;
+  font-size: 26rpx;
+  padding: 18rpx 0;
+  border-radius: 12rpx;
+  border: 1rpx solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-tertiary);
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+.kpm-preset::after {
+  border: none;   /* 去掉 uni-app button 默认 ::after 边框，避免点击/常态闪烁 */
+}
+.kpm-preset.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 600;
 }
 
 .mode-cards {

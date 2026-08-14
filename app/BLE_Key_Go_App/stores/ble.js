@@ -39,7 +39,6 @@ import {
   getBluetoothAdapterState,
   openBluetoothAdapterOnly,       // ★ 冷启动修复：仅打开适配器（不申请权限）
   getBLEDeviceServices,          // ★ used by _verifyConnection
-  getBLEDeviceCharacteristics,    // ★ 第八刀(方案C): NONCE 前预热 FF03 写属性，消除重连后 10007
   getBLEDeviceRSSI,               // ★ 2026-07-30: 无线电层实时探活（假断连判定）
   onBluetoothAdapterStateChange,
   startScan,
@@ -122,6 +121,14 @@ console.log('[KeyGo] App version', APP_VERSION)
 //   历史：2026-07-09 曾因配对后原生服务崩溃临时置 true 止血，根因修复后恢复 false，并保留为常驻开关。
 const __DISABLE_NATIVE_FG = false
 
+// ★ 2026-08-13 绑定验证热身延时(ms): 连接成功后、发首帧 NONCE(FF03 写)前的固定等待。
+//   深度修正（最终版）：实测证明"固定热身"会拖慢首连——首连链路本身已慢(readSerialNumber 真实读
+//   + 800ms 订阅延时)，底层写属性在 T+0~400ms 早已热透，再等 800ms 纯属白等。
+//   故此处设 0：NONCE 尽早发射。首连首枪即中（零影响）；重连因链路紧凑、属性冷会首枪 10007，
+//   改由 _requestNonce 内部的【递增退避】(0/400/800/1200/1600ms)跨过 ~1.6s 冷窗口，且每轮之间
+//   写链空闲(电池/配置读可插入,不霸链)。_enableStatusNotify 与 _finalizeConnection 共用此值。
+const AUTH_WARMUP_MS = 0
+
 // ★ v3.23 Phase 3: 地理围栏工具
 import {
   GEOFENCE_RADIUS,
@@ -188,6 +195,7 @@ export const useBleStore = defineStore('ble', {
     rssiEma: -999,                // ★ 内部：displayRssi 的 EMA 累加器（仅 >-900 时视为有效）
     batteryLevel: -1,             // ★ v3.14: 电池电量 0~100, -1=未知
     autoLockEnabled: -1,          // ★ v3.24-fixb: 固件自动锁使能状态(FF02 al 字段)，-1=未知/未同步，0=关闭(手动模式)，1=开启
+    keyPowerMode: -1,             // ★ 2026-08-14: 钥匙供电策略(FF02 kpm 字段), -1=未同步, 0=TIMEOUT(15s), 1=HOLD_UNTIL_LOCK(默认)
     statusStale: false,            // ★ v3.15-#13: 超时未收到 Status Notify → 连接可能已中断
     unlockThreshold: -45,
     lockThreshold: -65,
@@ -2194,9 +2202,15 @@ export const useBleStore = defineStore('ble', {
         //   导致重连后 sessionAuthed 永远 false → UI 恒显「已绑定·连接待验证」、且手动控制指令
         //   被 sendCommand 的 sessionAuthed 门控挡成「设备未绑定，请先绑定」，逼用户每次手动重验证。
         //   固件 Bonding_ConnTerminated 本就在每连接清零会话态，故重连必须重 AUTH——自动补上即可。
+        //   ★ 2026-08-13 修复: 重连首次 AUTH 主触发点。NONCE 已回退基线行为（底层 2×400ms 兜底
+        //   + 单次轻量重试），此处仅做设备/连接守卫，不额外加固定热身（避免拖慢首连）。
         if (sn) {
           this._restoreBindKey(sn)
-          this._maybeAutoAuth()
+          const _targetId = this.deviceId
+          setTimeout(() => {
+            if (this.deviceId !== _targetId || !this.connected) return
+            this._maybeAutoAuth()
+          }, AUTH_WARMUP_MS)
         }
       }).catch(() => {})
 
@@ -2227,16 +2241,13 @@ export const useBleStore = defineStore('ble', {
         // ★ 2026-07-12: FF02 Notify 已订阅 → 标记就绪并触发自动 AUTH（恢复会话态）。
         //   必须在订阅之后（NONCE/AUTH 回包走 FF02），否则回包丢失会超时失败。
         this._statusNotifyReady = true
-        // ★ 2026-08-12 加速修订: 订阅成功后不要立刻发 NONCE。NONCE 是连接后最早的写
-        //   (走 FF03 write 属性)，此时 OS 对 FF03 的 WRITE 属性 GATT 缓存往往还没热
-        //   (尤其重连场景系统重建 GATT 缓存)，立刻硬发会连爆 10007×3 + 400ms×2 退避 → 拖 ~2.3s。
-        //   加 300ms 热身延时，让写缓存刷新好再发，NONCE 一次成功，握手快 ~2s。
-        //   与合并版(AUTH:OK 后 FF02/500ms)理念一致: 别在最猛窗口硬写。
+        // ★ 2026-08-13 修订: 订阅成功后即触发首次 AUTH。NONCE 已回退基线行为（走底层 2×400ms 兜底，
+        //   仅单次轻量重试双保险），首连一枪过、零额外开销；重连冷窗口由底层静默救回。
         const _targetId = targetId
         setTimeout(() => {
           if (this.deviceId !== _targetId || !this.connected) return
           this._maybeAutoAuth()
-        }, 300)
+        }, AUTH_WARMUP_MS)
       } catch (_) {}
     },
 
@@ -3641,6 +3652,9 @@ export const useBleStore = defineStore('ble', {
       //   注意：必须存数值 0/1，不能写 `data.al === 1`（那会得到布尔 true/false，
       //   导致 UI 的 `=== 0 / === 1` 判断全部落空、手动模式误显"已开启"）
       if (data.al !== undefined) this.autoLockEnabled = (Number(data.al) === 0) ? 0 : 1
+      // ★ 2026-08-14: 钥匙供电策略 (kpm = key power mode)
+      //   来自 FF02 上报；0=TIMEOUT(15s 限时通电), 1=HOLD_UNTIL_LOCK(解锁后保持到锁车/断连)
+      if (data.kpm !== undefined) this.keyPowerMode = (Number(data.kpm) === 0) ? 0 : 1
 
       // ★ 2026-07-10: 固件版本号（v 字段）—— 确认设备烧录的是哪版，便于排查"改了没生效"
       if (data.v !== undefined) this.fwVersion = String(data.v)
@@ -3857,6 +3871,8 @@ export const useBleStore = defineStore('ble', {
       if (config.kr !== undefined) this.kalmanR = Math.max(1, Math.min(50, config.kr))
       // ★ v3.7: 冷却时间
       if (config.cooldown_ms !== undefined) this.manualCooldownMs = config.cooldown_ms
+      // ★ 2026-08-14: 钥匙供电策略（用户改了即时更新 UI 状态；真实值仍以 FF02 回显为准）
+      if (config.kpm !== undefined) this.keyPowerMode = (Number(config.kpm) === 0) ? 0 : 1
       // ★ 持久化到本地存储（退出应用后重新进入不丢失）
       this._persistConfig()
       // ★ v3.36(2026-07-17): 用户改了解锁/上锁阈值 → 同步刷新「本机 owner」的 per-phone 阈值
@@ -4051,21 +4067,23 @@ export const useBleStore = defineStore('ble', {
         if (!done) { done = true; _resolveWaiter('NONCE', null) }
       }, 4000)
       try {
-        // ★ 2026-08-13 第八刀(方案C): NONCE(FF03) 写属性预热。
-        //   手动断开→重连后是**全新的 GATT 连接**，Android 对 FF03 的 WRITE 属性缓存会被清空，
-        //   首帧 NONCE 写几乎必撞 10007（日志实证：09.488/09.892 各失败一次 → 10.302 才成功，~0.8s）。
-        //   根因不是并发（此处无并发读），而是重连后 OS 写属性表未就绪。
-        //   预热手段：发 NONCE 前先查一次 FF03 的特征列表(getBLEDeviceCharacteristics)，
-        //   该查询会让 OS 重新确认 FF03 的 properties(含 WRITE)，从而预热写属性。
-        //   走 enqueueRead 队列（read 性质，不与 NONCE 写并发）；失败仅降级跳过，绝不阻塞 NONCE。
+        // ★ 2026-08-13 深度修正（回退基线 + 轻量兜底）:
+        //   之前三刀（12×150ms 密集 / 800ms 固定热身 / 递增退避 + retries:0）实测反而拖慢首连——
+        //   retries:0 关掉了底层 2×400ms 兜底，把任何微小抖动都放大成"显式失败→上层重试"的可见慢。
+        //   回退到基线行为：NONCE 走底层默认 _WRITE_10007_RETRIES(2)+400ms 重试兜底（首连一枪过、
+        //   零影响；重连偶发冷窗口由底层静默救回）。仅保留【单次】10007 轻量重试作为双保险，
+        //   不循环、不霸占 enqueueWrite 写链，绝不拖首连。
         try {
-          await enqueueRead(() => getBLEDeviceCharacteristics(this.deviceId, BLE_CONFIG.serviceUUID))
-          console.log('[BIND] FF03 写属性预热完成(特征表已确认)')
+          await enqueueWrite(() => rawSendCommand(this.deviceId, 'NONCE'))
         } catch (e) {
-          console.warn('[BIND] FF03 预热查询失败(降级跳过):', e?.message || e)
+          if (isGattConflict(e)) {
+            console.warn('[BIND] NONCE 首写 10007，轻量重试一次…')
+            await new Promise((r) => setTimeout(r, 300))
+            await enqueueWrite(() => rawSendCommand(this.deviceId, 'NONCE'))
+          } else {
+            throw e
+          }
         }
-        // ★ 2026-08-13 第七刀: 移除此前的 300ms 前置热身延时（前提已证伪，纯浪费）。
-        await enqueueWrite(() => rawSendCommand(this.deviceId, 'NONCE'))
       } catch (e) {
         clearTimeout(timer)
         _resolveWaiter('NONCE', null)

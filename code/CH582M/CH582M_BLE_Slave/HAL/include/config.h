@@ -32,7 +32,7 @@
 #define PIN_LOCK_GPIO               GPIO_Pin_7   // PB7 → 上锁
 #define PIN_TRUNK_GPIO              GPIO_Pin_6   // PB6 → 后备箱/骑行
 #define PIN_OTHER_GPIO              GPIO_Pin_4   // PB4 → 第4键(喇叭/寻车)
-#define PIN_KEYPOWER_GPIO           GPIO_Pin_0   // PB0 → KEY_POWER(给钥匙供电, 驱动 PMOS 导通)
+#define PIN_KEYPOWER_GPIO           GPIO_Pin_0   // PB0 → KEY_POWER\(给钥匙供电, 驱动 PMOS 导通)
 /* ★ ebike RIDE 输出引脚。复用 TRUNK 脚(PB6)——电动车模式 RIDE 触发线接此处 */
 #define PIN_RIDE_GPIO               GPIO_Pin_6   // PB6 → 电瓶车 RIDE(快速双击)
 
@@ -60,6 +60,16 @@
 #endif
 #ifndef KEY_POWER_HOLD_MS
 #define KEY_POWER_HOLD_MS           4000  // 末次命令后保持通电时长(ms), 到期自动断电省电
+#endif
+/* ★ 2026-08-14: 钥匙供电策略(KEY_POWER_MODE)
+ *   0 = TIMEOUT:   解锁/上电后固定保持 KEY_POWER_TIMEOUT_MS 通电, 到期自动断电(适用电瓶车/普通遥控)
+ *   1 = HOLD_UNTIL_LOCK (默认, 汽车): 解锁后保持通电, 直到收到 LOCK 命令或断连兜底锁(KSTATE_LOCKED)才断电
+ *   由 App 经 FF01 "kpm=0/1" 下发, 存 DataFlash buf[15], 默认 HOLD_UNTIL_LOCK */
+#ifndef KEY_POWER_MODE
+#define KEY_POWER_MODE              1     // 默认: 解锁后一直保持通电直到锁车/断连
+#endif
+#ifndef KEY_POWER_TIMEOUT_MS
+#define KEY_POWER_TIMEOUT_MS        15000 // TIMEOUT 模式固定保持时长(ms)=15s
 #endif
 
 /* ─────────────────────────────────────────────────────────────────
