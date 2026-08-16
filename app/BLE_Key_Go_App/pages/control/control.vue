@@ -190,6 +190,19 @@
         </view>
       </view>
 
+      <!-- ★ 2026-08-14/15: 钥匙供电策略（设备级参数，FF02 kpm 字段，改了即时下发固件存 DataFlash，所有手机共用；UI 风格对齐 RSSI 冷却时长）。置于模式选择之上、RSSI 冷却之下 -->
+      <view class="rssi-sim-section" v-if="bleStore.connected">
+        <view class="rssi-sim-title">🔋 钥匙供电策略（设备级）</view>
+        <view class="rssi-sim-hint">给车钥匙供电的引脚(KEY_POWER/PB0)何时断电：解锁后保持=通电到锁车/断连；限时 15 秒=解锁后仅通电 15 秒自动断电。</view>
+        <view class="kpm-presets">
+          <button class="kpm-preset" hover-class="none" :class="{ active: localKeyPowerMode === 1 }"
+            @tap="onKeyPowerModeChange(1)">🔓 解锁后保持到锁车</button>
+          <button class="kpm-preset" hover-class="none" :class="{ active: localKeyPowerMode === 0 }"
+            @tap="onKeyPowerModeChange(0)">⏱ 限时 15 秒</button>
+        </view>
+        <view class="rssi-sim-sub-hint">⚠ 设备级配置：修改后写入设备 Flash，所有连接此设备的手机共用此值</view>
+      </view>
+
       <!-- ★ Phase 2: 设备模式（汽车/电瓶车）— 控制模式切换，置于控制页底部 -->
       <view class="mode-section">
         <view class="section-title">🚗/🛵 设备模式（汽车 / 电瓶车）</view>
@@ -216,19 +229,6 @@
           </view>
         </view>
         <view class="config-desc" style="margin-top:10rpx;">模式存于设备，切换后重启仍保持；首次使用建议在「帮助」页了解二者差异。</view>
-      </view>
-
-      <!-- ★ 2026-08-14/15: 钥匙供电策略（设备级参数，FF02 kpm 字段，改了即时下发固件存 DataFlash，所有手机共用；UI 风格对齐 RSSI 冷却时长） -->
-      <view class="rssi-sim-section" v-if="bleStore.connected">
-        <view class="rssi-sim-title">🔋 钥匙供电策略（设备级）</view>
-        <view class="rssi-sim-hint">给车钥匙供电的引脚(KEY_POWER/PB0)何时断电：解锁后保持=通电到锁车/断连；限时 15 秒=解锁后仅通电 15 秒自动断电。</view>
-        <view class="kpm-presets">
-          <button class="kpm-preset" hover-class="none" :class="{ active: localKeyPowerMode === 1 }"
-            @tap="onKeyPowerModeChange(1)">🔓 解锁后保持到锁车</button>
-          <button class="kpm-preset" hover-class="none" :class="{ active: localKeyPowerMode === 0 }"
-            @tap="onKeyPowerModeChange(0)">⏱ 限时 15 秒</button>
-        </view>
-        <view class="rssi-sim-sub-hint">⚠ 设备级配置：修改后写入设备 Flash，所有连接此设备的手机共用此值</view>
       </view>
 
       <!-- ★ 2026-07-19 / v3.36.2: 电瓶车「靠近直接进入骑行模式」偏好（仅电瓶车模式可见）。
@@ -424,11 +424,6 @@ async function handleDeviceModeChange(mode) {
 // ★ 2026-08-14: 钥匙供电策略（从 config 页迁至 control 页，与 cooldown/模式 同属设备级 DataFlash 参数）
 //   本地 ref 驱动 active：点击立即更新 → 不闪；FF02 周期回显仅在未初始化(-1)时校正一次
 const localKeyPowerMode = ref(-1)
-const keyPowerText = computed(() => {
-  const v = localKeyPowerMode.value
-  if (v === -1) return '同步中…'
-  return v === 0 ? '限时 15 秒' : '解锁后保持'
-})
 async function onKeyPowerModeChange(mode) {
   if (localKeyPowerMode.value === mode) return
   localKeyPowerMode.value = mode   // 乐观更新，先点亮按钮防闪烁
