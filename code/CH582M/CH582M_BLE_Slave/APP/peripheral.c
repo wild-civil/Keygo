@@ -471,7 +471,8 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         GAPRole_PeripheralStartDevice(Peripheral_TaskID, &Bonding_BondCBs,
                                        &Peripheral_PeripheralCBs);
         /* ★ v3.14: 电池检测上电即运行（不依赖连接） ；若注释此行，则，电池检测移到连接建立后再启动，不再开机即跑*/
-        tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);
+        /* ★ 2026-08-16 防"不支持"瞬态: 先用短延时(3s)触发首拍(避开广播未就绪窗口, 系统已稳能采到真值),\n         *   处理函数跑完会自然排 30s 周期(见 L552), 故此处只排首拍。\n         *   若用 tmos_set_event 立即触发会撞广播未起→干扰连接, 故必须短延时。\n         *   功耗: 仅把首拍从 30s 提前到 3s, 多一次开机采样(μs级, 可忽略)。 */
+        tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, MA(3, 1600));
         return (events ^ SBP_START_DEVICE_EVT);
     }
 
