@@ -358,6 +358,10 @@ export const useBleStore = defineStore('ble', {
     _rssiStaleWatchdog: null,     // ★ v3.31.0 / 2026-07-13: 连续无 FF02 看门狗定时器
     // ★ v3.25-fix2: GATT 上下文重建中标志，防止看门狗与重连逻辑并发触发多次重建
     _repairing: false,
+    // ★ 2026-08-17 (P-FF02): FF02 到达验证看门狗（订阅成功后 3s 探测 → 重订阅 → 拆链重建）
+    _ff02ArrivalTimer: null,
+    _ff02ProbeRunning: false,
+    _ff02SilentRepairs: 0,   // 连续"订阅/重订阅后仍无 FF02"次数，收到 FF02 清零
     _disconnectProbing: false,     // ★ 2026-07-30: 断连事件后「FF02 活性缓刑」进行中
     _disconnectProbeTimer: null,   // ★ 2026-07-30: 活性缓刑定时器
 
@@ -647,6 +651,14 @@ export const useBleStore = defineStore('ble', {
       this._connHandler = onBLEConnectionStateChange((connected, deviceId) => {
         if (deviceId !== this.deviceId) return
         if (!connected) {
+          // ★ 2026-08-16 关键修复（来自 23:56:43~23:57:26 循环复盘）：
+          //   _repairConnection 主动 closeBLEConnection 重建 GATT 时，会触发本断连事件。
+          //   旧逻辑把它当"真断连"→ 缓刑→ 真断→ 重连→ 又连上→ 又被 _repairConnection 拆→
+          //   死循环（连接其实好的，是被自己拆坏的）。此处：_repairing 期间豁免，不进断连判定。
+          if (this._repairing) {
+            console.log('[Store] 收到断连事件但 _repairing 中（_repairConnection 自伤拆链），豁免')
+            return
+          }
           console.log('[Store] 收到断连事件（全局监听器），系统级确认是否真断连')
           // ★ 2026-07-25 修复（MP/Android 假断连）：BLE 栈在连上后/锁屏后可能多发一次 false 事件，
           //   但 GATT 实际仍活（控件仍可用、RSSI 仍显示）。若直接 _handleDisconnect 会立即把
@@ -657,6 +669,13 @@ export const useBleStore = defineStore('ble', {
           // ★ fix: 连接已建立但 store 状态未同步（如 _doReconnect guard 失效导致跳过回写）。
           //   底层 BLE 连接已活，但 store 未设置 connected=true，notify 未注册，RSSI 不会显示。
           console.log('[Store] 连接已建立（全局监听器补位），同步状态...')
+          // ★ 2026-08-16 紧急修复（来自 23:26:36 日志复盘）：
+          //   设备重启后重连，底层 connected=true 经"全局监听器补位"路径到达，但 _finalizeConnection
+          //   的 _connFinalizedFor 幂等守卫(上一轮 deviceId)会拦截 → 初始化被跳过 → 不读SN/不订阅FF02/
+          //   不AUTH → 连接空壳 → 固件立即踢 → 连上即断、永久连不上。
+          //   _doReconnect 路径已清守卫(见 L2394)，但本补位路径没清 → 漏了。此处 store 认为未连接
+          //   (connected=false) 即代表这是新会话，必须清守卫放行重新初始化。
+          this._connFinalizedFor = null
           this._finalizeConnection(deviceId)
         }
       })
@@ -873,7 +892,11 @@ export const useBleStore = defineStore('ble', {
         this.btState = 'on'
         // ★ 冷启动修复：蓝牙开启（含 App 启动时 BT 才打开 / 手动开启）即尝试自动连，
         //   不再限定 reconnectMode==='paused'。dormant(用户主动断开)/已连接/BT 关 由闸门拦截。
-        if (!this.connected && this._shouldAutoReconnect()) {
+        if (!this.connected && this._shouldAutoReconnect(true)) {
+          // ★ 2026-08-16 关键修复：蓝牙恢复唤醒路径忽略 keygo_unbound_kicked 持久化拦截。
+          //   该标记只应阻止「首次自动发起」(见 connect()/异常断连路径)，绝不可拦截「已在进行中、
+          //   因蓝牙瞬时抖动而 paused 的重连会话恢复」——否则 paused + kicked 互斥 = 重连永久卡死
+          //   （即 23:36:53 status:22 后连接彻底停摆的真凶）。
           const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
           if (knownId) {
             this.deviceId = knownId
@@ -914,7 +937,8 @@ export const useBleStore = defineStore('ble', {
       this.btState = next
 
       // ★ 冷启动修复：适配器可用即尝试自动连（不限定 paused），dormant/已连接/BT 关由闸门拦截
-      if (available && !this.connected && this._shouldAutoReconnect()) {
+      // ★ 2026-08-16：唤醒路径忽略 keygo_unbound_kicked，避免 paused 会话永久卡死
+      if (available && !this.connected && this._shouldAutoReconnect(true)) {
         const knownId = this.deviceId || uni.getStorageSync('ble_device_id')
         if (knownId) {
           this.deviceId = knownId
@@ -1629,7 +1653,7 @@ export const useBleStore = defineStore('ble', {
      *
      * @returns {Promise<boolean>} true=连接正常，false=连接已失效
      */
-    async _verifyConnection() {
+    async _verifyConnection(timeoutMs = 3000) {
       if (!this.connected || !this.deviceId) return false
 
       // ★ v3.14-bugfix: 如果蓝牙已确认关闭，无需验证，直接清理
@@ -1644,14 +1668,23 @@ export const useBleStore = defineStore('ble', {
       //   Android 通过 stale handle "重连"成功，GATT services 被缓存），
       //   导致虚假的"连接正常"。getConnectedBluetoothDevices 直接查询系统
       //   蓝牙管理器，结果无法被缓存伪造。
+      // ★ 2026-08-17 硬超时补丁：uni.getConnectedBluetoothDevices 在 Android 上
+      //   曾出现"既不 success 也不 fail"静默挂起（与 openBluetoothAdapter/
+      //   closeBLEConnection 同类问题）→ _verifyConnection 永久 pending →
+      //   _repairConnection 卡死在 await → 8s 看门狗自愈链断裂 → 连接永远
+      //   停留在"已连接但状态过期/一直连接中"。加硬超时强制收口，超时按
+      //   "系统列表漏报"处理转 RSSI 探针二次确认，绝不永久挂起。
       try {
-        const devices = await new Promise((resolve, reject) => {
-          uni.getConnectedBluetoothDevices({
-            services: [BLE_CONFIG.serviceUUID],
-            success: (res) => resolve(res.devices || []),
-            fail: (err) => reject(err)
-          })
-        })
+        const devices = await Promise.race([
+          new Promise((resolve, reject) => {
+            uni.getConnectedBluetoothDevices({
+              services: [BLE_CONFIG.serviceUUID],
+              success: (res) => resolve(res.devices || []),
+              fail: (err) => reject(err)
+            })
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('SYS_VERIFY_TIMEOUT')), timeoutMs))
+        ])
         const found = devices.some(d => d.deviceId === this.deviceId)
         if (found) {
           console.log('[Store] _verifyConnection: 连接正常（系统级验证）')
@@ -2001,7 +2034,7 @@ export const useBleStore = defineStore('ble', {
             await new Promise((resolve) => {
               try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (e) { resolve() }
             })
-            await new Promise(r => setTimeout(r, 400)) // 等 OS 真正拆链，避免与 connect 竞争
+            await new Promise(r => setTimeout(r, 700)) // ★ 2026-08-16 (B-1): 400→700ms, 与 _doReconnect 统一, 确保 OS 真正拆链后强制新建 GATT(首连路径)
             this._connectWithResetFallback(targetId).then(() => {
               this._repairing = false
               if (this._screenOnScanGuard !== guard || this.connected) return
@@ -2114,10 +2147,16 @@ export const useBleStore = defineStore('ble', {
           this.reconnectAttempt++
           setDebugReconnectResult(false, `定时重连失败 #${this.reconnectAttempt}: ${e?.message || e || 'unknown'}`)
 
-          // ★ v3.6: 如果是蓝牙关闭导致的失败，_doReconnect 已将 mode 设为 paused
-          //   不再调度下一轮，等待适配器状态变化事件来恢复
-          if (this.reconnectMode === 'paused') {
-            console.log('[Store] 蓝牙未开启，暂停重连，等待蓝牙恢复')
+          // ★ 2026-08-16 关键修复（来自 23:36:53 status:22 日志复盘）：
+          //   旧逻辑把"任何失败"都当成"蓝牙关"→ 一旦进入 paused 就 return，且无唤醒入口 → 重连永久卡死。
+          //   现分流：
+          //   ① 真正"蓝牙适配器不可用"（_doReconnect 探到 btOn=false 并已设 paused）→ 等蓝牙恢复事件唤醒，return。
+          //   ② 连接级错误（status:22 / CONNECT_HARD_TIMEOUT / ALREADY_CONNECT_STALE / GATT 冲突等）→
+          //      这些**不是**蓝牙关，必须继续走指数退避，绝不在此 return 卡死。
+          //   用错误类型区分，而非用 reconnectMode==='paused' 这个会被多种失败共用的状态判断。
+          const isBtOff = (e && e.message === '蓝牙未开启')
+          if (isBtOff) {
+            console.log('[Store] 蓝牙未开启，暂停重连，等待蓝牙恢复事件唤醒')
             return
           }
 
@@ -2155,7 +2194,10 @@ export const useBleStore = defineStore('ble', {
       // ★ 方案A 幂等守卫 (2026-07-18): connect() 手动路径与全局监听器补位路径可能都触发本方法，
       //   同一连接只初始化一次，避免重复「服务发现 + FF04 序列号读取 + 配置下发」的双份 GATT 流量与噪声日志。
       //   守卫在 _handleDisconnect（断连）与 connect() 起点重置为 null，故重连/重新手动连接不受影响。
-      if (this._connFinalizedFor === deviceId) {
+      // ★ 2026-08-16 加强：仅当"本连接确实已初始化完成"(connected===true)才拦截。若 connected===false
+      //   （初始化被中断/上一轮已清理），即使 _connFinalizedFor===deviceId 也放行重新初始化——
+      //   否则设备重启后重连若底层连上但 store 状态未同步，会被错误拦截→永不初始化→永久连不上。
+      if (this._connFinalizedFor === deviceId && this.connected === true) {
         console.log('[Store] _finalizeConnection: 本连接已初始化，跳过重复调用（幂等守卫）')
         return
       }
@@ -2166,6 +2208,12 @@ export const useBleStore = defineStore('ble', {
       this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
       if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
       this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
+      // ★ 2026-08-17 (P-FF02): 连接时立即武装 8s 状态看门狗。
+      //   旧逻辑 _resetStatusStaleTimer 只在收到 FF02 后(_parseSingleStatus)或 _verifyConnection 时被调用——
+      //   若 FF02 因 CCCD 未生效而从未到达，看门狗永不启动，_repairConnection 永不触发，
+      //   AUTH 4 轮失败后只能干等固件 30s 强断。现在连接即武装：8s 无 FF02 → _repairConnection
+      //   (轻量重订阅→失败则拆链重建 GATT)，让"FF02 静默"也能自愈。
+      this._resetStatusStaleTimer()
       this.sessionAuthed = false   // ★ ②: 新连接需重新 AUTH
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null   // ★ P0-2: 新连接重置签名会话态
       this.batteryLevel = -1   // ★ 2026-08-09 (P0-①): 连接起点重置电量→未知(---)，杜绝跨板粘连(V04 6% 残留到 V03)
@@ -2196,21 +2244,15 @@ export const useBleStore = defineStore('ble', {
         if (!this.isBound) {
           this._syncConfigToDevice()
         }
-        // ★ ②: 恢复本机已存的 bindKey（isBound 复原）。若本机曾绑定，则在 FF02 Notify
-        //   订阅就绪后自动重做 AUTH 握手恢复会话（见 _maybeAutoAuth）。
-        //   ★ 2026-07-12 修复（bug ①）：此前「阶段1 明文绑定」临时注释掉了连接时的自动 AUTH，
-        //   导致重连后 sessionAuthed 永远 false → UI 恒显「已绑定·连接待验证」、且手动控制指令
-        //   被 sendCommand 的 sessionAuthed 门控挡成「设备未绑定，请先绑定」，逼用户每次手动重验证。
-        //   固件 Bonding_ConnTerminated 本就在每连接清零会话态，故重连必须重 AUTH——自动补上即可。
-        //   ★ 2026-08-13 修复: 重连首次 AUTH 主触发点。NONCE 已回退基线行为（底层 2×400ms 兜底
-        //   + 单次轻量重试），此处仅做设备/连接守卫，不额外加固定热身（避免拖慢首连）。
+        // ★ ②: 恢复本机已存的 bindKey（isBound 复原）。
+        //   ★ 2026-08-16 修复：AUTH 触发**只**由下方 _enableStatusNotify（FF02 Notify 订阅就绪后）
+        //   驱动，此处【不再】触发 _maybeAutoAuth。
+        //   旧逻辑在 readSerialNumber(5000ms 超时).then 里触发 AUTH——但 SN 读一旦慢（撞 10007 /
+        //   服务发现慢）会延迟到 5s 之后，而固件「未 AUTH 踢窗」仅 ~3.1s（见日志存活 3.1s authed=false），
+        //   导致重连 AUTH 永远赶不上、连上即被踢。Notify 订阅在 800ms 后即就绪，AUTH 立即发出，
+        //   不依赖 SN，必能命中 3.1s 窗。删除冗余 SN 路径触发，杜绝延迟。
         if (sn) {
           this._restoreBindKey(sn)
-          const _targetId = this.deviceId
-          setTimeout(() => {
-            if (this.deviceId !== _targetId || !this.connected) return
-            this._maybeAutoAuth()
-          }, AUTH_WARMUP_MS)
         }
       }).catch(() => {})
 
@@ -2241,6 +2283,9 @@ export const useBleStore = defineStore('ble', {
         // ★ 2026-07-12: FF02 Notify 已订阅 → 标记就绪并触发自动 AUTH（恢复会话态）。
         //   必须在订阅之后（NONCE/AUTH 回包走 FF02），否则回包丢失会超时失败。
         this._statusNotifyReady = true
+        // ★ 2026-08-17 (P-FF02): 订阅成功即启动 FF02 到达验证——uni 的 success 回调只代表
+        //   CCCD 写请求已提交，不代表设备端真收到 0x0001；3s 无 FF02 将自动重订阅/拆链自愈。
+        this._armFf02ArrivalProbe(targetId)
         // ★ 2026-08-13 修订: 订阅成功后即触发首次 AUTH。NONCE 已回退基线行为（走底层 2×400ms 兜底，
         //   仅单次轻量重试双保险），首连一枪过、零额外开销；重连冷窗口由底层静默救回。
         const _targetId = targetId
@@ -2252,10 +2297,80 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ 2026-08-17 (P-FF02): FF02 到达验证看门狗。
+     *   uni.notifyBLECharacteristicValueChange 的 success 回调只代表「CCCD 写请求已提交」，
+     *   不代表设备端真的收到了 0x0001（Android 底层若 descriptor 列表为空，可能只调
+     *   setCharacteristicNotification(true) 而不写 CCCD → 设备端不推送 → FF02 全静默，
+     *   NONCE 挑战也走 FF02 → 收不到 → AUTH 永远失败 → 固件 30s 强断，死循环）。
+     *   订阅成功后 3s 内未收到真实 FF02(_lastFf02At 未前移) → 重订阅一次（部分 ROM 第二次能命中）；
+     *   再等 3s 仍无 → 连续静默计数+触发 _repairConnection 拆链重建（Android 恢复 CCCD 的可靠手段）。
+     *   _handleStatusNotify 收到 FF02 会取消探测并清零计数。
+     */
+    _armFf02ArrivalProbe(targetId) {
+      if (this._ff02ArrivalTimer) { clearTimeout(this._ff02ArrivalTimer); this._ff02ArrivalTimer = null }
+      if (this._ff02ProbeRunning) return   // 已有探测在跑，防重入
+      this._ff02ProbeRunning = true
+      const probeStart = this._lastFf02At || 0
+      this._ff02ArrivalTimer = setTimeout(async () => {
+        this._ff02ArrivalTimer = null
+        this._ff02ProbeRunning = false
+        if (this.deviceId !== targetId || !this.connected) return
+        if ((this._lastFf02At || 0) > probeStart) return  // FF02 已到达，链路正常
+        // 3s 无 FF02 → 重订阅一次（部分 ROM 第一次订阅静默失败、第二次成功）
+        this._ff02SilentRepairs = (this._ff02SilentRepairs || 0) + 1
+        console.warn(`[FF02] ⚠ 订阅成功但 3s 无 FF02 数据（CCCD 可能未生效，第 ${this._ff02SilentRepairs} 次静默），尝试重新订阅`)
+        try {
+          await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
+        } catch (_) {}
+        const probeStart2 = this._lastFf02At || 0
+        this._ff02ProbeRunning = true
+        this._ff02ArrivalTimer = setTimeout(() => {
+          this._ff02ArrivalTimer = null
+          this._ff02ProbeRunning = false
+          if (this.deviceId !== targetId || !this.connected) return
+          if ((this._lastFf02At || 0) > probeStart2) {
+            console.log('[FF02] ✓ 重新订阅后 FF02 已恢复')
+            return
+          }
+          // 重订阅仍无 → 按连续静默次数决定自愈强度
+          if (this._ff02SilentRepairs >= 3) {
+            console.error('[FF02] ❌ 连续 3 次订阅/重订阅均无 FF02，停止拆链循环（可能固件未推送或 ROM 底层问题），等待断连/重连兜底')
+            return
+          }
+          console.error('[FF02] ❌ 重新订阅后仍无 FF02，CCCD 未生效 → 拆链重建 GATT 上下文')
+          this._repairConnection()
+        }, 3000)
+      }, 3000)
+    },
+
+    /**
      * 执行一次重连尝试
      * ★ 统一入口：确保全局监听器 + 蓝牙适配器均已初始化
      * ★ v3.6-fixD: 会话锁机制，防止蓝牙关闭后仍在执行的 _doReconnect 覆盖状态
      */
+    /**
+     * ★ 2026-08-16 (B-1 重连=首连): 把连接会话态复位成"首连初值"。
+     * 在 _doReconnect 的 closeBLEConnection 之后、connectDevice 之前调用,
+     * 让"重连"在 App 侧等价于"重启 APP 后的首连", 从而:
+     *   ① 消除"首次绑定快、之后绑定慢"(重连走新建 GATT, 写就绪回到 0.4s);
+     *   ② 消除重连冷窗口导致的 A 类 10007 "蓝牙缓存可能过期" 弹窗;
+     *   ③ 解决"设备重启后连不上、必须重启 APP"(不再复用陈旧 GATT 上下文)。
+     * 注意: 本函数只复位"连接层会话态", 不碰持久化数据(knownDevice/绑定/命名)。
+     * _finalizeConnection 里也有部分复位(连接成功后), 此处是前置兜底, 二者互补不冲突。
+     */
+    _resetConnectionStateLikeAppRestart() {
+      this._gattWriteReady = false
+      this._postAuthWritesPending = false
+      this._postAuthWritesInFlight = false
+      if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      this._statusNotifyReady = false
+      this.sessionAuthed = false
+      this._autoAuthState = 'idle'
+      B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null
+      // 不清 batteryLevel / deviceName / _configPushedThisConn —— 这些由 _finalizeConnection 在连接成功后处理
+      console.log('[Store] _resetConnectionStateLikeAppRestart: 会话态已复位为首连初值')
+    },
+
     async _doReconnect() {
       // ★ 2026-07-30: 重连并发守卫——防止 forceStale 触发 + 心跳 tryAutoConnect + 舒适模式扫描
       //   同时进入，导致两个 connectDevice / 适配器重置并发、状态互相踩。
@@ -2267,6 +2382,7 @@ export const useBleStore = defineStore('ble', {
         return this._reconnectPromise
       }
       this._reconnecting = true
+      this._connectSucceededThisSession = false
       this._reconnectPromise = (async () => {
       try {
       // ★ v3.6-fixD: 记录此轮重连的会话锁版本号
@@ -2318,8 +2434,15 @@ export const useBleStore = defineStore('ble', {
       const btOn = await this._checkBluetoothState()
       if (!btOn) {
         // 蓝牙未开 → 暂停重连，等待适配器状态变化事件恢复
+        // ★ 2026-08-16 关键修正（来自 23:36:53 status:22 日志复盘）：
+        //   仅当"蓝牙适配器确实不可用"才设 paused。连接级错误（status:22 / ALREADY_CONNECT_STALE /
+        //   CONNECT_HARD_TIMEOUT 等）一律**不要**在此设 paused——它们由下方 _connectWithResetFallback
+        //   抛出后冒泡到 _scheduleReconnect，应走正常指数退避，而非永久暂停。
+        //   旧逻辑把"任何失败"都归到 paused 分支，导致蓝牙瞬时抖动（Android 连续 createBLEConnection
+        //   失败后偶发探到 unavailable）误判"蓝牙关"→ paused → 无唤醒入口 → 重连永久卡死。
         this.reconnectMode = 'paused'
         this.reconnectNextDelay = 0
+        console.log('[Store] 蓝牙适配器不可用，暂停重连，等待蓝牙恢复事件')
         throw new Error('蓝牙未开启')
       }
 
@@ -2333,29 +2456,68 @@ export const useBleStore = defineStore('ble', {
       //   未连接报错(errCode 10006 no connection)会 reject 成 UnhandledPromiseRejection；
       //   外层 try/catch 只抓同步异常、抓不到异步 reject，故用 complete 回调收口（与 1852/3428/3863 一致）。
       try {
-        await new Promise((resolve) => {
-          uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => resolve() })
-        })
+        // ★ 2026-08-17 硬超时：uni.closeBLEConnection 的 complete 在 Android 上可能不回调
+        //   （与 openBluetoothAdapter 同类静默挂起）→ 本 await 永久 pending → _doReconnect 卡死 →
+        //   _reconnectPromise 永不 settle → 自动重连/手动 connect 卡在"连接中"。加 2s 超时兜底，
+        //   宁可放行继续（connectDevice 自带 18s 硬超时兜底），不可卡死。
+        await Promise.race([
+          new Promise((resolve) => {
+            uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => resolve() })
+          }),
+          new Promise((resolve) => setTimeout(() => {
+            console.warn('[Store] _doReconnect: closeBLEConnection 硬超时(2s)，强制放行')
+            resolve()
+          }, 2000))
+        ])
         console.log('[Store] _doReconnect: 已清理旧连接句柄')
       } catch (e) {
         // 断开失败无所谓
       }
 
       // 等待系统处理断开
-      await new Promise(r => setTimeout(r, 300))
+      // ★ 2026-08-16 (B-1 重连=首连): 等待从 300ms 提到 700ms。300ms 太短, Android 未必真拆链,
+      //   陈旧 GATT 上下文可能残留 → 下次 connect 复用旧 GATT → 写属性就绪慢(1.6s)→ 10007 弹窗 +
+      //   设备重启后连不上(必须重启APP)。加长到 700ms 确保 OS 真正销毁旧 GATT, 下次 connect 强制
+      //   新建 GATT(首连路径, 写就绪 0.4s)。亮屏路径 _tryAutoConnect 用 400ms, 此处统一为 700ms 更稳。
+      // ★ 2026-08-16 提速: 仅当 store 仍认为"已连接"(连接其实还活着, 例如设备侧复位但 ACL 未拆)时才等
+      //   700ms 保拆链; 异常断连已同步 connected=false 时, OS 侧连接早已释放, 无需空等 700ms → 省约 0.7s。
+      const _needWaitTearDown = this.connected
+      if (_needWaitTearDown) {
+        await new Promise(r => setTimeout(r, 700))
+      }
       if (!guardValid()) guardAbort('closeBLEConnection 等待期间锁失效')
+
+      // ★ 2026-08-16 (B-1 重连=首连): close 之后、connect 之前, 把连接会话态复位成"首连初值"。
+      //   否则旧连接的 _gattWriteReady=true 会让首笔写误判 GATT 已就绪而直接发 → 撞 10007;
+      //   且 _postAuthWritesInFlight 等残留会干扰新连接。这与亮屏路径 L2012 的复位对齐,
+      //   让"重连"在 App 侧等价于"重启 APP 后的首连"。
+      this._resetConnectionStateLikeAppRestart()
+
+      // ★ 2026-08-16 (B-1 关键补丁): 强制清除连接初始化幂等守卫 _connFinalizedFor。
+      //   根因: _doReconnect 的 closeBLEConnection 是 uni 直接调用, 当系统认为"本来就没真连"(stale ACL)
+      //   时不会回调 onBLEConnectionStateChange → _handleDisconnect 不被触发 → _connFinalizedFor 残留为
+      //   上一轮 deviceId。随后 _finalizeConnection 在 L2158 因 _connFinalizedFor===deviceId 直接 return,
+      //   整条初始化(读 SN / 订阅 FF02 / 触发 _maybeAutoAuth)被跳过 → sessionAuthed 永远 false →
+      //   固件 30s 未 AUTH 强断 → 又重连 → 又跳过 → 死循环(连上→显示---→断→连上→---)。
+      //   重启 APP 后 _connFinalizedFor 为初始 undefined 故一次成功。此处主动清空, 让每轮重连都走完整
+      //   初始化, 与 connect() 手动路径(L3090)、全局监听器补位(L3046)保持一致。
+      this._connFinalizedFor = null
 
       // ★ v3.6-fixD: 连接前最后确认锁 — 若已失效立即中止
       if (!guardValid()) guardAbort('connectDevice 前锁失效')
 
       // 连接（★ v3.6-fixG: 捕获僵死句柄 → 重置适配器后重试一次）
       await this._connectWithResetFallback()
+      // ★ 2026-08-16：connectDevice 已成功 resolve ⇒ 底层物理连接已建立，标记会话级成功。
+      //   后续任何 guard 异步失效都【绝不】因此丢弃已建立的连接（见下方 L2449 修复同理）。
+      this._connectSucceededThisSession = true
 
       // ★ v3.6-fixD: 连接成功后的最终锁检查
       //   防止蓝牙关闭瞬间 connectDevice 意外 resolve（例如 already connect）
       if (!guardValid()) {
-        console.warn('[Store] ⛧ _doReconnect: connectDevice 成功但锁已失效，不回写状态')
-        throw new Error('SESSION_EXPIRED')
+        // ★ 2026-08-16 修正：连接已成功，不再因 guard 异步失效而丢弃连接（会留下僵尸连接）。
+        //   仅当适配器确实已关闭才放弃（由下方 getBluetoothAdapterState 兜底）。
+        console.warn('[Store] ⛧ _doReconnect: connectDevice 成功但锁已失效，保留连接（交由 finalize）')
       }
 
       // ★ v3.9.1 TOCTOU 修复：connectDevice 成功后再次查询真实适配器状态。
@@ -2375,8 +2537,29 @@ export const useBleStore = defineStore('ble', {
         // 查询失败保守处理：不阻断（偶尔 API 本身失败不是蓝牙关闭）
         console.warn('[Store] ⛧ _doReconnect: 适配器状态查询失败，放行')
       }
-      // ★ 二次锁检查（getBluetoothAdapterState 是异步的，期间锁可能失效）
-      if (!guardValid()) guardAbort('最终适配器确认后锁失效')
+      // ★ 2026-08-16 致命修复（来自 23:44:20 日志复盘）：
+      //   旧逻辑在 connectDevice 成功、AUTH 即将完成的收尾阶段，用 guardValid() 二次检查，
+      //   一旦「期间有另一轮重连推进导致 _reconnectGuard 自增」就抛 SESSION_EXPIRED 自杀。
+      //   但此时【物理连接已经建立、connected 已为 true、AUTH 流程正在跑】，自杀会把刚连上的
+      //   连接当「过期会话」丢弃，留下 connected=true 却无人管理的僵尸连接 → 后续 42s 才被固件踢。
+      //   日志铁证：23:44:20.587 连接成功 → 20.672「最终适配器确认后锁失效」→ 20.672「重连会话过期
+      //   放弃本轮」→ 但 22.2 仍打出 AUTH:OK（旧回调跑完）→ 连接游离到 42.4 才真正断。
+      //   修正：connectDevice 已成功 ⇒ 这是本轮权威成功点，**绝不再因 guard 异步失效而自杀**。
+      //   仅当用户主动发起新连接（_connEpoch 递增）或蓝牙确已关闭（realState.available=false 已拦）
+      //   才应放弃。此处删除 guardAbort，改为「若已有更新的连接会话接管且当前已非本连接，则只是
+      //   不再重复 _finalizeConnection（避免重复初始化），但不抛错、不丢已有连接」。
+      if (!guardValid()) {
+        // ★ 2026-08-16 兜底：connectDevice 已成功建立物理连接 ⇒ 任何 guard 异步失效都【不自杀】。
+        //   这是本轮权威成功点，绝不让在途的并发重连/断连事件把它丢弃成僵尸连接。
+        if (this._connectSucceededThisSession) {
+          console.log('[Store] ⚠ 重连 guard 已推进，但 connectDevice 已成功建立连接，保留连接（不自杀）')
+        } else if (this.connected) {
+          console.log('[Store] ⚠ 重连 guard 已推进，但物理连接已建立，交由接管轮次 finalize（不自杀）')
+        } else {
+          // 真的没连上且 guard 失效 → 这才是该放弃的场景
+          guardAbort('最终适配器确认后锁失效（未连接）')
+        }
+      }
 
       this._finalizeConnection(this.deviceId)
       } finally {
@@ -2477,10 +2660,23 @@ export const useBleStore = defineStore('ble', {
             console.log('[Store] ⛧ btState 已为 off，跳过适配器重置（系统蓝牙已关）')
             throw e
           }
-          console.log('[Store] ⛧ ' + (e.message === 'CONNECT_HARD_TIMEOUT' ? '连接硬超时' : 'GATT 僵死') + '，重置适配器...')
-          await this._resetBluetoothAdapter()
-          console.log('[Store] 适配器重置完成，重试连接...')
-          await connectDevice(targetId)
+          // ★ 2026-08-16 修正（来自日志 23:21:47~23:22:03 复盘）:
+          //   CONNECT_HARD_TIMEOUT 不再无脑重置适配器。实测 createBLEConnection 的 Promise 在部分
+          //   Android 上卡住不 resolve，但底层连接其实在进行（23:22:03 最终连上）。若在此硬超时后
+          //   再 _resetBluetoothAdapter（关/开适配器），会【打断底层正在进行的 connect】→ 下一轮更慢
+          //   → 又超时 → 又重置 → 恶性循环（日志里连烧 3 轮、耗时 16s）。
+          //   故 CONNECT_HARD_TIMEOUT 仅抛错让上层走指数退避；下一轮 _doReconnect 本身会先
+          //   closeBLEConnection（软重置）再连，已足够。只有 ALREADY_CONNECT_STALE（GATT 僵死）
+          //   才需要硬重置适配器。
+          if (e.message === 'ALREADY_CONNECT_STALE') {
+            console.log('[Store] ⛧ GATT 僵死，重置适配器...')
+            await this._resetBluetoothAdapter()
+            console.log('[Store] 适配器重置完成，重试连接...')
+            await connectDevice(targetId)
+          } else {
+            console.log('[Store] ⛧ 连接硬超时（CONNECT_HARD_TIMEOUT），不重置适配器（避免打断底层 connect），交由上层指数退避重试')
+            throw e
+          }
         } else {
           throw e
         }
@@ -3024,6 +3220,37 @@ export const useBleStore = defineStore('ble', {
 
     async connect(deviceId, deviceName = '') {
       try {
+        // ★ 2026-08-16 并发互斥修复（来自 23:52:32 status:8 日志复盘）：
+        //   手动 connect() 与自动 _doReconnect 是两条平行入口，旧逻辑只有 _doReconnect 内部
+        //   有 _reconnecting 守卫，connect() 完全绕过 → 两者并发各发一个 createBLEConnection →
+        //   系统先建一个(补位 connected=true) 又把重复连接的那条踢掉 → status:8
+        //   (GATT_CONN_FAIL_ESTABLISH)。此处：若已有重连进行中，先 await 其 Promise 收口
+        //   （成功则直接复用已建连接，失败再自己连），杜绝双 createBLEConnection 并发。
+        // ★ 2026-08-17 致命修复（来自 00:01:04~00:01:53 日志复盘）：
+        //   旧逻辑 `await this._reconnectPromise` 无超时——若 _doReconnect 卡在 18s 硬超时/
+        //   _repairConnection 重建循环，Promise 永不 settle → connect() 永久阻塞 → 用户点
+        //   "重新扫描连接"也卡死（日志三次 connect 全被"复用其 Promise"卡住）。修复：加 3s 超时，
+        //   超时即强制接管（清 _reconnecting 令牌自己连），用户手动意图必须优先于卡死的自动重连。
+        if (this._reconnecting && this._reconnectPromise) {
+          console.log('[Store] connect: 检测到进行中的重连，最多等 3s 收口')
+          try {
+            await Promise.race([
+              this._reconnectPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error('RECONNECT_TIMEOUT')), 3000))
+            ])
+            if (this.connected && this.deviceId === deviceId) {
+              console.log('[Store] connect: 进行中的重连已连上本设备，直接复用')
+              return
+            }
+          } catch (e) {
+            // 超时或重连失败：强制接管，自己重新连
+            console.log('[Store] connect: 重连未及时收口(' + (e?.message || 'fail') + ')，强制接管重新连')
+          }
+          // ★ 强制接管：清掉卡死的重连令牌，让本次 connect 自己发起 createBLEConnection
+          this._reconnecting = false
+          this._reconnectPromise = null
+        }
+
         this._restoreConfig()  // ★ 确保连接前配置已恢复
         /* ★ v3.15-#20: 销毁旧监听器后重新注册（防止跨连接残留）
          *   _destroyGlobalListeners() 会设 _listenersInited=false，
@@ -3031,13 +3258,17 @@ export const useBleStore = defineStore('ble', {
         this._destroyGlobalListeners()
         this._ensureGlobalListeners()  // ★ v3.6: 确保全局监听器已注册
 
+        // ★ 2026-08-16：手动 connect 视为「接管」重连令牌，先把 _reconnecting 置真，
+        //   防止 connect() 与 _doReconnect 后续再并发（connect() 自身也会 await 长连接）
+        this._reconnecting = true
+        this._reconnectGuard++
+
         // ★ v3.6-fixE: 用户手动连接时，清除所有自动重连状态（防止冲突）
         if (this._reconnectTimer) {
           clearTimeout(this._reconnectTimer)
           this._reconnectTimer = null
         }
         this._resetReconnectCounters()
-        this._reconnectGuard++
         // ★ 方案A（2026-07-12 修正②）：用户主动连接即清除「未绑定超时被踢」抑制标记，
         //   恢复后续自动重连（配合 _shouldAutoReconnect 的持久化兜底）。
         this._unboundTimeoutKicked = false
@@ -3122,10 +3353,14 @@ export const useBleStore = defineStore('ble', {
         //   幂等守卫（_connFinalizedFor）保证同一连接只初始化一遍。
         this._finalizeConnection(deviceId)
 
+        // ★ 2026-08-16：手动 connect 成功，复位 _reconnecting 令牌，允许后续异常断连自动重连
+        this._reconnecting = false
         return true
       } catch (err) {
         console.error('[Store] 连接流程失败', err)
         this.connected = false
+        // ★ 2026-08-16：失败也复位令牌，避免永久阻塞自动重连
+        this._reconnecting = false
         throw err
       }
     },
@@ -3529,6 +3764,14 @@ export const useBleStore = defineStore('ble', {
     },
 
     _handleStatusNotify(jsonStr) {
+      // ★ 2026-08-17: 记录最近一次真实 FF02 到达时间戳，供 _repairConnection 轻量恢复
+      //   探测"FF02 是否真恢复"使用。不能用 statusStale（会被 _resetStatusStaleTimer 清掉，
+      //   导致探测恒为假阳性）。此时间戳是"链接真活"的权威证据，与 FF02 实时流量同源。
+      this._lastFf02At = Date.now()
+      // ★ 2026-08-17 (P-FF02): FF02 已真实到达 → 取消到达验证看门狗并清零连续静默计数
+      if (this._ff02ArrivalTimer) { clearTimeout(this._ff02ArrivalTimer); this._ff02ArrivalTimer = null }
+      this._ff02ProbeRunning = false
+      this._ff02SilentRepairs = 0
       const jsons = jsonStr.replace(/\}\{/g, '}\x00{').split('\x00')
       for (const item of jsons) {
         if (!item.trim()) continue
@@ -3800,7 +4043,10 @@ export const useBleStore = defineStore('ble', {
           this._repairConnection()
         }
         this._statusStaleTimer = null
-      }, 3000)  // 3s = 3 × 固件 1s 推送周期，留足余量
+      }, 8000)  // ★ 2026-08-16: 3s→8s。3s 太激进——固件在 AUTH/配置下发/命令处理期间会暂停 FF02
+      //   推送（日志 23:56:36 AUTH:OK → 43.6 超时，~7s 没 FF02 但连接完全正常），3s 超时把"固件忙"
+      //   误判成"链接死"→ _repairConnection 误拆好链 → 断连循环。8s 给固件充足处理窗口，
+      //   仍 < 固件 30s 未-AUTH 强断窗，且 _repairConnection 有 _repairing 豁免自伤。
     },
 
     /**
@@ -3830,16 +4076,77 @@ export const useBleStore = defineStore('ble', {
         if (typeof this._scheduleReconnect === 'function') this._scheduleReconnect(0)
         return
       }
+      // ★ 2026-08-17 (P-FF02): await _verifyConnection 期间另一路 _repairConnection 可能已接管
+      //   （探测看门狗 与 8s 状态看门狗 都可能触发，两路都能通过入口 _repairing 检查），
+      //   这里二次检查防"双重建并发"。
+      if (this._repairing) {
+        console.log('[Store] _repairConnection: 检测到并发重建进行中，本次跳过')
+        return
+      }
       this._repairing = true
-      console.warn('[Store] ⚠ 连接存活但状态过期 → 强制重建 GATT 上下文以恢复 FF02 订阅')
+      console.warn('[Store] ⚠ 连接存活但状态过期 → 先尝试轻量恢复 FF02 订阅（不拆链）')
       try {
-        // 1) 拆掉可能陈旧的 GATT 上下文（未连接时 close 报错，忽略即可）
+        // ★ 2026-08-17 关键修复（来自 00:00:50 日志复盘）：
+        //   旧逻辑直接 closeBLEConnection 拆链重建——但"FF02 超时"大多数时候不是链接死，而是
+        //   固件忙(AUTH/命令处理)暂停推送，或 CCCD 被 Doze 重置。拆链重建风险极高：重建失败
+        //   (status:8)会把好连接拆成断连且无法恢复。改为两阶段：
+        //   ① 轻量恢复：不拆链，只重新 enableStatusNotify（重设 CCCD=0x0001）+ 重武装看门狗，
+        //      等 3s 看 FF02 是否恢复。大多数场景这一步就够（CCCD 重置后 FF02 立即恢复）。
+        //   ② 仅当轻量恢复失败（3s 后仍无 FF02）才拆链重建（高风险手段，最后才用）。
+        this._resetStatusStaleTimer()  // 重武装 8s 看门狗
+        await this._enableStatusNotify()
+        // 等 3s 看 FF02 是否真恢复
+        // ★ 2026-08-17 修正：改用 _lastFf02At 时间戳判断，而非 statusStale。
+        //   旧探测用 `if (!this.statusStale)`——但 statusStale 在上一行 _resetStatusStaleTimer()
+        //   已被清成 false，导致探测循环 200ms 后恒判"恢复成功"，FF02 实际根本没恢复 →
+        //   假阳性 → 跳过拆链 → 8s 后又超时 → 真断连。现记录探测起点 _lastFf02At，若期间
+        //   收到新的 FF02（时间戳前移）才判真恢复。
+        const _probeStart = this._lastFf02At || 0
         await new Promise((resolve) => {
-          try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (e) { resolve() }
+          const _t = setTimeout(() => { resolve() }, 3000)
+          const _probe = setInterval(() => {
+            if (!this.connected) { clearInterval(_probe); clearTimeout(_t); resolve(); return }
+            if ((this._lastFf02At || 0) > _probeStart) {
+              clearInterval(_probe); clearTimeout(_t); resolve()
+            }
+          }, 200)
+          setTimeout(() => clearInterval(_probe), 3500)
         })
+        if (!this.connected) {
+          console.warn('[Store] 轻量恢复期间连接已断，跳过拆链重建（交由断连流程）')
+          return
+        }
+        if ((this._lastFf02At || 0) > _probeStart) {
+          console.warn('[Store] ✓ 轻量恢复成功（FF02 已恢复），跳过拆链重建')
+          return
+        }
+        // 轻量恢复失败：FF02 仍死，才走高风险拆链重建
+        // ★ 2026-08-17 (P-FF02): 连续多次拆链重建仍无 FF02 → 停止暴力拆链（耗电且无效），
+        //   交给常规断连/重连兜底，日志明确提示方向（固件未推送 / ROM 底层问题）。
+        if (this._ff02SilentRepairs >= 3) {
+          console.error('[FF02] ❌ 连续多次拆链重建仍无 FF02，停止自愈拆链（等待固件超时断连 / 手动重连，需抓固件串口定界）')
+          return
+        }
+        console.warn('[Store] ⚠ 轻量恢复失败（3s 仍无 FF02），拆链重建 GATT 上下文')
+        // 1) 拆掉可能陈旧的 GATT 上下文（未连接时 close 报错，忽略即可）
+        // ★ 2026-08-16: _repairing=true 已让全局监听器豁免本次 close 触发的断连事件（见 L650），
+        //   避免"自己拆链→被自己当故障→重连→又拆"的循环。
+        // ★ 2026-08-17 硬超时：complete 在 Android 上可能不回调 → 本 await 永久 pending →
+        //   _repairConnection 卡死在拆链 → _repairing 永不释放 → 后续所有自愈被挡。加 2s 超时。
+        await Promise.race([
+          new Promise((resolve) => {
+            try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (e) { resolve() }
+          }),
+          new Promise((resolve) => setTimeout(() => {
+            console.warn('[Store] _repairConnection: closeBLEConnection 硬超时(2s)，强制放行拆链')
+            resolve()
+          }, 2000))
+        ])
         await new Promise(r => setTimeout(r, 400))
         // 2) 全新连接（获取新鲜 GATT 句柄）
         this.connected = false
+        // ★ 2026-08-16: 清幂等守卫，允许 _finalizeConnection 重新初始化（重建 = 新会话）
+        this._connFinalizedFor = null
         await this._connectWithResetFallback(targetId)
         // 3) 统一收尾：重新 enable FF02/Battery Notify + 读序列号等
         this._finalizeConnection(targetId)

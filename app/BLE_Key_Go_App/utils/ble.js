@@ -94,15 +94,25 @@ function _maybeGuidePropertyNotSupport(err) {
  */
 export function getBluetoothAdapterState() {
   return new Promise((resolve) => {
+    let settled = false
+    const settle = (v) => { if (settled) return; settled = true; clearTimeout(hardTimer); resolve(v) }
+    // ★ 2026-08-17 硬超时：uni.getBluetoothAdapterState 在 Android 上可能静默挂起
+    //   （既不 success 也不 fail）→ _checkBluetoothState 永久 pending → _doReconnect 卡死 →
+    //   手动 connect 3s 接管但自动重连路径永久停摆。超时按 available=true 保守放行，
+    //   宁可让连接流程继续（后续 connectDevice 自带 18s 硬超时兜底），不可卡死。
+    const hardTimer = setTimeout(() => {
+      console.warn('[BLE] 获取适配器状态 硬超时(2s)，按 available=true 保守放行')
+      settle({ available: true, discovering: false })
+    }, 2000)
     uni.getBluetoothAdapterState({
       success: (res) => {
         console.log('[BLE] 适配器状态:', JSON.stringify(res))
-        resolve({ available: res.available, discovering: res.discovering })
+        settle({ available: res.available, discovering: res.discovering })
       },
       fail: (err) => {
         // 适配器未初始化时 available=false
         console.warn('[BLE] 获取适配器状态失败:', err?.errMsg || err)
-        resolve({ available: false, discovering: false })
+        settle({ available: false, discovering: false })
       }
     })
   })
@@ -731,12 +741,16 @@ export function connectDevice(deviceId) {
     const finish = (fn) => { if (!settled) { settled = true; clearTimeout(hardTimer); fn() } }
     /* ★ 硬超时兜底（2026-07-30）：部分 Android 在「蓝牙开关循环」后，uni.createBLEConnection 的
      *   timeout 选项不生效——既不 success 也不 fail，Promise 永久不 settle → 调用方(_doReconnect 重连循环
-     *   / 手动连接 uni.showLoading)卡死，只能重启 App 恢复。这里强制 12s 后 reject，确保无论链路状态
-     *   如何都能收口，让上层重试或收起 loading。12s > 平台 10s，正常超时仍由 fail 优先处理。 */
+     *   / 手动连接 uni.showLoading)卡死，只能重启 App 恢复。这里强制 Ns 后 reject，确保无论链路状态
+     *   如何都能收口，让上层重试或收起 loading。
+     *   ★ 2026-08-16 调整：12s → 18s。日志复盘(23:21:43~23:22:03)显示 createBLEConnection 在 Android 上
+     *   对"刚被软重置/设备重启"的连接需要更长时间，12s 内 Promise 未 resolve 但底层其实连上了(23:22:03 连上)；
+     *   过短硬超时误杀 → 上层又重置适配器打断 connect → 恶性循环。18s 给足窗口，减少误杀。仍 > 平台 timeout(10s)。 */
+    const HARD_TIMEOUT_MS = 18000
     const hardTimer = setTimeout(() => {
-      console.warn('[BLE] createBLEConnection 硬超时(12s)，强制收口', deviceId)
+      console.warn('[BLE] createBLEConnection 硬超时(' + (HARD_TIMEOUT_MS/1000) + 's)，强制收口', deviceId)
       finish(() => reject(new Error('CONNECT_HARD_TIMEOUT')))
-    }, 12000)
+    }, HARD_TIMEOUT_MS)
     stopScan()
       .catch(() => {})  // ★ v3.6: 防止 stopScan reject 导致 Promise 链断裂
       .then(() => {
@@ -896,9 +910,19 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
   //   极不友好（跨过冷窗口很慢）。NONCE/AUTH 等连接早期写应传 retries:0，把重试节奏交给上层
   //   密集快速重试（见 stores/ble.js _requestNonce），更快命中热窗口。
   const _retries = (opts && typeof opts.retries === 'number') ? opts.retries : _WRITE_10007_RETRIES
+  // ★ 2026-08-17 硬超时：uni.writeBLECharacteristicValue 在 Android 上可能"既不 success 也不 fail"
+  //   静默挂起 → 本 Promise 永不 settle。若它经 enqueueWrite 入 _gattChain，后续所有 GATT 操作
+  //   全部排队永久等待 → "一直连接中"。加 4s 硬超时强制收口放行队列（覆盖内部重试总时长）。
+  const _hardTimeout = (opts && typeof opts.hardTimeout === 'number') ? opts.hardTimeout : 4000
   return new Promise((resolve, reject) => {
     // 将字符串转为 ArrayBuffer
     const buffer = stringToArrayBuffer(value)
+    let settled = false
+    const settle = (fn) => { if (settled) return; settled = true; clearTimeout(hardTimer); fn() }
+    const hardTimer = setTimeout(() => {
+      console.warn(`[BLE] 写入硬超时(${_hardTimeout}ms) 强制收口: ${value}`)
+      settle(() => reject(new Error('WRITE_HARD_TIMEOUT')))
+    }, _hardTimeout)
     // ★ 2026-07-18: 抽成 _attempt，使 10007 可重试。10007=OS 本地拒绝(未发往固件)，重试安全。
     const _attempt = (tryNo) => {
       uni.writeBLECharacteristicValue({
@@ -910,7 +934,7 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
           console.log(`[BLE] 写入成功: ${value}`)
           // ★ 不在成功时重置 _propNotSupportAt，否则「成功一次又失败 10007」会反复弹窗。
           //   冷却由时间戳控制；恢复后若真再失败也最多 60s 提示一次。
-          resolve()
+          settle(() => resolve())
         },
         fail: (err) => {
           // ★ 2026-07-14 诊断：把特征值 UUID 与值前缀一并打出，定位"property not support"(10007)
@@ -934,7 +958,7 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
             return
           }
           _maybeGuidePropertyNotSupport(err)
-          reject(err)
+          settle(() => reject(err))
         }
       })
     }
@@ -950,16 +974,24 @@ export function writeBLECharacteristicValue(deviceId, serviceId, characteristicI
  */
 export function readBLECharacteristicValue(deviceId, serviceId, characteristicId) {
   return new Promise((resolve, reject) => {
+    let settled = false
+    const settle = (fn) => { if (settled) return; settled = true; clearTimeout(hardTimer); fn() }
+    // ★ 2026-08-17 硬超时：uni.readBLECharacteristicValue 同样可能在 Android 上静默挂起，
+    //   防止经 enqueueRead 入 _gattChain 后卡死整条链。
+    const hardTimer = setTimeout(() => {
+      console.warn(`[BLE] 读取硬超时(3s) 强制收口: ${characteristicId}`)
+      settle(() => reject(new Error('READ_HARD_TIMEOUT')))
+    }, 3000)
     uni.readBLECharacteristicValue({
       deviceId,
       serviceId,
       characteristicId,
       success: (res) => {
-        resolve(res)
+        settle(() => resolve(res))
       },
       fail: (err) => {
         // ★ uni-app 错误对象格式不统一，包装成标准 Error
-        reject(new Error(err?.errMsg || err?.message || JSON.stringify(err)))
+        settle(() => reject(new Error(err?.errMsg || err?.message || JSON.stringify(err))))
       }
     })
   })
@@ -979,6 +1011,17 @@ export function notifyBLECharacteristicValueChange(deviceId, serviceId, characte
   //   → 10007 property not support。证据：首连也撞 10007，且每次 10007 都落在 Notify 使能的飞行窗口内。
   //   现纳入 enqueueWrite 队列，与所有写/读串行，10007 从源头消失。
   return enqueueWrite(() => new Promise((resolve, reject) => {
+    let settled = false
+    const settle = (fn) => { if (settled) return; settled = true; clearTimeout(hardTimer); fn() }
+    // ★ 2026-08-17 硬超时：uni.notifyBLECharacteristicValueChange（CCCD descriptor 写）在
+    //   Android 上曾出现"既不 success 也不 fail"静默挂起 → 本 Promise 永不 settle →
+    //   它经 enqueueWrite 入 _gattChain 后，后续所有 write/read（NONCE/AUTH/命令）
+    //   全部排队永久等待 → 表现为"一直连接中/连接后无响应"。加 3s 硬超时强制收口，
+    //   即使超时也要放行队列，宁可走上层自愈（重订阅/拆链），不可卡死整条链。
+    const hardTimer = setTimeout(() => {
+      console.warn(`[BLE] Notify ${enable ? '启用' : '关闭'} 硬超时(3s)，强制收口放行队列`)
+      settle(() => reject(new Error('NOTIFY_HARD_TIMEOUT')))
+    }, 3000)
     uni.notifyBLECharacteristicValueChange({
       deviceId,
       serviceId,
@@ -986,11 +1029,11 @@ export function notifyBLECharacteristicValueChange(deviceId, serviceId, characte
       state: enable,
       success: () => {
         console.log(`[BLE] Notify ${enable ? '启用' : '关闭'} 成功`)
-        resolve()
+        settle(() => resolve())
       },
       fail: (err) => {
         console.error('[BLE] Notify 操作失败', err)
-        reject(err)
+        settle(() => reject(err))
       }
     })
   }))
