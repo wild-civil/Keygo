@@ -2919,6 +2919,9 @@ export const useBleStore = defineStore('ble', {
       this._configWriteBusy = true
       try {
         // ★ v3.27-fix ②: 经写队列串行化，与手动命令共用同一 GATT 通道，避免并发写冲突
+        // ★ 2026-08-17: 传 retries:0（关底层 400ms×2 阻塞重试），AUTH:OK 后 FF01 写通道也可能仍冷，
+        //   改由底层 10007 失败后立返、交由本层密集重试（与 FF03 的 _doPushRssi 同源策略）。
+        //   否则每笔撞窗写阻塞 800ms 才 reject，节奏过慢。
         await enqueueWrite(() => sendConfig(this.deviceId, {
           unlock: this.unlockThreshold,
           lock: this.lockThreshold,
@@ -2930,7 +2933,7 @@ export const useBleStore = defineStore('ble', {
           // ★ v3.24: 手动模式下发 autolock=0 禁用固件 RSSI 自动锁；其余模式 autolock=1 启用
           autolock: this.autoReconnectMode === 'manual' ? 0 : 1,
           // ★ v3.12: cooldown_ms 不下发 — 设备级参数，由固件 DataFlash 管理
-        }))
+        }, { retries: 0 }))
         this._configPushedThisConn = true   // ★ 2026-07-14: 标记本连接已成功下发，后续重复调用直接跳过
         console.log('[Store] 配置已下发到设备 (unlock=' + this.unlockThreshold + ' lock=' + this.lockThreshold + ' uc=' + this.unlockCountRequired + ' lc=' + this.lockCountRequired + ' interval=' + this.rssiReadPeriodMs + ' kr=' + this.kalmanR + ' autolock=' + (this.autoReconnectMode === 'manual' ? 0 : 1) + ')')
       } catch (e) {
@@ -4892,19 +4895,21 @@ export const useBleStore = defineStore('ble', {
       //      正解: 事件驱动串行——等 FF01 真正落地后再延 250ms 发 FF03，FF03 永远在 FF01 写完后发，
       //      绝不抢窗口，与系统热身速度无关。
       const _targetId = this.deviceId
-      setTimeout(async () => {
-        if (this.deviceId !== _targetId || !this.connected) {
-          this._postAuthWritesInFlight = false
-          return
-        }
-        try {
-          await this._pushRssiThresholds()
-        } finally {
-          // ★ 第七刀: FF03 落地(成功/失败均算) → 整条 AUTH:OK 后下发链收尾，
-          //   放行电池兜底读取去占用 GATT 事务槽。
-          this._postAuthWritesInFlight = false
-        }
-      }, 250)
+      // ★ 2026-08-17 修复: 去掉原 FF01 成功后固定 250ms 延时再发 FF03(RSSISET)。
+      //   根因: FF01 与 FF03 是两条不同特征值，Android 对它们的 WRITE 属性缓存【分别刷新、不同步】。
+      //   250ms 固定延时赌"FF01 热了 FF03 也热"，赌输就撞冷窗 10007，再靠 _doPushRssi 密集重试兜（又花 ~1.6s）。
+      //   日志实证: 第一次连接 FF01 在 25.095 成功，但 250ms 后的 RSSISET 25.364 起连撞 11 次 10007 到 27.005。
+      //   正解: _doPushRssi 自身已是 150ms×30 密集重试覆盖冷窗，故去掉前置延时、立即发射，
+      //   让密集重试从"FF01 落地这一刻"就开始覆盖 FF03 冷窗，命中即返回（比 NONCE 路径更同步）。
+      //   去重(_lastPushed* 未变则 skip)逻辑不变，不影响重连阈值跟随。
+      //   （保留微 0ms 直接调用；若后续实测 FF03 与 FF01 强相关可再调，但日志证明独立冷却故不延时更安全。）
+      try {
+        await this._pushRssiThresholds()
+      } finally {
+        // ★ 第七刀: FF03 落地(成功/失败均算) → 整条 AUTH:OK 后下发链收尾，
+        //   放行电池兜底读取去占用 GATT 事务槽。
+        this._postAuthWritesInFlight = false
+      }
     },
 
     // ★ 2026-08-13 第七刀: 返回 Promise（跳过时返回已 resolve），使 _flushPostAuthWrites 可 await 到落地。

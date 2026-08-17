@@ -1097,7 +1097,7 @@ export function onBLECharacteristicValueChange(callback) {
  * @param {string} deviceId
  * @param {object} config { unlock, lock, uc, lc, interval, dlock }
  */
-export async function sendConfig(deviceId, config) {
+export async function sendConfig(deviceId, config, opts = {}) {
   const parts = []
   if (config.rssi !== undefined) parts.push(`rssi=${config.rssi}`)
   if (config.unlock !== undefined) parts.push(`unlock=${config.unlock}`)
@@ -1124,7 +1124,8 @@ export async function sendConfig(deviceId, config) {
     deviceId,
     BLE_CONFIG.serviceUUID,
     BLE_CONFIG.configCharUUID,
-    value
+    value,
+    opts
   )
 }
 
