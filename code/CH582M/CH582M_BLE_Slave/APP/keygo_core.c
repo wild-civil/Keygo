@@ -1022,14 +1022,15 @@ void KeyGo_NotifyStatus(void)
                                     noti.len, NULL, 0);
         if (noti.pValue) {
             tmos_memcpy(noti.pValue, json, noti.len);
-            if (simpleProfile_Notify(peripheralConnList.connHandle, &noti) != SUCCESS) {
+            bStatus_t notiSt = simpleProfile_Notify(peripheralConnList.connHandle, &noti);
+            if (notiSt != SUCCESS) {
                 GATT_bm_free((gattMsg_t *)&noti, ATT_HANDLE_VALUE_NOTI);
                 /* ── [NOTIFY-NOISE-FIX] 2026-07-21 (v3.36.2-fix-2) ──
                  * 无订阅(无App OS重连)时 simpleProfile_Notify 必失败；原「重试6次+刷屏 PRINT」
                  * 是噪点。暂注释掉重试与 PRINT，改为单次静默失败：
                  *   有订阅(App模式)首发即成功，无需重试；无固定订阅时失败属预期，不重试不打印。
                  * ★ 若日后需恢复瞬时失败(ATT忙/bm_alloc失败)兜底，应改成「按返回码区分」：
-                 *   bleIncorrectMode(0x17,未订阅)→不重试；blePending/bleMemAllocError→保留重试。
+                 *   bleIncorrectMode(0x12,未订阅)→不重试；blePending(0x16)/bleMemAllocError(0x13)→保留重试。
                  *   不要整体恢复本块，否则噪点回归。
                 if (s_statusRetry < 6) {
                     s_statusRetry++;
@@ -1037,8 +1038,16 @@ void KeyGo_NotifyStatus(void)
                     PRINT("[STATUS] notify fail, retry=%d\n", s_statusRetry);
                 }
                 */
+                /* ★ 2026-08-17 [FF02诊断]: 打印 FF02 发送失败 + 返回码，定界「CCCD 未使能 vs ATT 忙」。
+                 *   返回码: 0=SUCCESS(不会走这) 0x12=bleIncorrectMode(CCCD未使能) 0x16=blePending(忙) 0x13=bleMemAllocError。 */
+                PRINT("[FF02] NOTIFY FAIL ret=%02X %s\n", notiSt,
+                      (notiSt == bleIncorrectMode) ? "(CCCD未使能)" :
+                      (notiSt == blePending)        ? "(ATT忙)" :
+                      (notiSt == bleMemAllocError)  ? "(分配失败)" : "");
             } else {
                 s_statusRetry = 0;
+                /* ★ 2026-08-17 [FF02诊断]: 打印 FF02 发送成功。注意会每 ~1s 刷一条，定位阶段可接受。 */
+                PRINT("[FF02] SENT ok len=%d\n", n);
             }
         }
     }

@@ -902,6 +902,11 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
     gapTerminateLinkEvent_t *event = (gapTerminateLinkEvent_t *)pEvent;
 
     if (event->connectionHandle == peripheralConnList.connHandle) {
+        /* ★ 2026-08-17 [FF02诊断]: 打印断连原因码，定界"谁主动断链"。
+         *   reason 常见值: 0x08=连接超时(Android/链路掉线) 0x13=对端主动断开 0x16=本地主动终止 0x22=LL resp timeout。
+         *   若 FF02 静默后断连且 reason=0x08，指向链路/连接参数问题；0x13 指向 Android 主动。 */
+        PRINT("[LINK] TERMINATED reason=%02X handle=%04X\n",
+              event->reason, event->connectionHandle);
         g_deviceConnected        = 0;
 
         peripheralConnList.connHandle       = GAP_CONNHANDLE_INIT;

@@ -479,6 +479,14 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
             case GATT_CLIENT_CHAR_CFG_UUID:  // FF02 CCCD
                 status = GATTServApp_ProcessCCCWriteReq(connHandle, pAttr, pValue, len,
                                                         offset, GATT_CLIENT_CFG_NOTIFY);
+                /* ★ 2026-08-17 [FF02诊断]: 打印 App 写的 CCCD 到没到固件、值是多少、处理结果。
+                 *   关键定界点: App 日志"Notify 启用成功" ≠ 固件收到 CCCD 写。
+                 *   - 有 [CCCD] WRITE val=0001 → 写到了，使能成功;
+                 *   - 无 [CCCD] WRITE → App 的 CCCD 写被 Android 吞了（App 侧 GATT 上下文问题）。 */
+                PRINT("[FF02] [CCCD] WRITE h=%04X len=%d val=%04X status=%d\n",
+                      pAttr->handle, len,
+                      (len >= 2) ? (uint16_t)(pValue[0] | (pValue[1] << 8)) : 0,
+                      (int)status);
                 break;
 
             default:
@@ -510,6 +518,10 @@ static void simpleProfile_HandleConnStatusCB(uint16_t connHandle, uint8_t change
         if ((changeType == LINKDB_STATUS_UPDATE_REMOVED) ||
             ((changeType == LINKDB_STATUS_UPDATE_STATEFLAGS) && (!linkDB_Up(connHandle))))
         {
+            /* ★ 2026-08-17 [FF02诊断]: 断连时固件清空该连接 CCCD。打印确认。
+             *   若"FF02 静默"恰好发生在某次断连重连后 CCCD 没被重新使能，这里能看到清空时机。 */
+            PRINT("[FF02] [CCCD] LINK REMOVED, clear cfg conn=%x changeType=%d\n",
+                  connHandle, changeType);
             GATTServApp_InitCharCfg(connHandle, simpleProfileChar2Config);
         }
     }
