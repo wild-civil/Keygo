@@ -4084,15 +4084,23 @@ export const useBleStore = defineStore('ble', {
         return
       }
       this._repairing = true
-      console.warn('[Store] ⚠ 连接存活但状态过期 → 先尝试轻量恢复 FF02 订阅（不拆链）')
+      console.warn('[Store] ⚠ 连接存活但状态过期 → 轻量恢复 FF02 订阅（不拆链）')
       try {
-        // ★ 2026-08-17 关键修复（来自 00:00:50 日志复盘）：
+        // ★ 2026-08-17 关键修复（来自 00:00:50 日志复盘 + 14:22:54 实验复盘）：
         //   旧逻辑直接 closeBLEConnection 拆链重建——但"FF02 超时"大多数时候不是链接死，而是
         //   固件忙(AUTH/命令处理)暂停推送，或 CCCD 被 Doze 重置。拆链重建风险极高：重建失败
-        //   (status:8)会把好连接拆成断连且无法恢复。改为两阶段：
-        //   ① 轻量恢复：不拆链，只重新 enableStatusNotify（重设 CCCD=0x0001）+ 重武装看门狗，
-        //      等 3s 看 FF02 是否恢复。大多数场景这一步就够（CCCD 重置后 FF02 立即恢复）。
-        //   ② 仅当轻量恢复失败（3s 后仍无 FF02）才拆链重建（高风险手段，最后才用）。
+        //   (status:8)会把好连接拆成断连且无法恢复。
+        //
+        // ★★ 2026-08-17 实验铁律（14:22:54 手动重连 vs 复位重连对比）：
+        //   _verifyConnection 已经通过「GATT 回退验证」确认连接是活的（GATT 通道通），
+        //   此时 FF02 静默【绝不是链接死】，而是①固件 simpleProfile_Notify 因 ATT 忙静默失败
+        //   （固件侧 NOTIFY-NOISE-FIX 注释掉了重试，失败就丢了，下一拍 1s 后才会再来），
+        //   或②Android 端 CCCD 被静默重置。这两种情况拆链重建都是错的：
+        //     - 情况①：拆链解决不了 ATT 忙，反而把好连接拆断 → close 活连接后重连必 status:8。
+        //     - 情况②：重订阅 CCCD 即可恢复，无需拆链。
+        //   实验铁证：14:23:20.605「连接正常（GATT 回退验证）」→ 14:23:23.646 拆链 →
+        //   14:23:32.829 createBLEConnection status:8 失败 → 好连接被误拆成断连，折腾 10s+。
+        //   结论：只要 _verifyConnection 判活，就【永不拆链】，只用重订阅+耐心等待。
         this._resetStatusStaleTimer()  // 重武装 8s 看门狗
         await this._enableStatusNotify()
         // 等 3s 看 FF02 是否真恢复
@@ -4113,46 +4121,24 @@ export const useBleStore = defineStore('ble', {
           setTimeout(() => clearInterval(_probe), 3500)
         })
         if (!this.connected) {
-          console.warn('[Store] 轻量恢复期间连接已断，跳过拆链重建（交由断连流程）')
+          console.warn('[Store] 轻量恢复期间连接已断，交由断连流程')
           return
         }
         if ((this._lastFf02At || 0) > _probeStart) {
-          console.warn('[Store] ✓ 轻量恢复成功（FF02 已恢复），跳过拆链重建')
+          console.warn('[Store] ✓ 轻量恢复成功（FF02 已恢复）')
           return
         }
-        // 轻量恢复失败：FF02 仍死，才走高风险拆链重建
-        // ★ 2026-08-17 (P-FF02): 连续多次拆链重建仍无 FF02 → 停止暴力拆链（耗电且无效），
-        //   交给常规断连/重连兜底，日志明确提示方向（固件未推送 / ROM 底层问题）。
-        if (this._ff02SilentRepairs >= 3) {
-          console.error('[FF02] ❌ 连续多次拆链重建仍无 FF02，停止自愈拆链（等待固件超时断连 / 手动重连，需抓固件串口定界）')
-          return
-        }
-        console.warn('[Store] ⚠ 轻量恢复失败（3s 仍无 FF02），拆链重建 GATT 上下文')
-        // 1) 拆掉可能陈旧的 GATT 上下文（未连接时 close 报错，忽略即可）
-        // ★ 2026-08-16: _repairing=true 已让全局监听器豁免本次 close 触发的断连事件（见 L650），
-        //   避免"自己拆链→被自己当故障→重连→又拆"的循环。
-        // ★ 2026-08-17 硬超时：complete 在 Android 上可能不回调 → 本 await 永久 pending →
-        //   _repairConnection 卡死在拆链 → _repairing 永不释放 → 后续所有自愈被挡。加 2s 超时。
-        await Promise.race([
-          new Promise((resolve) => {
-            try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (e) { resolve() }
-          }),
-          new Promise((resolve) => setTimeout(() => {
-            console.warn('[Store] _repairConnection: closeBLEConnection 硬超时(2s)，强制放行拆链')
-            resolve()
-          }, 2000))
-        ])
-        await new Promise(r => setTimeout(r, 400))
-        // 2) 全新连接（获取新鲜 GATT 句柄）
-        this.connected = false
-        // ★ 2026-08-16: 清幂等守卫，允许 _finalizeConnection 重新初始化（重建 = 新会话）
-        this._connFinalizedFor = null
-        await this._connectWithResetFallback(targetId)
-        // 3) 统一收尾：重新 enable FF02/Battery Notify + 读序列号等
-        this._finalizeConnection(targetId)
-        console.warn('[Store] ✓ GATT 上下文已重建，FF02 订阅应已恢复')
+        // ★★ 2026-08-17 实验铁律落地：连接已确认存活（_verifyConnection 判活才走到这里），
+        //   FF02 静默 = 固件 ATT 忙丢通知 或 CCCD 重置，【拆链重建是错误解法】——
+        //   close 活连接后重连必 status:8（实验 14:23:32.829 铁证），会把好连接拆成断连。
+        //   正确做法：不再拆链，仅重武装看门狗继续耐心等待。若固件一直静默到 30s 强断，
+        //   会自然触发 onBLEConnectionStateChange(false) → 常规重连（复位后 FF02 恢复，
+        //   第二次连接 14:23:37 一枪过就是证据）。
+        console.warn('[Store] ⚠ FF02 3s 未恢复但连接存活（GATT 已验活）→ 不拆链，重武装看门狗耐心等待固件恢复')
+        this._resetStatusStaleTimer()
+        return
       } catch (e) {
-        console.warn('[Store] ⚠ GATT 重建失败，交由常规重连处理:', e?.message || e)
+        console.warn('[Store] ⚠ 轻量恢复异常，交由常规重连处理:', e?.message || e)
         this.connected = false
         this.statusStale = true
         if (typeof this._scheduleReconnect === 'function') this._scheduleReconnect(0)
