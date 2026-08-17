@@ -1695,7 +1695,7 @@ export const useBleStore = defineStore('ble', {
           //   ② 主动在当前 GATT 上下文重开 FF02/Battery Notify：CCCD 仅被重置时即可恢复，
           //      无需全量拆链；若 GATT 上下文本身已死，①的看门狗会兜底全量重建。
           this._resetStatusStaleTimer()
-          this._enableStatusNotify()
+          this._enableStatusNotify({ recoveryOnly: true })
           return true
         }
         // ★ 2026-07-30 修复: 系统列表查不到，可能 mp-weixin getConnectedBluetoothDevices 漏报。
@@ -1705,7 +1705,7 @@ export const useBleStore = defineStore('ble', {
         if (alive) {
           console.log('[Store] _verifyConnection: RSSI 仍活，连接正常')
           this._resetStatusStaleTimer()
-          this._enableStatusNotify()
+          this._enableStatusNotify({ recoveryOnly: true })
           return true
         }
         // 设备不在系统已连接列表且 RSSI 已死 → 连接已失效
@@ -1723,7 +1723,7 @@ export const useBleStore = defineStore('ble', {
           console.log('[Store] _verifyConnection: 连接正常（GATT 回退验证）')
           // ★ v3.25-fix3: 同上，恢复 FF02 Notify 并武装看门狗（见系统级验证分支）
           this._resetStatusStaleTimer()
-          this._enableStatusNotify()
+          this._enableStatusNotify({ recoveryOnly: true })
           return true
         } catch (e2) {
           const msg = e2?.message || String(e2)
@@ -2272,17 +2272,33 @@ export const useBleStore = defineStore('ble', {
      *   确认连接仍活着后主动重开（Doze/后台使 CCCD 失效时的恢复手段）。
      *   GATT 上下文健康时此调用幂等（重设 CCCD=0x0001，无害）；上下文本身已死时
      *   静默失败，由 _repairConnection 的看门狗兜底做全量重建。
+     *
+     * ★★ 2026-08-17 重订阅风暴修复：新增 opts.recoveryOnly。
+     *   自愈路径（_repairConnection / _verifyConnection 判活后的重开）若仍走「订阅→读电池→
+     *   arm探测→触发AUTH」全流程，会导致 FF02 静默时这些副作用反复挤压 GATT 事务槽，
+     *   与正在进行的 NONCE/AUTH 抢通道 → 10007 → 绑定验证更慢/断开不好连。
+     *   recoveryOnly=true 时【只做纯 CCCD 重订阅】：
+     *     - 不触发 _maybeAutoAuth（AUTH 要么已完成、要么正在跑，重订阅只是恢复 FF02 通道，
+     *       绝不能再发起一轮 NONCE→AUTH 去抢槽）；
+     *     - 不读电池（避免 GATT read 抢通道）；
+     *     - 不 arm 探测（避免再挂 3s 定时器 → 再触发 _repairConnection 的递归风暴）。
+     *   _statusNotifyReady 仍置 true（订阅请求已提交），真正的 FF02 恢复由调用方用
+     *   _lastFf02At 时间戳判定。
      */
-    async _enableStatusNotify() {
+    async _enableStatusNotify(opts = {}) {
       const targetId = this.deviceId
       if (!targetId || !this.connected) return
+      const recoveryOnly = !!opts.recoveryOnly
       try {
         await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
-        notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
-        this._fetchBatteryLevel(targetId).catch(() => {})
+        if (!recoveryOnly) {
+          notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
+          this._fetchBatteryLevel(targetId).catch(() => {})
+        }
         // ★ 2026-07-12: FF02 Notify 已订阅 → 标记就绪并触发自动 AUTH（恢复会话态）。
         //   必须在订阅之后（NONCE/AUTH 回包走 FF02），否则回包丢失会超时失败。
         this._statusNotifyReady = true
+        if (recoveryOnly) return  // ★ 自愈路径到此为止，不 arm 探测、不触发 AUTH
         // ★ 2026-08-17 (P-FF02): 订阅成功即启动 FF02 到达验证——uni 的 success 回调只代表
         //   CCCD 写请求已提交，不代表设备端真收到 0x0001；3s 无 FF02 将自动重订阅/拆链自愈。
         this._armFf02ArrivalProbe(targetId)
@@ -4043,10 +4059,12 @@ export const useBleStore = defineStore('ble', {
           this._repairConnection()
         }
         this._statusStaleTimer = null
-      }, 8000)  // ★ 2026-08-16: 3s→8s。3s 太激进——固件在 AUTH/配置下发/命令处理期间会暂停 FF02
-      //   推送（日志 23:56:36 AUTH:OK → 43.6 超时，~7s 没 FF02 但连接完全正常），3s 超时把"固件忙"
-      //   误判成"链接死"→ _repairConnection 误拆好链 → 断连循环。8s 给固件充足处理窗口，
-      //   仍 < 固件 30s 未-AUTH 强断窗，且 _repairConnection 有 _repairing 豁免自伤。
+      }, 15000)  // ★ 2026-08-17: 8s→15s。14:22:54 实验证实 FF02 偶发静默 ~18s 后自然恢复
+      //   （固件 ATT 忙丢通知、下一拍补），8s 看门狗过早触发 _repairConnection 重订阅 →
+      //   与 AUTH 抢 GATT 槽 → 绑定验证更慢/不好连。延长到 15s：
+      //   ① 给固件 ATT 忙留足恢复窗口（绝大多数静默 <15s 自然恢复，根本不触发自愈）；
+      //   ② 仍 < 固件 30s 未-AUTH 强断窗的一半，真断连时检测延迟可接受；
+      //   ③ 配合 recoveryOnly 重订阅（不再触发 AUTH/读电池/arm探测），双保险消除重订阅风暴。
     },
 
     /**
@@ -4102,7 +4120,7 @@ export const useBleStore = defineStore('ble', {
         //   14:23:32.829 createBLEConnection status:8 失败 → 好连接被误拆成断连，折腾 10s+。
         //   结论：只要 _verifyConnection 判活，就【永不拆链】，只用重订阅+耐心等待。
         this._resetStatusStaleTimer()  // 重武装 8s 看门狗
-        await this._enableStatusNotify()
+        await this._enableStatusNotify({ recoveryOnly: true })
         // 等 3s 看 FF02 是否真恢复
         // ★ 2026-08-17 修正：改用 _lastFf02At 时间戳判断，而非 statusStale。
         //   旧探测用 `if (!this.statusStale)`——但 statusStale 在上一行 _resetStatusStaleTimer()
