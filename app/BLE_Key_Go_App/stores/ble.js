@@ -158,6 +158,16 @@ let _stagedDisplay = null        // 最新一包解析出的显示字段（last-
 const _DISPLAY_COMMIT_TICK = 100 // 合并提交节拍(ms)：≤100ms 内提交最新值 → burst 自动合并为 1 次渲染
 let _displayCoalescer = null     // setInterval 句柄（懒启动，常驻，无包时 no-op）
 
+// ★ 2026-08-17: 判断是否为 10007（property not support，OS 本地拒绝、未发往固件）。
+//   用于僵尸连接识别：命令 10007 + FF02 静默 = GATT 通道确实已死，需主动拆链重建。
+function is10007(err) {
+  if (!err) return false
+  const code = err.errCode != null ? err.errCode : err.code
+  if (code === 10007) return true
+  const msg = String(err.errMsg || err.message || (typeof err === 'string' ? err : '') || '')
+  return /property not support|not support|10007/i.test(msg)
+}
+
 export const useBleStore = defineStore('ble', {
   state: () => ({
     // 连接状态
@@ -5303,6 +5313,44 @@ export const useBleStore = defineStore('ble', {
         //   （快速连点 / 配置下发与命令并发时易触发）。这类不该提示「检查连接」，
         //   改为提示「指令冲突，请重试」，避免用户误以为蓝牙断了。
         if (isGattConflict(err)) throwError('CONFLICT', undefined, err)
+        // ★★ 2026-08-17 僵尸连接自愈（14:49:56 日志：复位后 APP 显示 --- 但系统仍认为连着，
+        //   点锁车 C1:LOCK 10007×3 失败）。
+        //   识别条件：命令写被 OS 拒（10007=property not support，未真正发往固件，安全）
+        //   且 FF02 也在静默（statusStale 或最近无 FF02）→ 双条件同时满足 = GATT 通道确实已死
+        //   （僵尸连接），而非"连接活但瞬时冲突"。此时 _verifyConnection 用 getBLEDeviceServices
+        //   判活不可靠（GATT 句柄缓存还在），正确做法是强制拆链让系统释放僵尸句柄，
+        //   再触发断连重连流程，而不是干等 15s 看门狗做无效 recoveryOnly 重订阅。
+        //   安全：10007 是 OS 本地拒绝（未发往固件），拆链不会造成重复开锁/锁车。
+        if (is10007(err)) {
+          const _ff02Dead = this.statusStale
+            || (this._lastFf02At && Date.now() - this._lastFf02At > 5000)
+            || this._lastFf02At === undefined
+          if (_ff02Dead && this.connected && this.deviceId && !this._repairing && !this._reconnecting) {
+            console.warn('[Store] ⚠ 命令 10007 + FF02 静默 → 判定僵尸连接，强制拆链恢复')
+            this._cmdBusy = false
+            // 僵尸连接：系统 GATT 句柄在但底层已死，getBLEDeviceServices 判活不可靠。
+            // 直接 close 强制拆掉僵尸句柄（dead 连接 close 安全，不会重复操作），
+            // 系统会回调 onBLEConnectionStateChange(false) → _handleDisconnect → 常规重连。
+            // 用 _repairing 标志豁免本次 close 触发的断连事件被当故障。
+            this._repairing = true
+            try {
+              await Promise.race([
+                new Promise((resolve) => {
+                  try { uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => resolve() }) } catch (e) { resolve() }
+                }),
+                new Promise((resolve) => setTimeout(() => { console.warn('[Store] 僵尸连接 close 超时(2s)') ; resolve() }, 2000))
+              ])
+            } finally {
+              this._repairing = false
+            }
+            // 若 close 后系统没回调断连事件（极端情况），兜底直接走常规重连
+            if (this.connected) {
+              this.connected = false
+              this.statusStale = true
+              if (typeof this._scheduleReconnect === 'function') this._scheduleReconnect(0)
+            }
+          }
+        }
         throwError('FAIL', undefined, err)
       } finally {
         this._cmdBusy = false
