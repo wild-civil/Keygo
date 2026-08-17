@@ -2229,6 +2229,10 @@ export const useBleStore = defineStore('ble', {
       this.batteryLevel = -1   // ★ 2026-08-09 (P0-①): 连接起点重置电量→未知(---)，杜绝跨板粘连(V04 6% 残留到 V03)
       this._statusNotifyReady = false  // ★ 2026-07-12: 本连接 FF02 Notify 尚未订阅，自动 AUTH 待订阅后触发
       this._autoAuthState = 'idle'   // ★ 2026-07-12: 重置自动 AUTH 状态机
+      this._lastFf02At = 0  // ★ 2026-08-17: 连接初始化时清零 FF02 首帧时间戳，让 AUTH 前的"等 FF02 首帧"守卫
+      //   对所有路径(手动 connect / _doReconnect / 全局监听器补位)都生效——否则手动 connect 不调
+      //   _resetConnectionStateLikeAppRestart，_lastFf02At 保留上次连接值 → 守卫被跳过 → AUTH 又在
+      //   CCCD 未生效时触发 → NONCE 回包收不到 → 绑定验证慢。
       this.lastDeviceId = deviceId
       // ★ 2026-08-09 P1-①: 不再在连接成功时无条件记录已知设备。
       //   已知设备 = 本机通过 AUTH/BIND 鉴权的设备（真 owner），见 AUTH:OK / BIND:OK 处 _touchKnownDevice。
