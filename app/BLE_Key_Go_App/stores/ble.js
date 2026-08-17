@@ -2393,6 +2393,10 @@ export const useBleStore = defineStore('ble', {
       this.sessionAuthed = false
       this._autoAuthState = 'idle'
       B._sessionSalt = null; B._cmdSeq = 0; B._lastNonce = null
+      // ★ 2026-08-17: 清零 FF02 首帧时间戳——让「当前连接是否收到过 FF02」成为准确判据。
+      //   否则 _lastFf02At 保留上一次连接的值，AUTH 前判断"FF02 通道是否可用"会误判为"已通"，
+      //   导致 AUTH 在 CCCD 未生效时仍触发（NONCE 回包走 FF02 收不到 → 第一次挑战必失败）。
+      this._lastFf02At = 0
       // 不清 batteryLevel / deviceName / _configPushedThisConn —— 这些由 _finalizeConnection 在连接成功后处理
       console.log('[Store] _resetConnectionStateLikeAppRestart: 会话态已复位为首连初值')
     },
@@ -4362,6 +4366,28 @@ export const useBleStore = defineStore('ble', {
             }
           }
           this._autoAuthState = 'running'
+          // ★★ 2026-08-17 关键修复（15:45 时间对齐日志实证）：
+          //   uni.notifyBLECharacteristicValueChange 的 success 只代表"CCCD 写请求已提交"，
+          //   **不代表固件真收到 0x0001**。15:45:31.905 App 第一次"Notify 启用成功"，但固件直到
+          //   15:45:35.450 才收到 [CCCD] WRITE（中间隔 ~3.5s！）——第一次 CCCD 写被 Android 吞了。
+          //   期间若触发 AUTH：NONCE 写成功（FF03 通），但固件回 NONCE 走 FF02（CCCD 未使能 →
+          //   bleIncorrectMode → 回包丢弃）→ App 收不到 NONCE 回包 → _requestNonce 4s 超时 →
+          //   第一次 NONCE 挑战必失败，白白多花好几秒（正是"绑定验证慢"的真因）。
+          //   ⇒ 修复：AUTH 前等 FF02 首帧到达（_lastFf02At 前移），确保 NONCE/AUTH 回包通道真正可用。
+          //      _lastFf02At 在 _resetConnectionStateLikeAppRestart 已清零，故"收到过 FF02"即当前连接可用。
+          //      最多等 2.5s（覆盖一个 FF02 1s 周期 + 重新订阅窗口）；若期间 FF02 到了立即继续 AUTH；
+          //      若超时仍无 FF02，交给 _armFf02ArrivalProbe 的自愈（重订阅/拆链），本层不强求。
+          if (!this._lastFf02At && this.connected) {
+            const _ff02WaitStart = Date.now()
+            const _ff02WaitP = new Promise((resolve) => {
+              const _iv = setInterval(() => {
+                if (this._lastFf02At || !this.connected) { clearInterval(_iv); resolve(); return }
+                if (Date.now() - _ff02WaitStart >= 2500) { clearInterval(_iv); resolve() }
+              }, 150)
+            })
+            await _ff02WaitP
+            if (!this.connected) return
+          }
           const ok = await this.ensureSession()
           if (ok) {
             this._autoAuthState = 'idle'
