@@ -2468,26 +2468,32 @@ export const useBleStore = defineStore('ble', {
       }
 
       // ★ v3.6-fixB: 重连前先断开可能残留的旧连接句柄
-      // ★ 2026-07-25: uni.closeBLEConnection 无 success/fail 回调时返回 Promise，
-      //   未连接报错(errCode 10006 no connection)会 reject 成 UnhandledPromiseRejection；
-      //   外层 try/catch 只抓同步异常、抓不到异步 reject，故用 complete 回调收口（与 1852/3428/3863 一致）。
-      try {
-        // ★ 2026-08-17 硬超时：uni.closeBLEConnection 的 complete 在 Android 上可能不回调
-        //   （与 openBluetoothAdapter 同类静默挂起）→ 本 await 永久 pending → _doReconnect 卡死 →
-        //   _reconnectPromise 永不 settle → 自动重连/手动 connect 卡在"连接中"。加 2s 超时兜底，
-        //   宁可放行继续（connectDevice 自带 18s 硬超时兜底），不可卡死。
-        await Promise.race([
-          new Promise((resolve) => {
-            uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => resolve() })
-          }),
-          new Promise((resolve) => setTimeout(() => {
-            console.warn('[Store] _doReconnect: closeBLEConnection 硬超时(2s)，强制放行')
-            resolve()
-          }, 2000))
-        ])
-        console.log('[Store] _doReconnect: 已清理旧连接句柄')
-      } catch (e) {
-        // 断开失败无所谓
+      // ★ 2026-08-17 关键优化：仅当 store 仍认为"已连接"(connected===true)时才需要 close 旧句柄。
+      //   复位/强断场景 connected 早已置 false（_handleDisconnect 同步），OS 侧连接已释放，
+      //   此时调 closeBLEConnection → Android 认为"没有连接可关" → complete 不回调 → 触发
+      //   下方 2s 硬超时白等（14:42:53.981 日志铁证：复位后重连因 close 白等 2s）。
+      //   故 connected===false 时直接跳过 close，省 ~2s，复位后"APP 发现"回到秒级。
+      if (this.connected) {
+        try {
+          // ★ 2026-08-17 硬超时：uni.closeBLEConnection 的 complete 在 Android 上可能不回调
+          //   （与 openBluetoothAdapter 同类静默挂起）→ 本 await 永久 pending → _doReconnect 卡死 →
+          //   _reconnectPromise 永不 settle → 自动重连/手动 connect 卡在"连接中"。加 2s 超时兜底，
+          //   宁可放行继续（connectDevice 自带 18s 硬超时兜底），不可卡死。
+          await Promise.race([
+            new Promise((resolve) => {
+              uni.closeBLEConnection({ deviceId: this.deviceId, complete: () => resolve() })
+            }),
+            new Promise((resolve) => setTimeout(() => {
+              console.warn('[Store] _doReconnect: closeBLEConnection 硬超时(2s)，强制放行')
+              resolve()
+            }, 2000))
+          ])
+          console.log('[Store] _doReconnect: 已清理旧连接句柄')
+        } catch (e) {
+          // 断开失败无所谓
+        }
+      } else {
+        console.log('[Store] _doReconnect: connected=false，跳过 close（OS 已释放连接，省 2s）')
       }
 
       // 等待系统处理断开
