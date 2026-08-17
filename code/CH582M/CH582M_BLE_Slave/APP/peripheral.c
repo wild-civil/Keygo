@@ -484,6 +484,11 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         if (g_deviceConnected) {
             KeyGo_NotifyStatus();
         }
+        // ★ 2026-08-17 [绑定提速]: 消费待写的 LTK 指纹 Flash 持久化（延迟标志 s_ltkFpDirty）。
+        //   AUTH/BIND 时只置 dirty 不立即写，这里(1s 定时，AUTH:OK 早已发出)统一 Flush，
+        //   消除 AUTH 同步路径上的 Flash 写阻塞 → 绑定验证提速。
+        //   无条件调用（即使未连接）：断连时也把指纹写掉（供下次无 App 重连识别），不依赖连接态。
+        Bonding_FlushLtkFpIfPending();
         return (events ^ SBP_PERIODIC_EVT);
     }
 

@@ -384,8 +384,8 @@ void Bonding_OnLinkEncrypted(uint16_t connHandle) {
     if (s_authedOwnerIdx >= 0 && s_authedOwnerIdx < (int8_t)LTKFP_ENTRY_MAX) {
         if (tmos_memcmp(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN) != TRUE) {
             tmos_memcpy(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN);
-            Bonding_SaveLtkFp();
-            PRINT("[BOND] owner %d LTK fingerprint refreshed (no-App reconnect ready)\n", s_authedOwnerIdx);
+            s_ltkFpDirty = 1;   /* ★ 2026-08-17: 延迟持久化，不立即 Flash 写（避免阻塞连接/AUTH 路径） */
+            PRINT("[BOND] owner %d LTK fingerprint refreshed (deferred persist)\n", s_authedOwnerIdx);
         }
         return;
     }
@@ -407,17 +407,36 @@ void Bonding_OnLinkEncrypted(uint16_t connHandle) {
     s_authedOwnerIdx = -1;  /* 陌生/未绑手机，全局阈值兜底 */
 }
 
+/* ★ 2026-08-17 [FF02/绑定提速]: LTK 指纹 Flash 写延迟标志。
+ *   根因：AUTH 成功后 Bonding_SaveLtkFp()（KeyGo_SaveEncryptPage 整页擦写，关中断~百ms）
+ *   在 AUTH 同步路径执行 → 阻塞 ATT 事务 → AUTH:OK 回包延迟 0.5s+（绑定验证慢）。
+ *   修复：AUTH/BIND/加密重连时只更新 RAM 指纹表 + 置 dirty，不立即 Flash 写；
+ *   由 SBP_PERIODIC_EVT（1s 定时，AUTH:OK 已发出之后）统一 Flush，完全不阻塞 AUTH 路径。 */
+static uint8_t s_ltkFpDirty = 0;
+
+/* ★ 2026-08-17: 若指纹表待写（s_ltkFpDirty），执行 Flash 持久化并清标志。
+ *   由 keygo_core SBP_PERIODIC_EVT 调用（TMOS 任务上下文，且 AUTH:OK 已发出）。 */
+void Bonding_FlushLtkFpIfPending(void) {
+    if (s_ltkFpDirty) {
+        s_ltkFpDirty = 0;
+        Bonding_SaveLtkFp();
+        PRINT("[BOND] LTK fingerprint persisted (deferred, no-AUTH-block)\n");
+    }
+}
+
 /* ★ 2026-07-21: 当本连接已会话鉴权（s_authedOwnerIdx 有效）且链路已加密时，
- *   采集并持久化该 owner 的 LTK 指纹，使后续纯 OS 重连（无 App）可反查识别。
- *   在 AUTH/BIND/C1 命中 owner 时调用（此时链路必已加密，noApp 模式 g_encRequired 门控）。 */
+ *   采集该 owner 的 LTK 指纹，使后续纯 OS 重连（无 App）可反查识别。
+ *   在 AUTH/BIND/C1 命中 owner 时调用（此时链路必已加密，noApp 模式 g_encRequired 门控）。
+ *   ★ 2026-08-17: 只更新 RAM + 置 dirty，Flash 写延迟到 AUTH:OK 之后（见 Bonding_FlushLtkFpIfPending），
+ *     消除 AUTH 同步路径上的 Flash 写阻塞 → AUTH:OK 立即响应，绑定验证提速。 */
 static void Bonding_RecordLtkFpIfAuthed(void) {
     if (s_authedOwnerIdx < 0 || s_authedOwnerIdx >= (int8_t)LTKFP_ENTRY_MAX) return;
     uint8_t ltk[KEYLEN];
     if (!Bonding_CaptureLinkLtk(ltk)) return;  /* 链路尚未加密，跳过（后续重连再补） */
     if (tmos_memcmp(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN) != TRUE) {
         tmos_memcpy(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN);
-        Bonding_SaveLtkFp();
-        PRINT("[BOND] owner %d LTK fingerprint recorded at AUTH/BIND (no-App reconnect ready)\n", s_authedOwnerIdx);
+        s_ltkFpDirty = 1;   /* ★ 延迟持久化，不立即 Flash 写 */
+        PRINT("[BOND] owner %d LTK fingerprint queued (deferred persist)\n", s_authedOwnerIdx);
     }
 }
 
@@ -1218,8 +1237,8 @@ static void Bonding_PairStateCB(uint16_t connectionHandle, uint8_t state, uint8_
                 uint8_t ltk[KEYLEN];
                 if (Bonding_CaptureLinkLtk(ltk)) {
                     tmos_memcpy(s_ltkFp[s_authedOwnerIdx], ltk, LTKFP_FP_LEN);
-                    Bonding_SaveLtkFp();
-                    PRINT("[BOND] owner %d LTK fingerprint recorded (no-App reconnect ready)\n", s_authedOwnerIdx);
+                    s_ltkFpDirty = 1;   /* ★ 2026-08-17: 延迟持久化，不立即 Flash 写 */
+                    PRINT("[BOND] owner %d LTK fingerprint queued at BOND_SAVED (deferred persist)\n", s_authedOwnerIdx);
                 } else {
                     PRINT("[BOND] LTK not captured at BOND_SAVED, skip fingerprint (will refresh on next enc)\n");
                 }

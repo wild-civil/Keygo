@@ -130,6 +130,9 @@ void    Bonding_OnLinkEncrypted(uint16_t connHandle);
  *   调用方负责先擦整页(EEPROM_ERASE)，本函数只写不擦。由 KeyGo_SaveEncryptPage 统一擦+写标志+写指纹。 */
 void    Bonding_WriteLtkFpRegion(void);
 void    Bonding_ApplyPairingMode(void);           /* ★ 方案1: 根据 g_encRequired 切换配对模式(INITIATE/WAIT_FOR_REQ) */
+/* ★ 2026-08-17 [绑定提速]: 若 LTK 指纹表待写(s_ltkFpDirty)，执行 Flash 持久化并清标志。
+ *   由 keygo_core SBP_PERIODIC_EVT(1s) 调用——AUTH:OK 已发出之后做 Flash 写，避免阻塞 AUTH 路径。 */
+void    Bonding_FlushLtkFpIfPending(void);
 uint8_t Bonding_Load(void);                        /* 从 DataFlash 读入 RAM 表 */
 uint8_t Bonding_Save(void);                        /* RAM 表写回 DataFlash（擦+写） */
 
