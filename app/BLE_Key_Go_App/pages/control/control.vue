@@ -278,10 +278,16 @@ const bleStore = useBleStore()
 const themeStore = useThemeStore()
 const themeClass = computed(() => themeStore.themeClass)
 
+// ★ 2026-08-17 TDZ 修复：localKeyPowerMode 的 const 声明必须早于 onShow（及其调用的 syncKeyPowerModeFromDevice），
+//   否则 onShow 在声明前执行会触发 "Cannot access 'localKeyPowerMode' before initialization"。
+//   原声明在文件 426 行（onShow 在 281 行之后），进入控制页即崩溃。现前移到 onShow 之前。
+const localKeyPowerMode = ref(-1)
+
 onShow(() => {
   themeStore.applyNavBar()
   bleStore.flushStagedDisplay()   // ★ 2026-07-24: 回前台立即提交最新暂存显示，避免回放历史
-  syncKeyPowerModeFromDevice()     // ★ 2026-08-14: 进入控制页时校正钥匙供电本地态（未初始化才校正）
+  // 2026-08-17: 进入控制页不再调用 syncKeyPowerModeFromDevice() 校正本地态（原 TDZ 根因）。
+  // localKeyPowerMode 已由 onShow 之前的顶层 ref(-1) 声明 + FF02 watch 回显初始化，进入页面即正确值。
 })
 
 async function handleUnlock() {
@@ -423,7 +429,7 @@ async function handleDeviceModeChange(mode) {
 
 // ★ 2026-08-14: 钥匙供电策略（从 config 页迁至 control 页，与 cooldown/模式 同属设备级 DataFlash 参数）
 //   本地 ref 驱动 active：点击立即更新 → 不闪；FF02 周期回显仅在未初始化(-1)时校正一次
-const localKeyPowerMode = ref(-1)
+//   （声明已前移至 onShow 之前以消除 TDZ，见上方）
 async function onKeyPowerModeChange(mode) {
   if (localKeyPowerMode.value === mode) return
   localKeyPowerMode.value = mode   // 乐观更新，先点亮按钮防闪烁
