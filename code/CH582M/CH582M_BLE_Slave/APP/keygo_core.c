@@ -921,6 +921,15 @@ void KeyGo_ProcessStateMachine(void)
 
 static uint8_t s_statusRetry = 0;  // ★ 2026-07-11 fix2: 状态通知发送失败重试计数
 
+/* ★ 2026-08-17 [1007 治本] ATT 事务槽自适应退避：
+ *   实测 AUTH 阶段 FF02(1s/次,224B) 与 App 的 NONCE/AUTH/配置/RSSISET 写抢同一 ATT 事务槽，
+ *   固件端 simpleProfile_Notify 反复 blePending(0x16=ATT忙)，同时 App 侧 FF03 写被协议栈拒(1007)。
+ *   窗口①≈0.9s + 窗口②≈2.8s，期间 FF02 让位即可让 App 写畅通。
+ *   机制：FF02 一发撞 ATT忙 → 进入退避，未来 FF02_BACKOFF_MS 内整函数直接 return（不构造/不发送），
+ *   把事务槽让给 App 写；退避结束自动恢复。退避仅在真忙时触发，空闲时不影响 1s 心跳。 */
+#define FF02_BACKOFF_MS  600
+static uint32_t s_ff02BackoffUntil = 0;
+
 /* ─────────────────────────────────────────────────────────────────
  * ★ v3.36.1: TSENSE 内部温度遥测
  *   HAL_GetInterTempValue() 触发一次内部温度传感器 ADC 采样并返回原始值；
@@ -950,6 +959,11 @@ void KeyGo_NotifyStatus(void)
 {
     if (!g_deviceConnected || peripheralConnList.connHandle == GAP_CONNHANDLE_INIT)
         return;
+
+    // ★ 2026-08-17 [1007 治本]: ATT 事务槽退避期——刚撞过 ATT忙，让位给 App 写，避免继续抢槽致 1007
+    if (Peripheral_GetSystemMs() < s_ff02BackoffUntil) {
+        return;
+    }
 
     char json[STATUS_JSON_MAX_LEN];
     char d2[24] = "";
@@ -1029,20 +1043,19 @@ void KeyGo_NotifyStatus(void)
                  * 无订阅(无App OS重连)时 simpleProfile_Notify 必失败；原「重试6次+刷屏 PRINT」
                  * 是噪点。暂注释掉重试与 PRINT，改为单次静默失败：
                  *   有订阅(App模式)首发即成功，无需重试；无固定订阅时失败属预期，不重试不打印。
-                 *
-                 * ★ 2026-08-17 [FF02诊断] 两次实测结论（15:33 与 15:38 串口日志）：
-                 *   连接已订阅(CCCD=1)后，FF02 会短暂因 blePending(0x16=ATT忙) 失败，
-                 *   发生在「固件刚处理完 FF03 写(AUTH/配置/命令)」后，但 ATT 忙通常只持续
-                 *   ~100ms，下一 1s tick 即恢复 SENT ok（15:39:02.825 铁证）。
-                 *   ⇒ 固件端 FF02 丢包是"偶发、短暂(百ms级)"的，不会造成 App 端"15s+ 长静默"。
-                 *   ⇒ 曾试验「按返回码区分重试(blePending→20ms 重发)」被 15:38 日志证伪：
-                 *     RETRY 6 次全 FAIL(ATT忙持续>20ms)，且 6 条 RETRY 刷屏。故回退为单次静默，
-                 *     仅保留诊断打印。真正造成 App 端 FF02 长静默的原因需另查(App 侧看门狗/CCCD)。
                  */
-                PRINT("[FF02] NOTIFY FAIL ret=%02X %s\n", notiSt,
+                if (notiSt == blePending) {
+                    /* ★ 2026-08-17 [1007 治本] ATT 事务槽被占 → 进入退避，让位给 App 写。
+                     *   19:02 日志铁证：AUTH 阶段 FF02 连续 3+ 秒反复 blePending，同期 App 的
+                     *   FF03(RSSISET) 写被协议栈拒(1007)长达 ~2.5s。退避期(见函数入口守卫)
+                     *   内整函数 return，把事务槽让给 App，忙窗结束 FF02 自动恢复 1s 心跳。 */
+                    s_ff02BackoffUntil = Peripheral_GetSystemMs() + FF02_BACKOFF_MS;
+                }
+                PRINT("[FF02] NOTIFY FAIL ret=%02X %s%s\n", notiSt,
                       (notiSt == bleIncorrectMode) ? "(CCCD未使能)" :
                       (notiSt == blePending)        ? "(ATT忙)" :
-                      (notiSt == bleMemAllocError)  ? "(分配失败)" : "");
+                      (notiSt == bleMemAllocError)  ? "(分配失败)" : "",
+                      (notiSt == blePending)        ? " [→退避600ms让位App写]" : "");
             } else {
                 s_statusRetry = 0;
                 /* ★ 2026-08-17 [FF02诊断]: 打印 FF02 发送成功。注意会每 ~1s 刷一条，定位阶段可接受。 */

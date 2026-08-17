@@ -12,6 +12,7 @@
  */
 #include "CONFIG.h"
 #include "gattprofile.h"
+#include "keygo_core.h"   // ★ 2026-08-17 [1007DIAG]: 访问诊断时间戳变量 + Peripheral_GetSystemMs()
 
 /*********************************************************************
  * CONSTANTS
@@ -393,6 +394,10 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
     uint8_t  *appVal    = pValue;   /* ★ 传给应用的值指针（长写时为完整缓冲）*/
     uint16_t  appLen    = len;      /* ★ 传给应用的完整长度（长写时为累积总长）*/
 
+#ifdef KEYGO_1007_DIAG
+    uint32_t cbStart = Peripheral_GetSystemMs();   // ★ 单次 ATT 写回调耗时起点
+#endif
+
     // 拒绝需要授权的写操作 (此 Profile 不使用 authorization)
     if (gattPermitAuthorWrite(pAttr->permissions))
         return ATT_ERR_INSUFFICIENT_AUTHOR;
@@ -403,6 +408,17 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
         switch (uuid)
         {
             case SIMPLEPROFILE_CHAR1_UUID:   // FF01: RSSI + 配置下发（★ 支持长写 prepare-write 重组，与 FF03 对齐）
+#ifdef KEYGO_1007_DIAG
+                // ★ 2026-08-17: 窗口②——仅记 AUTH:OK 之后的首个 FF01(配置) 写到达延迟
+                if (g_diagAuthed && !g_diagFf01Seen) {
+                    g_diagFf01Seen    = 1;
+                    g_diagFirstFf01Ms = Peripheral_GetSystemMs();
+                    PRINT("[1007DIAG] FIRST FF01(cfg) AFTER AUTH t=%lu dtAuth=%lu (window② elapsed)\n",
+                          (unsigned long)g_diagFirstFf01Ms,
+                          (unsigned long)(g_diagFirstFf01Ms - g_diagAuthOkMs));
+                }
+#endif
+
                 if (method == ATT_PREPARE_WRITE_REQ) {
                     /* 长写分段：offset==0 表示新一轮开始，清零累积长度；
                      * 之后按 offset 把各片拼回 simpleProfileChar1，等 EXECUTE 再交给应用。
@@ -438,6 +454,17 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
                 break;
 
             case SIMPLEPROFILE_CHAR3_UUID:   // FF03: Command（★ 支持长写 prepare-write 重组）
+#ifdef KEYGO_1007_DIAG
+                // ★ 2026-08-17: 窗口①——记录首个 FF03(NONCE) 写到达延迟
+                if (!g_diagFf03Seen) {
+                    g_diagFf03Seen    = 1;
+                    g_diagFirstFf03Ms = Peripheral_GetSystemMs();
+                    PRINT("[1007DIAG] FIRST FF03(NONCE) arrived t=%lu dtConn=%lu (window① elapsed)\n",
+                          (unsigned long)g_diagFirstFf03Ms,
+                          (unsigned long)(g_diagFirstFf03Ms - g_diagConnEstMs));
+                }
+#endif
+
                 if (method == ATT_PREPARE_WRITE_REQ) {
                     /* 长写分段：offset==0 表示新一轮开始，清零累积长度；
                      * 之后按 offset 把各片拼回 simpleProfileChar3，等 EXECUTE 再交给应用。
@@ -504,6 +531,20 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
     {
         simpleProfile_AppCBs->pfnSimpleProfileChange(notifyApp, appVal, appLen);
     }
+
+#ifdef KEYGO_1007_DIAG
+    // ★ 2026-08-17: 单次 ATT 写回调耗时（看是否固件侧阻塞导致 OS 侧 1007）。
+    //   正常应 < 5ms；若某次远超（如 > 50ms）说明协议栈/应用层在写路径上抢占了时间。
+    {
+        uint32_t cbCost = Peripheral_GetSystemMs() - cbStart;
+        if (cbCost > 10) {
+            PRINT("[1007DIAG] ATT write CB slow: uuid=%04X method=%d len=%d cost=%lu ms\n",
+                  (pAttr->type.len == ATT_BT_UUID_SIZE)
+                      ? (uint16_t)(pAttr->type.uuid[0] | (pAttr->type.uuid[1] << 8)) : 0,
+                  (int)method, (int)len, (unsigned long)cbCost);
+        }
+    }
+#endif
 
     return status;
 }

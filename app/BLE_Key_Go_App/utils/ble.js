@@ -615,17 +615,25 @@ export function startScan(onDeviceFound, timeout = 10) {
         if (localName.length > rawName.length) rawName = localName
         if (devName.length    > rawName.length) rawName = devName
 
-        // UUID 匹配
-        const advUUIDs = device.advertisServiceUUIDs || []
-        const uuidMatch = advUUIDs.some(uuid =>
-          uuid.toUpperCase() === BLE_CONFIG.serviceUUID.toUpperCase()
+        // ★ 2026-08-17 修复（问题①：扫描框出现非 KeyGo 陌生设备）
+        //   根因：旧逻辑用通用 16-bit UUID 0xFF00 做 uuidMatch 单独放行，而 0xFF00 是 SIG 通用
+        //   厂商私有段，任何第三方 BLE 设备（手环/灯/传感器）广播里带 0xFF00 都会被误收。
+        //   且 partialMatch 允许 2 字符前缀(如 "Ke"/"Key")即放行，兜底过宽。
+        //   修复：以「KeyGo- 前缀名」为唯一硬门槛；UUID 仅作辅助诊断、不再单独放行；
+        //   partialMatch 收紧为 NimBLE 截断的最坏情况(完整词 "KeyGo" 被截断仍 ≥6 字符)才兜底，
+        //   拒绝 2~5 字符的宽松匹配；空名设备一律不收（避免无 name 的第三方设备漏入）。
+        const PREFIX = BLE_CONFIG.deviceNamePrefix // "KeyGo"
+        const uuidHit = (device.advertisServiceUUIDs || []).some(u =>
+          u.toUpperCase() === BLE_CONFIG.serviceUUID.toUpperCase()
         )
+        const fullMatch    = rawName.startsWith(PREFIX)
+        // 仅当 rawName 是 PREFIX 的严格前缀且长度 ≥ PREFIX 全长（即 NimBLE 截断到 "KeyGo" 这种情况），
+        // 不允许 2~5 字符的宽松前缀匹配。
+        const partialMatch = PREFIX.startsWith(rawName) && rawName.length >= PREFIX.length
+        // 硬门槛：必须有可识别名称（空名直接排除，第三方无名设备不再漏入）
+        const hasName = rawName.length > 0
 
-        // 名字匹配：完整前缀 OR 截断前缀（如 "Ke" 是 "KeyGo" 的开头）
-        const fullMatch    = rawName.startsWith(BLE_CONFIG.deviceNamePrefix)
-        const partialMatch = BLE_CONFIG.deviceNamePrefix.startsWith(rawName) && rawName.length >= 2
-
-        if (fullMatch || partialMatch || uuidMatch) {
+        if (hasName && (fullMatch || partialMatch)) {
           if (!foundSet.has(device.deviceId)) {
             foundSet.add(device.deviceId)
             // 显示名：有完整前缀用原名，否则用 deviceId 重建 KeyGo-XXXXXX

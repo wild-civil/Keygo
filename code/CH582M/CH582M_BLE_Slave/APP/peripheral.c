@@ -38,6 +38,18 @@ static void KeyGo_AdvEnterFastWindow(void);
 uint8_t g_scanLogEnabled = 1;
 // ★ v3.36.2-debug (2026-07-19): "[RSSI] using owner threshold" 阈值日志开关（串口 `rssi`[on|off] 切换，默认开）
 uint8_t g_rssiLogEnabled = 1;
+
+/* ★ 2026-08-17 [1007 治本诊断]: 跨文件共享的时间戳（仅 KEYGO_1007_DIAG 开启时有效）。
+ *   定义放在 peripheral.c（连接建立回调在此），其余文件经 keygo_core.h 的 extern 引用。 */
+#ifdef KEYGO_1007_DIAG
+uint32_t g_diagConnEstMs    = 0;
+uint32_t g_diagFirstFf03Ms  = 0;
+uint32_t g_diagFirstFf01Ms  = 0;
+uint32_t g_diagAuthOkMs     = 0;
+uint8_t  g_diagFf03Seen     = 0;
+uint8_t  g_diagFf01Seen     = 0;
+uint8_t  g_diagAuthed       = 0;
+#endif
 // ★ v3.36.3-fix4: 串口日志「分类」位掩码（串口 `verbose` 总闸 / `obs|raw|state|diag|rssiset|gap` 子命令，默认全静默）
 uint8_t g_logMask = 0;
 
@@ -804,6 +816,18 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         // ★ 方案A（2026-07-12）：启动未鉴权连接计时（防 DoS 占槽）。
         //   连上即开始算，AUTH/BIND 成功由 KeyGo_CancelUnauthTimer 清零；超时强断（见状态机事件）。
         g_unauthConnStartMs = Peripheral_GetSystemMs();
+
+#ifdef KEYGO_1007_DIAG
+        // ★ 2026-08-17: 记录连接建立时刻，并重置窗口计时标志（窗口①起点）
+        g_diagConnEstMs   = Peripheral_GetSystemMs();
+        g_diagFf03Seen    = 0;
+        g_diagFf01Seen    = 0;
+        g_diagAuthed      = 0;
+        g_diagFirstFf03Ms = 0;
+        g_diagFirstFf01Ms = 0;
+        PRINT("[1007DIAG] CONNECTED t=%lu (window① start, awaiting first FF03/NONCE)\n",
+              (unsigned long)g_diagConnEstMs);
+#endif
 
         /* ★ v3.15-#15: 重连成功后取消断连锁车定时器
          *   用户在 dlockMs 窗口内重连 → 取消自动锁车，状态保持不变 */

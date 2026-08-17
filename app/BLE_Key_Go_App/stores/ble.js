@@ -2069,6 +2069,20 @@ export const useBleStore = defineStore('ble', {
               this._ensureForegroundService()
               this._reconnectGuard = 0
               uni.showToast({ title: '\u5df2\u81ea\u52a8\u8fde\u63a5', icon: 'success', duration: 1500 })
+              // ★ 2026-08-17 修复（窗口① 5.98s 暴涨根因）：FF02 订阅(CCCD descriptor 写)必须【尽早】
+              //   入 GATT 串行链队首，不能等 readSerialNumber（5000ms 超时、占链 ~5s）让出链后再排。
+              //   旧逻辑先 readSerialNumber 再 setTimeout(800) 后订阅 → 订阅 CCCD 被堵在 SN 读后面 ~5s
+              //   → NONCE 也跟着晚发 → 窗口① 从 0.9s 飙到 5.98s。
+              //   现：连接成功立即发起 FF02 订阅（已知 UUID 常量，无需等服务发现），与 readSerialNumber
+              //   并行；订阅就绪即驱动自动 AUTH，SN 读慢也不影响鉴权主链。
+              const _subFF02 = (async () => {
+                if (this.deviceId !== targetId || !this.connected) return
+                try {
+                  await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
+                  notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
+                  this._fetchBatteryLevel(targetId).catch(() => {})
+                } catch (_) {}
+              })()
               readSerialNumber(targetId, 5000).then(sn => {
                 if (this.deviceId !== targetId || !this.connected) return
                 this.serialNumber = sn
@@ -2079,14 +2093,7 @@ export const useBleStore = defineStore('ble', {
                   this._syncConfigToDevice()
                 }
               }).catch(() => {})
-              setTimeout(async () => {
-                if (this.deviceId !== targetId || !this.connected) return
-                try {
-                  await notifyBLECharacteristicValueChange(targetId, BLE_CONFIG.serviceUUID, BLE_CONFIG.statusCharUUID, true)
-                  notifyBLECharacteristicValueChange(targetId, BATT_SERVICE.serviceUUID, BATT_SERVICE.levelCharUUID, true).catch(() => {})
-                  this._fetchBatteryLevel(targetId).catch(() => {})
-                } catch (_) {}
-              }, 800)
+              // 订阅 Promise 不阻塞 SN 读；上面的 _subFF02 IIFE 已立即入队
             }).catch((err) => {
               this._repairing = false
               if (this._screenOnScanGuard !== guard || this.connected) return
@@ -2277,12 +2284,11 @@ export const useBleStore = defineStore('ble', {
         }
       }).catch(() => {})
 
-      // 注册 notify（延迟 800ms，给 GATT 服务就绪时间）—— 抽成 _enableStatusNotify 复用
+      // ★ 2026-08-17 修复（首连路径同款）：FF02 订阅必须尽早入 GATT 链队首，不能等 800ms 延时、
+      //   更不能被 readSerialNumber（上方已同步发起，占链 ~5s）堵在后面 → 窗口① 暴涨到 5.98s。
+      //   已知 UUID 常量，无需等服务发现，连接成功立即订阅，订阅就绪即驱动自动 AUTH。
       const targetId = this.deviceId
-      setTimeout(async () => {
-        if (this.deviceId !== targetId || !this.connected) return
-        this._enableStatusNotify()
-      }, 800)
+      this._enableStatusNotify().catch(() => {})
 
       uni.showToast({ title: '已自动连接', icon: 'success', duration: 1500 })
     },
@@ -3328,14 +3334,27 @@ export const useBleStore = defineStore('ble', {
         try { uni.removeStorageSync('keygo_unbound_kicked') } catch {}
 
         // ★ 预清理旧连接句柄（和 _doReconnect 同样的保护）
-        // ★ 2026-07-25: 同上，用 complete 回调收口避免 UnhandledPromiseRejection(10006 no connection)
+        // ★ 2026-08-17 修复(手动断开重连绑定验证慢根因②):
+        //   原代码手动 connect 无条件 closeBLEConnection + await 300ms。300ms 太短(自动重连路径已验证需 700ms)，
+        //   Android 侧陈旧 GATT 上下文未彻底销毁即被复用 → 下次 connect 走「复用旧 GATT」而非「新建 GATT」→
+        //   FF03 写属性按冷窗期算(0.8~4.2s) → 绑定验证慢。这正是手动断开慢(~4.6s)、复位/异常断连快(~1.4s)的差异根。
+        //   对齐 _doReconnect(L2524-2534)的拆链策略:
+        //   ① closeBLEConnection 加 2s 硬超时兜底(Android 可能不回调 complete，与 _doReconnect 一致)，避免静默挂起;
+        //   ② 拆链等待从 300ms 提到 700ms，确保 OS 真正销毁旧 GATT，下次 connect 强制新建(首连路径，写就绪 ~0.4s)。
+        //   注: 手动 disconnect() 已把 connected 置 false，此处 close 仅为清理可能的 stale ACL，2s 超时兜底放行安全。
         try {
-          await new Promise((resolve) => {
-            uni.closeBLEConnection({ deviceId, complete: () => resolve() })
-          })
+          await Promise.race([
+            new Promise((resolve) => {
+              uni.closeBLEConnection({ deviceId, complete: () => resolve() })
+            }),
+            new Promise((resolve) => setTimeout(() => {
+              console.warn('[Store] connect: closeBLEConnection 硬超时(2s)，强制放行')
+              resolve()
+            }, 2000))
+          ])
           console.log('[Store] connect: 已预清理旧连接句柄')
         } catch (e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 300))
+        await new Promise(r => setTimeout(r, 700))
 
         // ★ 方案A (2026-07-18): 重置本连接初始化幂等守卫，允许本次连接由 _finalizeConnection 初始化一次。
         this._connFinalizedFor = null

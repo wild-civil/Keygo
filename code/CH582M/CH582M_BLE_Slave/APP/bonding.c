@@ -1092,6 +1092,15 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     PRINT("[AUTH] session authed (key-based, MAC-independent)\n");
     Bonding_DumpStatus("AUTH");   /* ★ 2026-07-17 埋点：AUTH 成功后确认 owner/SNV 现状 */
     KeyGo_SendRawNotify("AUTH:OK");
+#ifdef KEYGO_1007_DIAG
+    // ★ 2026-08-17: 记录 AUTH:OK 发出时刻 + 首写→AUTH 耗时，并开放窗口②计时
+    g_diagAuthOkMs = Peripheral_GetSystemMs();
+    g_diagAuthed   = 1;
+    PRINT("[1007DIAG] AUTH:OK sent t=%lu dtConn=%lu dtFirstFf03=%lu (window② start, awaiting first FF01 cfg)\n",
+          (unsigned long)g_diagAuthOkMs,
+          (unsigned long)(g_diagAuthOkMs - g_diagConnEstMs),
+          g_diagFf03Seen ? (unsigned long)(g_diagAuthOkMs - g_diagFirstFf03Ms) : 0UL);
+#endif
     return 0;
 }
 
