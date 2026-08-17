@@ -33,6 +33,26 @@ static int8_t  s_authedOwnerIdx = -1;
 static uint8_t g_cryptoOk     = 0;   /* 1 = SHA256/HMAC 自测通过；0 = 失败(降级鉴权) */
 static uint8_t s_ltkFp[LTKFP_ENTRY_MAX][LTKFP_FP_LEN];  /* ★ 2026-07-21: 无 App 重连识别 owner 的 LTK 指纹表（与 s_bondTbl[] 平行索引）*/
 
+/* ★ 2026-08-17 [FF02/绑定提速]: LTK 指纹 Flash 写延迟标志。
+ *   根因：AUTH 成功后 Bonding_SaveLtkFp()（KeyGo_SaveEncryptPage 整页擦写，关中断~百ms）
+ *   在 AUTH 同步路径执行 → 阻塞 ATT 事务 → AUTH:OK 回包延迟 0.5s+（绑定验证慢）。
+ *   修复：AUTH/BIND/加密重连时只更新 RAM 指纹表 + 置 dirty，不立即 Flash 写；
+ *   由 SBP_PERIODIC_EVT（1s 定时，AUTH:OK 已发出之后）统一 Flush，完全不阻塞 AUTH 路径。
+ *   注意：必须定义在首次使用(Bonding_OnLinkEncrypted)之前，C 要求先声明后使用。 */
+static uint8_t s_ltkFpDirty = 0;
+
+static void Bonding_SaveLtkFp(void);  /* ★ 前向声明（定义在 L389，供下方 Flush 提前使用） */
+
+/* ★ 2026-08-17: 若指纹表待写（s_ltkFpDirty），执行 Flash 持久化并清标志。
+ *   由 keygo_core SBP_PERIODIC_EVT 调用（TMOS 任务上下文，且 AUTH:OK 已发出）。 */
+void Bonding_FlushLtkFpIfPending(void) {
+    if (s_ltkFpDirty) {
+        s_ltkFpDirty = 0;
+        Bonding_SaveLtkFp();
+        PRINT("[BOND] LTK fingerprint persisted (deferred, no-AUTH-block)\n");
+    }
+}
+
 /* ★ P0-2（§15.3 修订）：C1 命令签名会话盐 + 同连接重放计数器。
  *   s_sessionSalt 在 AUTH/BIND 成功后建立（= 本次握手 nonce，App 已知），
  *   用于把 HMAC 绑定到「每连接随机量」，堵住「跨连接重放」洞；
@@ -405,23 +425,6 @@ void Bonding_OnLinkEncrypted(uint16_t connHandle) {
     PRINT("[BOND-DBG] No-App reconnect: no LTK-fp match. reconnect fp=%02X%02X%02X%02X, authedIdx=-1 (global threshold)\n",
           ltk[0], ltk[1], ltk[2], ltk[3]);
     s_authedOwnerIdx = -1;  /* 陌生/未绑手机，全局阈值兜底 */
-}
-
-/* ★ 2026-08-17 [FF02/绑定提速]: LTK 指纹 Flash 写延迟标志。
- *   根因：AUTH 成功后 Bonding_SaveLtkFp()（KeyGo_SaveEncryptPage 整页擦写，关中断~百ms）
- *   在 AUTH 同步路径执行 → 阻塞 ATT 事务 → AUTH:OK 回包延迟 0.5s+（绑定验证慢）。
- *   修复：AUTH/BIND/加密重连时只更新 RAM 指纹表 + 置 dirty，不立即 Flash 写；
- *   由 SBP_PERIODIC_EVT（1s 定时，AUTH:OK 已发出之后）统一 Flush，完全不阻塞 AUTH 路径。 */
-static uint8_t s_ltkFpDirty = 0;
-
-/* ★ 2026-08-17: 若指纹表待写（s_ltkFpDirty），执行 Flash 持久化并清标志。
- *   由 keygo_core SBP_PERIODIC_EVT 调用（TMOS 任务上下文，且 AUTH:OK 已发出）。 */
-void Bonding_FlushLtkFpIfPending(void) {
-    if (s_ltkFpDirty) {
-        s_ltkFpDirty = 0;
-        Bonding_SaveLtkFp();
-        PRINT("[BOND] LTK fingerprint persisted (deferred, no-AUTH-block)\n");
-    }
 }
 
 /* ★ 2026-07-21: 当本连接已会话鉴权（s_authedOwnerIdx 有效）且链路已加密时，
