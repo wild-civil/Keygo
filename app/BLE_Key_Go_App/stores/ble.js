@@ -2299,34 +2299,46 @@ export const useBleStore = defineStore('ble', {
       this._ensureForegroundService()
       this._reconnectGuard = 0
 
-      // 读取序列号（异步，不阻塞）
-      readSerialNumber(this.deviceId, 5000).then(sn => {
-        this.serialNumber = sn
-        this._resolveDeviceName(sn)
-        this._loadConfigForDevice(sn)
-        this._restoreBindKey(sn, this.deviceId)   // ★ 2026-08-18: 传 deviceId 以便命中主键/迁移旧 sn 键
-        // ★ 2026-07-18: 已绑定设备由 AUTH:OK 可靠补发配置(见 3250)；此处抢跑会在「连接后加密握手窗口」
-        //   被 OS 拒(10007)产生无效写与噪声。仅未绑定(访客/首连)设备立即下发。
-        if (!this.isBound) {
-          this._syncConfigToDevice()
-        }
-        // ★ ②: 恢复本机已存的 bindKey（isBound 复原）。
-        //   ★ 2026-08-16 修复：AUTH 触发**只**由下方 _enableStatusNotify（FF02 Notify 订阅就绪后）
-        //   驱动，此处【不再】触发 _maybeAutoAuth。
-        //   旧逻辑在 readSerialNumber(5000ms 超时).then 里触发 AUTH——但 SN 读一旦慢（撞 10007 /
-        //   服务发现慢）会延迟到 5s 之后，而固件「未 AUTH 踢窗」仅 ~3.1s（见日志存活 3.1s authed=false），
-        //   导致重连 AUTH 永远赶不上、连上即被踢。Notify 订阅在 800ms 后即就绪，AUTH 立即发出，
-        //   不依赖 SN，必能命中 3.1s 窗。删除冗余 SN 路径触发，杜绝延迟。
-        if (sn) {
-          this._restoreBindKey(sn, this.deviceId)
-        }
-      }).catch(() => {})
+      // ★ 2026-08-18 (连接提速-靶点A): 序列号读取（readSerialNumber 走 _gattChain 串行链，占链 ~5s 超时）
+      //   若与 FF02 订阅(CCCD 写)并行抢 GATT 通道，会阻塞系统级 MTU 协商（实测 MTU 被挤到连接后 2.7s 才完成）
+      //   → 拖慢整个 GATT 初始化。
+      //   优化：FF02 订阅(极轻 CCCD 写)先占链 → MTU 协商让出后快速完成 → 再读 SN。
+      //   封装为局部函数，订阅成功或失败都兜底读 SN（订阅失败不应阻断 SN/配置恢复）。
+      //   安全性：AUTH 由 _enableStatusNotify 内部触发，不依赖 SN（见下方 _enableStatusNotify 的
+      //   setTimeout AUTH_WARMUP_MS）；延迟 SN 读不影响 AUTH 主链。
+      const targetId = this.deviceId
+      const _readSnAndApply = () => {
+        readSerialNumber(targetId, 5000).then(sn => {
+          if (this.deviceId !== targetId || !this.connected) return
+          this.serialNumber = sn
+          this._resolveDeviceName(sn)
+          this._loadConfigForDevice(sn)
+          this._restoreBindKey(sn, targetId)   // ★ 2026-08-18: 传 deviceId 以便命中主键/迁移旧 sn 键
+          // ★ 2026-07-18: 已绑定设备由 AUTH:OK 可靠补发配置(见 3250)；此处抢跑会在「连接后加密握手窗口」
+          //   被 OS 拒(10007)产生无效写与噪声。仅未绑定(访客/首连)设备立即下发。
+          if (!this.isBound) {
+            this._syncConfigToDevice()
+          }
+          // ★ ②: 恢复本机已存的 bindKey（isBound 复原）。
+          //   ★ 2026-08-16 修复：AUTH 触发**只**由下方 _enableStatusNotify（FF02 Notify 订阅就绪后）
+          //   驱动，此处【不再】触发 _maybeAutoAuth。
+          //   旧逻辑在 readSerialNumber(5000ms 超时).then 里触发 AUTH——但 SN 读一旦慢（撞 10007 /
+          //   服务发现慢）会延迟到 5s 之后，而固件「未 AUTH 踢窗」仅 ~3.1s（见日志存活 3.1s authed=false），
+          //   导致重连 AUTH 永远赶不上、连上即被踢。Notify 订阅在 800ms 后即就绪，AUTH 立即发出，
+          //   不依赖 SN，必能命中 3.1s 窗。删除冗余 SN 路径触发，杜绝延迟。
+          if (sn) {
+            this._restoreBindKey(sn, targetId)
+          }
+        }).catch(() => {})
+      }
 
       // ★ 2026-08-17 修复（首连路径同款）：FF02 订阅必须尽早入 GATT 链队首，不能等 800ms 延时、
-      //   更不能被 readSerialNumber（上方已同步发起，占链 ~5s）堵在后面 → 窗口① 暴涨到 5.98s。
+      //   更不能被 readSerialNumber（原同步立即发起，占链 ~5s）堵在后面 → 窗口① 暴涨到 5.98s。
       //   已知 UUID 常量，无需等服务发现，连接成功立即订阅，订阅就绪即驱动自动 AUTH。
-      const targetId = this.deviceId
-      this._enableStatusNotify().catch(() => {})
+      //   2026-08-18: 订阅成功后(.then)再读 SN，释放 GATT 链给 MTU/FF02；订阅失败(.catch)也兜底读 SN。
+      this._enableStatusNotify()
+        .then(() => _readSnAndApply())
+        .catch(() => _readSnAndApply())
 
       uni.showToast({ title: '已自动连接', icon: 'success', duration: 1500 })
     },
@@ -3457,7 +3469,16 @@ export const useBleStore = defineStore('ble', {
           ])
           console.log('[Store] connect: 已预清理旧连接句柄')
         } catch (e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 700))
+        // ★ 2026-08-18 (App②): 700ms 拆链等待条件化。
+        //   仅当上一次连接仍处 connected（OS 侧确有可能残留 stale ACL）时才等 700ms 确保旧 GATT 销毁；
+        //   若已 connected===false（显式/异常断连，OS 多半已释放），跳过盲等，省约 0.7s。
+        //   注意：不能用 getBLEDeviceServices 伪成功判断（设备重启后 OS 缓存会秒回成功，见 MEMORY 铁律），
+        //   以 connected 状态为准已足够（与 _doReconnect 路径对齐）。
+        if (this.connected) {
+          await new Promise(r => setTimeout(r, 700))
+        } else {
+          console.log('[Store] connect: 上一次已断开，跳过 700ms 拆链等待')
+        }
 
         // ★ 方案A (2026-07-18): 重置本连接初始化幂等守卫，允许本次连接由 _finalizeConnection 初始化一次。
         this._connFinalizedFor = null
@@ -3513,22 +3534,21 @@ export const useBleStore = defineStore('ble', {
 
         // ★ v3.6: 全局监听器已处理连接状态变化和特征值数据（不再重复注册）
 
-        await new Promise(r => setTimeout(r, 1000))
+        // ★ 2026-08-18 (App①): 原固定 await 1000ms 盲等 → 改为「FF02 首帧到达即就绪」信号判定。
+        //   先显式清零 FF02 时间戳（与 _finalizeConnection 内部 2275 行一致，消除竞态），再启动
+        //   GATT 初始化（订阅 FF02 等），最后用 _waitFf02Ready(1000) 等待首帧 FF02 到达作为 GATT
+        //   真正就绪的证据（而非无脑 sleep 1s）。1000ms 作为上限兜底，防止 FF02 异常不来时卡死。
+        this._lastFf02At = 0
+        this._finalizeConnection(deviceId)
+        await this._waitFf02Ready(1000)
 
-        /* ★ v3.15-fix6: 1s GATT 就绪等待期间，用户可能断开连接
+        /* ★ v3.15-fix6: GATT 就绪等待期间，用户可能断开连接
          *   此时 this.connected 已为 false/deviceId 已清空，继续操作会抛异常
          *   → 提前退出，避免在已断开的设备上调用 BLE API */
         if (!this.connected || this.deviceId !== deviceId) {
           console.log('[Store] 连接等待期间已断开，跳过 GATT 初始化')
           return false
         }
-
-        // ★ 方案A (2026-07-18): GATT 初始化（FF02/电池 Notify、FF04 序列号读取、per-SN 配置下发、
-        //   自动 AUTH）统一交给 _finalizeConnection，消除「connect() 手动路径」与「全局监听器补位
-        //   路径」各跑一遍「服务发现 + 序列号读取」的双份 GATT 流量与噪声日志。connectDevice await
-        //   期间全局监听器（!this.connected 补位）可能已触发它；此处兜底显式再调一次，由其内部
-        //   幂等守卫（_connFinalizedFor）保证同一连接只初始化一遍。
-        this._finalizeConnection(deviceId)
 
         // ★ 2026-08-16：手动 connect 成功，复位 _reconnecting 令牌，允许后续异常断连自动重连
         this._reconnecting = false
@@ -3649,9 +3669,18 @@ export const useBleStore = defineStore('ble', {
       this.reconnectMode = 'idle'
       this._reconnectGuard++
       // ★ 预清理可能残留的系统连接句柄，避免「已连接却连不上」假死
+      // ★ 2026-08-18: closeBLEConnection 加 2s 硬超时兜底（Android 可能不回调 complete，
+      //   与 _doReconnect / connect() 一致），避免静默挂起导致「重新连接」按钮点完无反应。
       try {
         await new Promise((resolve) => {
-          uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() })
+          const t = setTimeout(() => {
+            console.warn('[Store] reconnectDisconnected: closeBLEConnection 硬超时(2s)，强制放行')
+            resolve()
+          }, 2000)
+          uni.closeBLEConnection({
+            deviceId: targetId,
+            complete: () => { clearTimeout(t); resolve() }
+          })
         })
       } catch (e) { /* ignore */ }
       try {

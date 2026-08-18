@@ -174,9 +174,12 @@ extern "C" {
 
 /* ★ 2026-08-18 AUTH 期间运行期 fast 参数（连接建立后由从机发起 Connection Parameter
  *   Update 请求，区别于上面的广播"声明"）。AUTH 全程走该快窗口，AUTH 成功后切回 DEFAULT 省电。
- *   - MIN/MAX=24/48(30/60ms) 单值组，提高手机采纳率；LAT=0 不跳事件，AUTH:OK 回包最坏=1 个间隔。
+ *   - MIN/MAX=32/64(40/80ms) 单值组，提高手机采纳率；LAT=0 不跳事件，AUTH:OK 回包最坏=1 个间隔。
  *   - 手机可忽略/拉回，最坏持平无退化。
- *   - 连接后即发，不沿用 SBP_PARAM_UPDATE_DELAY（否则 AUTH 前已切省电，失效）。 */
+ *   - 连接后即发，不沿用 SBP_PARAM_UPDATE_DELAY（否则 AUTH 前已切省电，失效）。
+ *   ★ 复用说明：本组宏同时被 Peripheral_Init 用作 GAPROLE 初始期望（写入 PPCP 特征），
+ *     手机建链即采纳 fast，省掉"建链后协商"等待。Init 与 SBP_AUTH_FAST_PARAM_EVT 用相同值
+ *     （幂等），AUTH 后切省电仍走 DEFAULT_DESIRED_*，机制零改动。 */
 #define AUTH_FAST_MIN_CONN_INTERVAL   32    // 40ms（保守下限：部分手机拒绝 <30ms，拒绝会导致协商异常→RSSI采样被抑制→显示---）
 #define AUTH_FAST_MAX_CONN_INTERVAL   64    // 80ms
 #define AUTH_FAST_SLAVE_LATENCY       0     // 不跳事件，最低延迟

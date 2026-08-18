@@ -257,8 +257,17 @@ void Peripheral_Init(void)
     // ── GAP Role ── (★ fix27: 先以默认间隔启动广告，广播策略在 Bonding_Init 后统一设置)
     {
         uint8_t  adv_enable          = TRUE;
-        uint16_t desired_min         = DEFAULT_DESIRED_MIN_CONN_INTERVAL;
-        uint16_t desired_max         = DEFAULT_DESIRED_MAX_CONN_INTERVAL;
+        /* ★ 2026-08-18 连接提速①：GAPROLE 初始期望直接用 AUTH_FAST_*（40/80ms, LAT=0）。
+         *   这是协议栈写入 PPCP(0x2A04) 特征、并作为 slave 期望参数的值。手机建链时会
+         *   采纳该 fast 值作为初始连接参数，省掉"建链后等 80ms 再发 AUTH_FAST 协商"的整段
+         *   等待（原路径 GATT 初始化挤在 160~320ms 慢窗口 → 连接慢 ~6s）。
+         *   - 复用 AUTH_FAST_*，不另增宏：Init 用 fast → 建链即快；连接后 80ms 的
+         *     SBP_AUTH_FAST_PARAM_EVT 再发一次相同值（幂等无害）；
+         *   - AUTH 成功后 SBP_PARAM_UPDATE_EVT 仍用 DEFAULT_DESIRED_*（160/320ms,LAT=2）
+         *     切回省电，机制零改动。
+         *   - 风险：PPCP 改 fast 后，若 AUTH 失败/超时强断前没切回省电，短暂 fast 无碍（反正要断）。 */
+        uint16_t desired_min         = AUTH_FAST_MIN_CONN_INTERVAL;
+        uint16_t desired_max         = AUTH_FAST_MAX_CONN_INTERVAL;
 
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv_enable);
         GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, scanRspLen, scanRspData);
