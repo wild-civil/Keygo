@@ -980,10 +980,6 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         // ★ 方案A（2026-07-12）：断连即清未鉴权计时；重连时重新计（见 LinkEstablished）。
         g_unauthConnStartMs = 0;
 
-        /* ★ 2026-08-18 [FF02零无效推送]: 断连即清 CCCD 使能标志，
-         *   下次连接初期未订阅阶段周期推送经 KeyGo_NotifyStatus 入口守卫跳过。 */
-        g_ff02CccdEnabled = 0;
-
         /* ★ [P2 低功耗] 停掉连接态专有的高频周期任务：停掉后断连设备只剩「广播 + 电量轮询(30s) + 2min 校准」
          *   三类稀疏唤醒，配合已开启的 HAL_SLEEP 即可在广播包之间深度睡眠；KEY_POWER 已在 KeyGo_ResetState
          *   中断电(peripheral.c:867 → keygo_core.c:652)，继电器模块不耗电。
