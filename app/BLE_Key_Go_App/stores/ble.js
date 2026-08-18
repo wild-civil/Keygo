@@ -159,13 +159,26 @@ const _DISPLAY_COMMIT_TICK = 100 // 合并提交节拍(ms)：≤100ms 内提交�
 let _displayCoalescer = null     // setInterval 句柄（懒启动，常驻，无包时 no-op）
 
 // ★ 2026-08-17: 判断是否为 10007（property not support，OS 本地拒绝、未发往固件）。
-//   用于僵尸连接识别：命令 10007 + FF02 静默 = GATT 通道确实已死，需主动拆链重建。
+//   用于僵尸连接识别：命令 1007 + FF02 静默 = GATT 通道确实已死，需主动拆链重建。
 function is10007(err) {
   if (!err) return false
   const code = err.errCode != null ? err.errCode : err.code
   if (code === 10007) return true
   const msg = String(err.errMsg || err.message || (typeof err === 'string' ? err : '') || '')
   return /property not support|not support|10007/i.test(msg)
+}
+
+// ★ 2026-08-18: 区分 1007 的两类根因，采用不同重试策略：
+//   ① property not support = GATT 服务缓存未就绪（Android 还没"看见"FF03 的写属性）。
+//      首连冷窗口典型，密集重试无效且霸占写链 → 应【指数退避】给 Android 缓存热身时间。
+//   ② ATT 忙 / operate fail / write fail / GATT_BUSY = 事务槽被占（FF02 占槽，治本见固件退避）。
+//      窗口短（几百 ms）→ 应【150ms 密集重试】快速命中。
+//   注意：FF03/FF01 固件侧均为明文写、无加密门控（gattprofile.c:182），故 property not support 与
+//   加密握手无关，纯是 Android GATT 服务发现的客户端时序问题。
+function isPropNotSupport(err) {
+  if (!err) return false
+  const msg = String(err.errMsg || err.message || (typeof err === 'string' ? err : '') || '')
+  return /property not support|not support/i.test(msg)
 }
 
 export const useBleStore = defineStore('ble', {
@@ -268,6 +281,8 @@ export const useBleStore = defineStore('ble', {
       _gattWriteReady: false,
       _postAuthWritesPending: false,
       _postAuthWriteTimer: null,
+      _rssiAwaitRealFf02: false,
+      _rssiAwaitTimer: null,
       // ★ 2026-08-13 第七刀: 「AUTH:OK 后下发链」是否仍在进行中（含 FF01 写完后 250ms 才发的 FF03 尾巴）。
       //   _postAuthWritesPending 在 flush 一开始就置 false，不足以表达「整条链收尾」，故独立此标志。
       //   电池兜底读取(_fetchBatteryLevel) 据此让位，避免 read 抢占 Android 单一 GATT 事务槽。
@@ -1331,6 +1346,8 @@ export const useBleStore = defineStore('ble', {
       this._gattWriteReady = false
       this._postAuthWritesInFlight = false   // ★ 第七刀: 断连复位，避免电池读被永久卡住
       if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
 
       // ★ 2026-07-17 诊断埋点：断连即刻记录「会话画像」，配合固件串口 [DIAG]/reason 定位断连性质：
       //   - 存活极短(<数秒) + authed=false → 大概率「未鉴权 30s 强断」或 AUTH 未完成即被踢；
@@ -2054,6 +2071,8 @@ export const useBleStore = defineStore('ble', {
               this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置（防止沿用上一连接的去重标志）
               this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
               if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
               this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 亮屏修复连上后重置 RSSI 显示态
               this.lastDeviceId = targetId
               this._rememberAdvertisedName(targetId, device.name)
@@ -2088,7 +2107,7 @@ export const useBleStore = defineStore('ble', {
                 this.serialNumber = sn
                 this._resolveDeviceName(sn)
                 this._loadConfigForDevice(sn)
-                this._restoreBindKey(sn)   // ★ 2026-07-18: 提前恢复本机密钥，用于下方门控
+                this._restoreBindKey(sn, this.deviceId)   // ★ 2026-08-18: 传 deviceId 以便命中主键/迁移旧 sn 键
                 if (!this.isBound) {
                   this._syncConfigToDevice()
                 }
@@ -2227,10 +2246,20 @@ export const useBleStore = defineStore('ble', {
       //   "重启APP慢、复位板子快"(复位时 App 进程活着 fwSec 已在内存=2)。
       //   修复: fwSec 是设备固件能力(固定不变)，随 deviceId 持久化；连接建立即恢复，首轮 AUTH 就用对格式。
       this._restoreFwSec(deviceId)
+      // ★ 2026-08-18 修复（重启APP已绑定设备首轮无法自动验证根因）:
+      //   旧版 bindKey 仅以 serialNumber(sn) 为键存储，而 sn 来自异步 readSerialNumber(5000ms)。
+      //   _maybeAutoAuth 在 FF02 订阅就绪后即触发（远早于 SN 读回）→ serialNumber 仍空 →
+      //   旧 sn 键命中不了 → B._bindKey=null → 自动 AUTH 放弃 → 固件 30s 强断。
+      //   现 bindKey 主键改为 deviceId(MAC)（与 _restoreFwSec 对称，连接即有其值），此处【同步】恢复，
+      //   冷启动首轮即可自动 AUTH。下方 SN 读回后的 _restoreBindKey(sn) 仅作兼容：命中旧 sn 键时
+      //   会顺手迁移写一份 deviceId 键，使历史设备下次冷启动也能直命中。
+      this._restoreBindKey(null, deviceId)
       this._connectedAtMs = Date.now()   // ★ 2026-07-17 诊断埋点：记录会话起点，供 _handleDisconnect 算存活时长
       this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
       this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
       if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
       this._resetRssiDisplay()     // ★ v3.31.0 / 2026-07-13: 重置 RSSI 显示态 + 启动连续无 FF02 看门狗
       // ★ 2026-08-17 (P-FF02): 连接时立即武装 8s 状态看门狗。
       //   旧逻辑 _resetStatusStaleTimer 只在收到 FF02 后(_parseSingleStatus)或 _verifyConnection 时被调用——
@@ -2254,6 +2283,15 @@ export const useBleStore = defineStore('ble', {
       if (!this.deviceName) {
         this.deviceName = this._resolveFactoryName(this.deviceId)
       }
+      // ★ 2026-08-18 P-NAME-INSTANT: 连接成功即按 MAC 索引即时预填自定义设备名。
+      //   旧逻辑 customDeviceName 只能在 readSerialNumber 的 .then → _resolveDeviceName(sn) 里赋值，
+      //   完全依赖 SN 读回。后果二选一矛盾：
+      //     · SN 读回失败/被跳过 → 名不显示，但 AUTH 走快路径不依赖 SN → 「验证快但无名」；
+      //     · SN 读回成功但慢 → 名显示，但 SN 读(走 _gattChain)与 AUTH 争链 → 「显名但验证慢」。
+      //   治本：已绑定设备的自定义名本就持久化在 _customNamesByMac[deviceId]（断连后扫描列表都在用，
+      //   见 v3.36.3-fix5），连接拿到 deviceId 的瞬间即可即时恢复，与 SN 读回/AUTH 节奏彻底解耦。
+      //   SN 读回的 _resolveDeviceName 仍保留作回退：MAC 索引无记录时(首连新设备)再等 SN→d2 补全。
+      this._restoreDeviceNameByMac(this.deviceId)
           this._resetReconnectCounters()
           this._stopDormantPoll()
       this._stopGeofenceMonitor()
@@ -2266,7 +2304,7 @@ export const useBleStore = defineStore('ble', {
         this.serialNumber = sn
         this._resolveDeviceName(sn)
         this._loadConfigForDevice(sn)
-        this._restoreBindKey(sn)   // ★ 2026-07-18: 提前恢复本机密钥，用于下方门控
+        this._restoreBindKey(sn, this.deviceId)   // ★ 2026-08-18: 传 deviceId 以便命中主键/迁移旧 sn 键
         // ★ 2026-07-18: 已绑定设备由 AUTH:OK 可靠补发配置(见 3250)；此处抢跑会在「连接后加密握手窗口」
         //   被 OS 拒(10007)产生无效写与噪声。仅未绑定(访客/首连)设备立即下发。
         if (!this.isBound) {
@@ -2280,7 +2318,7 @@ export const useBleStore = defineStore('ble', {
         //   导致重连 AUTH 永远赶不上、连上即被踢。Notify 订阅在 800ms 后即就绪，AUTH 立即发出，
         //   不依赖 SN，必能命中 3.1s 窗。删除冗余 SN 路径触发，杜绝延迟。
         if (sn) {
-          this._restoreBindKey(sn)
+          this._restoreBindKey(sn, this.deviceId)
         }
       }).catch(() => {})
 
@@ -2387,6 +2425,32 @@ export const useBleStore = defineStore('ble', {
     },
 
     /**
+     * ★ 2026-08-18 (P-FF02-AUTH): 等待 FF02 通道真正收到过数据再返回。
+     *   根因（实测日志 11:02:22 手动断重连）: 重连时 uni.notifyBLECharacteristicValueChange 的
+     *   success 回调只代表 CCCD 写「已提交」，Android 对同 MAC 重连常复用缓存 GATT 对象，
+     *   设备端 CCCD 实际未使能 → FF02 前 ~3s 全静默。NONCE 命令走 FF03 写进去了，但固件回包走
+     *   FF02 → App 收不到 → _waitFor('NONCE') 超时 → _requestNonce 盲重试数轮 → AUTH 拖到 25s 才 OK。
+     *   冷启动首连 FF02 一次性即通（全新 GATT 上下文），故首连快、重连慢。
+     *   解法: AUTH 挑战发起前先等 FF02 真收过一帧(_lastFf02At 前移)。FF02 静默期间不盲发 NONCE，
+     *   等 _armFf02ArrivalProbe 重订阅使其生效、首帧到达后再发起 → 一次命中。
+     *   带超时兜底，避免 FF02 永久静默时 AUTH 永不触发（超时后照常发起，交由现有重试/自愈收口）。
+     */
+    _waitFf02Ready(timeoutMs = 4000) {
+      if (this._lastFf02At > 0) return Promise.resolve(true)
+      return new Promise((resolve) => {
+        const start = Date.now()
+        const base = this._lastFf02At || 0
+        const tick = () => {
+          if (this._lastFf02At > base) return resolve(true)   // FF02 首帧已到
+          if (!this.connected) return resolve(false)          // 已断连，放弃等待
+          if (Date.now() - start >= timeoutMs) return resolve(false)  // 超时兜底
+          setTimeout(tick, 150)
+        }
+        tick()
+      })
+    },
+
+    /**
      * 执行一次重连尝试
      * ★ 统一入口：确保全局监听器 + 蓝牙适配器均已初始化
      * ★ v3.6-fixD: 会话锁机制，防止蓝牙关闭后仍在执行的 _doReconnect 覆盖状态
@@ -2406,6 +2470,8 @@ export const useBleStore = defineStore('ble', {
       this._postAuthWritesPending = false
       this._postAuthWritesInFlight = false
       if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
       this._statusNotifyReady = false
       this.sessionAuthed = false
       this._autoAuthState = 'idle'
@@ -2988,6 +3054,28 @@ export const useBleStore = defineStore('ble', {
      * @param {string} mac 设备 MAC
      * @param {string} name 自定义名
      */
+    /**
+     * ★ 2026-08-18 P-NAME-INSTANT: 连接成功即按 MAC 索引恢复自定义名（不等 SN 读回）。
+     *   仅当本地 customDeviceName 尚空时才从 _customNamesByMac[deviceId] 预填；
+     *   若已有值(如 SN 路径已先赋值)则不覆盖，避免回退覆盖。
+     *   @param {string} mac 设备 MAC
+     */
+    _restoreDeviceNameByMac(mac) {
+      if (!mac) return
+      if (this.customDeviceName) return   // 已有权威名（SN 路径先赋值），不覆盖
+      const key = String(mac).replace(/:/g, '').toUpperCase()
+      const name = this._customNamesByMac && this._customNamesByMac[key]
+      if (name) {
+        this.customDeviceName = name
+        console.log('[Store] 设备名称已从 MAC 索引即时恢复:', name, '(MAC:', key, ')')
+      }
+    },
+
+    /**
+     * ★ v3.36.3-fix5: 把自定义名按 MAC 持久化一份，供断连后的扫描列表/重连卡/"已命名"徽章显示
+     * @param {string} mac 设备 MAC
+     * @param {string} name 自定义名
+     */
     _seedCustomNameByMac(mac, name) {
       if (!mac) return
       const key = mac.replace(/:/g, '').toUpperCase()
@@ -3366,6 +3454,8 @@ export const useBleStore = defineStore('ble', {
         this._configPushedThisConn = false   // ★ 2026-07-14: 新连接重置去重标志
         this._gattWriteReady = false; this._postAuthWritesPending = false; this._postAuthWritesInFlight = false   // ★ 2026-08-12 合并版 + 第七刀: 新连接重置挂起写标志
         if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
         this._resetRssiDisplay()   // ★ v3.31.0 / 2026-07-13: 手动连上后重置 RSSI 显示态
         this.lastDeviceId = deviceId
 
@@ -3885,6 +3975,13 @@ export const useBleStore = defineStore('ble', {
       // ★ 2026-07-30: 每收到一包 FF02 即刷新「心跳」时间戳（用于断连活性判别）。
       //   较旧实现(仅含 f 字段时刷新) 更稳——部分状态包无 f 会漏判。
       this._lastFf02AnyMs = Date.now()
+      // ★ 2026-08-18 P-RSSI-COLD: 收到「真实 FF02 状态包」即触发推迟的 RSSISET 下发。
+      //   能收到真实状态包 = FF02 周期推送已恢复 = ATT 事务槽已让出 = 写通道全热 → RSSISET 零 1007。
+      //   （AUTH:OK 等绑定短报文走 _handleBindingNotify，不进本函数，故此处不会在 ATT 冷窗期误触发。）
+      if (this._rssiAwaitRealFf02) {
+        console.log('[Store] 首帧真实 FF02 状态包到达，触发推迟的 RSSISET 下发')
+        this._flushRssiOnly()
+      }
       // ★ 2026-08-13 第六刀: AUTH:OK 包已自带「短延时 120ms」flush(见 _armPostAuthWrites)，此处
       //   首帧加速仅作「更快」优化——若下一包 FF02 在 120ms 内先到，则提前 flush。FF02 是 notify
       //   (只读属性)，不能单独证明 FF01/FF03(write 属性)缓存已就绪，但作为加速信号无害(触发后仍有
@@ -4338,26 +4435,57 @@ export const useBleStore = defineStore('ble', {
       try {
         if (B._bindInProgress) return false  // ★ 绑定进行中，让出通道给 bind 的 AUTH 兜底，避免两路 AUTH 串扰
         if (this.sessionAuthed) return true
-        const nonceHex = await this._requestNonce()
-        if (!nonceHex) { this.sessionAuthed = false; return false }
 
-        const hmac = hmacSha256Hex(hexToBytes(nonceHex), B._bindKey)
-        const p = _waitFor('AUTH')
-        let done = false
-        const timer = setTimeout(() => {
-          if (!done) { done = true; _resolveWaiter('AUTH', false) }
-        }, 4000)
-        try {
-          await enqueueWrite(() => rawSendCommand(this.deviceId, this._authCmd(hmac)))
-        } catch (e) {
+        // ★ 2026-08-18 P-AUTH-ADAPTIVE: 挑战内自适应重发。
+        //   旧逻辑：NONCE→AUTH→傻等 4s 超时→外层 1.5s 退避→重来一轮。
+        //   痛点：首轮 NONCE 若撞冷窗 10007 迟到，固件那一轮 AUTH 等待窗口已过期，会主动重发【新 NONCE】；
+        //   但 App 仍卡在旧 AUTH:OK 的 4s 等待里 → 白白浪费 4s+1.5s/轮 → 首绑/重连整体慢 5~11s。
+        //   新逻辑：在总窗口(8s)内，若 FF02 推来【新 NONCE】(固件主动重挑战)，立即用新 NONCE 重算并重发
+        //   AUTH，不退出本函数、不再走外层退避。仅当总窗口耗尽或断连才失败，交由外层常规重试。
+        const _AUTH_TOTAL_MS = 8000
+        const _start = Date.now()
+        let _usedNonce = null
+        while (Date.now() - _start < _AUTH_TOTAL_MS) {
+          if (!this.connected) return false
+          if (this.sessionAuthed) return true
+          const nonceHex = await this._requestNonce()
+          if (!nonceHex) return false
+          if (nonceHex === _usedNonce) {
+            // 同一 NONCE 重复收到（极端竞态）→ 短暂让出，避免死循环空转
+            await new Promise((r) => setTimeout(r, 200))
+            continue
+          }
+          _usedNonce = nonceHex
+          const hmac = hmacSha256Hex(hexToBytes(nonceHex), B._bindKey)
+          const p = _waitFor('AUTH')
+          let done = false
+          const timer = setTimeout(() => {
+            if (!done) { done = true; _resolveWaiter('AUTH', false) }
+          }, 4000)
+          let wrote = false
+          try {
+            await enqueueWrite(() => rawSendCommand(this.deviceId, this._authCmd(hmac)))
+            wrote = true
+          } catch (e) {
+            clearTimeout(timer)
+            _resolveWaiter('AUTH', false)
+            if (!this.connected) return false
+            // 写失败：短路本轮回合，立即回到 while 顶（若固件已重发 NONCE 则自然续上，否则 4s 后再试）
+            continue
+          }
+          const ok = await p
+          done = true
           clearTimeout(timer)
-          _resolveWaiter('AUTH', false)
-          return false
+          if (ok === true) return true
+          if (!this.connected) return false
+          // ok === false(AUTH 超时/FAIL)：不退出，while 继续——若固件已重发新 NONCE 则立即接续，
+          // 否则下一轮 _requestNonce 会重新触发 NONCE 写并等待固件挑战。
+          console.warn('[BIND] AUTH 本轮未确认，窗口内重试(已用', Math.round(Date.now() - _start), 'ms)')
         }
-        const ok = await p
-        done = true
-        clearTimeout(timer)
-        return ok === true
+        // 总窗口耗尽仍失败
+        if (this.sessionAuthed) return true
+        this.sessionAuthed = false
+        return false
       } finally {
         release()
       }
@@ -4403,15 +4531,23 @@ export const useBleStore = defineStore('ble', {
             }
           }
           this._autoAuthState = 'running'
-          // ★★ 2026-08-17 已实证的最终策略（固件 UART 日志 ret=16 ATT 忙坐实）：
-          //   连接后 FF02 订阅(CCCD)虽 1.8s 内生效，但 AUTH 成功后 ATT 写通道仍有约 1.8s 的
-          //   "加密握手后静默期"（固件 simpleProfile_Notify 在此期间返回 blePending/ret=16），
-          //   期间所有 GATT 写/notify 均被拒（App 侧 = 10007）。这是固件/OS 加密握手硬窗口，
-          //   App 无法缩短，只能"窗口一开立刻命中"。
-          //   ⇒ 本层【不阻塞等待 FF02 首帧】：NONCE 立即发射，由 _requestNonce 的
-          //     rawSendCommand(retries:0) + 150ms×30 密集重试跨过整个冷窗口，命中即返回
-          //     （实测把 NONCE 10007 从 7 次降到 2 次甚至 0 次）。
-          //   非阻塞的 _armFf02ArrivalProbe 仍负责 CCCD 慢生效后的自愈（重订阅/拆链），不受影响。
+          // ★★ 2026-08-18 (P-FF02-AUTH) 修订:
+          //   原策略「不阻塞等待 FF02 首帧、NONCE 立即发射靠重试跨冷窗口」对冷启动首连有效，
+          //   但对【重连】是灾难——重连时 FF02 前 ~3s 静默(CCCD 未生效)，NONCE 写进去了但回包走
+          //   FF02 收不到 → 盲重试数轮 → AUTH 拖到 25s。详见 _waitFf02Ready 注释。
+          //   现改为: 发起 AUTH 前先等 FF02 真收过一帧(超时 4s 兜底)。FF02 静默期间不盲发 NONCE，
+          //   等 _armFf02ArrivalProbe 重订阅使其生效后一次命中。冷启动 FF02 秒通 → 几乎零等待。
+          const ff02Ready = await this._waitFf02Ready(4000)
+          if (!ff02Ready && !this.connected) {
+            if (attempt < MAX_TRIES) { B._autoAuthRunning = false; setTimeout(() => this._maybeAutoAuth(attempt + 1), 1500); return }
+            this._autoAuthState = 'failed'
+            console.warn('[BIND] 等待 FF02 就绪失败且已断连，自动会话鉴权中止')
+            return
+          }
+          if (!ff02Ready) {
+            // FF02 超时仍静默（极端 ROM/固件问题）→ 不再无限等，照常发起交由现有重试/自愈收口
+            console.warn('[BIND] ⚠ FF02 等待超时仍静默，仍尝试发起 AUTH（交由重试/自愈）')
+          }
           const ok = await this.ensureSession()
           if (ok) {
             this._autoAuthState = 'idle'
@@ -4448,10 +4584,13 @@ export const useBleStore = defineStore('ble', {
         //   串口日志证明：连接后 FF03 写属性(命令通道)就绪窗口长达 ~4.2s（NONCE 16:49:40.35→42.70 才成功），
         //   期间一律 10007（OS 本地拒绝，未发往固件）。底层默认 retries:2+400ms 会让每笔写阻塞 800ms 才 reject，
         //   在 4s 窗口内效率极低（800ms 阻塞+300ms 间隔反复试）。
-        //   解法：rawSendCommand 传 retries:0（关掉底层 400ms×2 阻塞，失败立即返回），
-        //        此处用 150ms 短间隔密集重试覆盖整个冷窗口，命中即返回。
-        //   150ms×30 ≈ 4.5s 预算，足以跨过 4.2s 窗口；窗口一开立刻命中，不浪费时间在底层阻塞上。
-        const _NONCE_RETRY_MS = 150
+        //   解法：rawSendCommand 传 retries:0（关掉底层 400ms×2 阻塞，失败立即返回）。
+        // ★ 2026-08-18 分流两类 1007：
+        //   - property not support（GATT 服务缓存未就绪，首连冷窗口典型）→ 指数退避(400/800/1600/2400ms…)，
+        //     不霸占写链，给 Android 缓存热身；命中即返回。
+        //   - ATT 忙 / operate fail（事务槽冲突，治本见固件 FF02 退避）→ 150ms 密集重试快速命中。
+        const _NONCE_HOT_MS = 150    // ATT 忙密集重试间隔
+        const _NONCE_EXP_BASE = 400  // property not support 指数退避基值
         const _NONCE_MAX_TRIES = 30
         let _lastErr = null
         for (let i = 0; i < _NONCE_MAX_TRIES; i++) {
@@ -4463,7 +4602,10 @@ export const useBleStore = defineStore('ble', {
           } catch (e) {
             _lastErr = e
             if (i < _NONCE_MAX_TRIES - 1) {
-              await new Promise((r) => setTimeout(r, _NONCE_RETRY_MS))
+              const wait = isPropNotSupport(e)
+                ? Math.min(_NONCE_EXP_BASE * Math.pow(2, Math.floor(i / 2)), 2400)  // 400→800→1600→2400(封顶)
+                : _NONCE_HOT_MS
+              await new Promise((r) => setTimeout(r, wait))
             }
           }
         }
@@ -4762,10 +4904,20 @@ export const useBleStore = defineStore('ble', {
       }
     },
 
-    _restoreBindKey(sn) {
-      if (!sn) return
+    // ★ 2026-08-18 修复（重启APP已绑定设备无法自动验证根因）:
+    //   原实现只认 `keygo_bindkey_` + sn（序列号）键，而 sn 来自异步 readSerialNumber(5000ms)。
+    //   冷启动自动连接时 _maybeAutoAuth 在 FF02 订阅就绪后即触发（远早于 SN 读回），
+    //   此时 serialNumber 仍为空 → _restoreBindKey 从未执行 → B._bindKey=null →
+    //   自动 AUTH 走进「本机无绑定密钥」分支放弃 → 固件 30s 超时强断 → 用户看到「重启APP一直无法验证」。
+    //   修复: 与 _restoreFwSec 对称，新增 deviceId(MAC) 兜底键——连接建立时 MAC 必有其值，
+    //   故 _finalizeConnection 可【同步】用 deviceId 恢复密钥，彻底摆脱对异步 SN 读的依赖。
+    _restoreBindKey(sn, deviceId) {
       try {
-        const hex = uni.getStorageSync('keygo_bindkey_' + sn)
+        let hex = null
+        if (sn) hex = uni.getStorageSync('keygo_bindkey_' + sn)
+        if ((!hex || hex.length !== 32) && deviceId) {
+          hex = uni.getStorageSync('keygo_bindkey_' + deviceId)
+        }
         if (hex && hex.length === 32) {
           B._bindKey = hexToBytes(hex)
           this.isBound = true
@@ -4794,11 +4946,50 @@ export const useBleStore = defineStore('ble', {
         uni.setStorageSync('keygo_fwsec_' + id, this.fwSec)
       } catch (e) { /* 忽略 */ }
     },
-    _saveBindKey(sn, keyBytes) {
-      try { uni.setStorageSync('keygo_bindkey_' + sn, bytesToHex(keyBytes)) } catch (e) { /* 忽略 */ }
+    // ★ 2026-08-18 重新设计（统一主键 + 旧数据迁移）:
+    //   问题: 旧版 bindKey 只以 serialNumber(sn) 为键存储，而 sn 来自异步 readSerialNumber(5000ms)。
+    //        冷启动首连时 _maybeAutoAuth 在 FF02 订阅就绪后即触发（远早于 SN 读回），
+    //        serialNumber 仍空 → 旧 sn 键永远命中不了 → B._bindKey=null → 自动 AUTH 放弃 → 固件 30s 强断。
+    //        历史已绑定设备因此"重启 APP 首轮必失败"。
+    //   方案: 与 _restoreFwSec 统一，bindKey **主键改为 deviceId(MAC)**（CH582M 上 MAC 与 sn 固定映射、永不变化）。
+    //        - 恢复: 优先 deviceId 键；缺失时回退 sn 键（兼容旧数据）；命中旧 sn 键时**顺手迁移**写一份 deviceId 键。
+    //        - 保存: 主键 deviceId；若已知 sn 也保留一份 sn 键（兼容未来可能的 sn 索引场景，无害）。
+    //        - 清除: 同时清 deviceId 键与 sn 键。
+    //   效果: 冷启动连接一建立（MAC 必有）→ _finalizeConnection 同步用 deviceId 命中 → 首轮即可自动 AUTH，
+    //        不再依赖异步 SN 读；历史设备首次 SN 读回后自动迁移，之后走 MAC 直命中。
+    _restoreBindKey(sn, deviceId) {
+      try {
+        let hex = null
+        let fromSn = false
+        if (deviceId) hex = uni.getStorageSync('keygo_bindkey_' + deviceId)
+        if ((!hex || hex.length !== 32) && sn) {
+          hex = uni.getStorageSync('keygo_bindkey_' + sn)
+          if (hex && hex.length === 32) fromSn = true
+        }
+        if (hex && hex.length === 32) {
+          B._bindKey = hexToBytes(hex)
+          this.isBound = true
+          // ★ 迁移: 若是从旧 sn 键恢复的，补写 deviceId 键，下次冷启动直命中
+          if (fromSn && deviceId) {
+            try { uni.setStorageSync('keygo_bindkey_' + deviceId, hex) } catch (e) { /* 忽略 */ }
+          }
+        }
+      } catch (e) { /* 忽略 */ }
     },
-    _clearBindKey(sn) {
-      try { uni.removeStorageSync('keygo_bindkey_' + sn) } catch (e) { /* 忽略 */ }
+    // ★ 2026-08-18: 主键 deviceId；若已知 sn 也保留 sn 键（兼容）。
+    _saveBindKey(sn, keyBytes, deviceId) {
+      try {
+        const hex = bytesToHex(keyBytes)
+        if (deviceId) uni.setStorageSync('keygo_bindkey_' + deviceId, hex)
+        if (sn) uni.setStorageSync('keygo_bindkey_' + sn, hex)
+      } catch (e) { /* 忽略 */ }
+    },
+    // ★ 2026-08-18: 同时清 deviceId 键与 sn 键。
+    _clearBindKey(sn, deviceId) {
+      try {
+        if (deviceId) uni.removeStorageSync('keygo_bindkey_' + deviceId)
+        if (sn) uni.removeStorageSync('keygo_bindkey_' + sn)
+      } catch (e) { /* 忽略 */ }
     },
 
     /**
@@ -4854,40 +5045,59 @@ export const useBleStore = defineStore('ble', {
     _armPostAuthWrites() {
       this._gattWriteReady = false
       this._postAuthWritesPending = true
+      // ★ 2026-08-18 P-RSSI-COLD: RSSISET 冷窗根治。
+      //   AUTH:OK 后固件 ATT 写通道有 ~1.8s 静默期(FF02 周期推送占满事务槽)，此刻发 RSSISET 必撞 1007。
+      //   旧策略(AUTH:OK 后 120ms 急发 RSSISET)虽靠重试自愈，但必撞 1~2 次 1007、浪费 GATT 槽。
+      //   根治：RSSISET 不再随 120ms 兜底急发，而是【等 AUTH:OK 之后首帧「真实 FF02 状态包」】到达再发——
+      //   真实状态包能送达 = FF02 周期推送已恢复 = ATT 槽已让出 = 写通道全热 → RSSISET 一次命中、零 1007。
+      //   配置 FF01 仍按 120ms 节奏尽早发(更重要，且自身有重试自愈)。
+      //   标志 _rssiAwaitRealFf02：_parseSingleStatus 收到真实状态包(非 AUTH:OK，AUTH:OK 走另一条路径)
+      //   即触发 RSSISET flush；超时(2.5s)兜底仍强制发，避免极端无状态包时阈值不下发。
+      this._rssiAwaitRealFf02 = true
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      const _targetId = this.deviceId
+      this._rssiAwaitTimer = setTimeout(() => {
+        this._rssiAwaitTimer = null
+        this._rssiAwaitRealFf02 = false
+        if (this.deviceId === _targetId && this.connected && this._postAuthWritesPending) {
+          console.log('[Store] RSSISET 等待真实 FF02 状态包超时(2.5s)，强制下发')
+          this._flushRssiOnly()
+        }
+      }, 2500)
       if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
       // ★ 2026-08-13 第六刀(决定性): AUTH:OK 包本身就是 FF02 实时 notify，已证明 FF02 通道通。
       //   之前依赖「下一包 FF02 到达(3541 首帧加速)」触发 flush——但 AUTH:OK 解析时 _postAuthWritesPending
       //   还 false(4074 行在解析后才设)，AUTH:OK 这包错过自我触发；之后下一包 FF02 时机不可控(实测重连
       //   有 ~480ms 空窗)→ fallback 1000ms 保底，慢。
       //   正解: 既然 AUTH:OK 已到(FF02 实时包)，直接启「短延时 120ms」flush——既留热身窗口(避 10007)，
       //   又不等不确定的下一包。每次 AUTH:OK 都走此路径，与第一次(首帧加速)一样快且确定。
-      //   - 快系统: 3541 首帧加速若更早到则提前 flush(更快)；否则 120ms 短延时兜底。
-      //   - 慢系统: 120ms 短延时必触发，不再等 480ms+ 空窗 → 快 ~880ms。
-      //   - 1000ms 保底保留作双保险(防极端情况 120ms 内也崩)。
-      //   触发后若仍偶发 10007，由 utils/ble.js 既有 400ms×2 重试自愈，功能无损。
-      const _targetId = this.deviceId
+      //   ★ 2026-08-18 修订: 120ms 兜底 flush 只发【配置 FF01】，RSSISET 交给真实状态包触发(见上)。
+      const _t2 = this.deviceId
       setTimeout(() => {
-        if (this.deviceId !== _targetId || !this.connected) return
+        if (this.deviceId !== _t2 || !this.connected) return
         if (this._postAuthWritesPending) {
-          console.log('[Store] AUTH:OK 后短延时(120ms)下发挂起写（FF02 已验证，不等下一包）')
-          this._flushPostAuthWrites()
+          console.log('[Store] AUTH:OK 后短延时(120ms)下发挂起写（仅配置 FF01，RSSISET 等真实状态包）')
+          this._flushPostAuthWrites({ rssiDeferred: true })
         }
       }, 120)
       this._postAuthWriteTimer = setTimeout(() => {
         this._postAuthWriteTimer = null
         if (this._postAuthWritesPending) {
-          console.log('[Store] 1000ms 延时保底，下发挂起写（FF02 未提前触发或不可靠）')
-          this._flushPostAuthWrites()
+          console.log('[Store] 1000ms 延时保底，下发挂起写（仅配置 FF01，RSSISET 等真实状态包）')
+          this._flushPostAuthWrites({ rssiDeferred: true })
         }
       }, 1000)
-      console.log('[Store] AUTH:OK 后写已挂起（AUTH:OK 即 FF02 已验证 + 120ms 短延时 / 首帧加速 / 1000ms 保底）')
+      console.log('[Store] AUTH:OK 后写已挂起（配置 120ms 发 / RSSISET 等真实 FF02 状态包，零 1007）')
     },
 
     /**
      * ★ 2026-08-12 合并版: 首帧 FF02 到达 / 超时兜底时，执行 AUTH:OK 后的挂起写。
      *   仅下发一次（_postAuthWritesPending 幂等），且下发前再校验连接态。
      */
-    async _flushPostAuthWrites() {
+    async _flushPostAuthWrites(opts = {}) {
+      const rssiDeferred = !!opts.rssiDeferred
       if (!this._postAuthWritesPending) return
       this._postAuthWritesPending = false
       this._gattWriteReady = true
@@ -4897,16 +5107,26 @@ export const useBleStore = defineStore('ble', {
       //   避免电池 read 抢占 GATT 事务槽把 FF03 挤掉（10007 根因）。
       this._postAuthWritesInFlight = true
       if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      this._rssiAwaitRealFf02 = false
       if (!this.connected || !this.deviceId) {
         console.log('[Store] 挂起写跳过（已掉线/无设备）')
         this._postAuthWritesInFlight = false
         return
       }
-      console.log('[Store] GATT 写就绪，下发 AUTH:OK 后挂起写')
+      console.log('[Store] GATT 写就绪，下发 AUTH:OK 后挂起写' + (rssiDeferred ? '（RSSISET 已推迟）' : ''))
       // ① 配置补发（FF01）：AUTH 成功 = 安全通道已建立，重连时 _finalizeConnection 的抢跑写可能失败，
       //    此处可靠补发；串行化(_configWriteBusy/_configSyncPending)保证不重复、不竞态。
       //    await 等其真正写入完成（成功/失败都算落地），再发 FF03。
       await this._syncConfigToDevice()
+      // ② 本机 RSSI 阈值（FF03）：per-phone 阈值跟随，best-effort。
+      //    ★ 2026-08-18 修订: rssiDeferred=true（AUTH:OK 后 120ms/1000ms 兜底 flush）时，RSSISET 跳过，
+      //      交由「首帧真实 FF02 状态包」或 2.5s 超时兜底触发(_flushRssiOnly)，彻底避开 ATT 静默期 → 零 1007。
+      if (rssiDeferred) {
+        console.log('[Store] RSSISET 推迟：等待首帧真实 FF02 状态包（避免 AUTH:OK 后 ATT 冷窗 1007）')
+        this._postAuthWritesInFlight = false
+        return
+      }
       // ② 本机 RSSI 阈值（FF03）：per-phone 阈值跟随，best-effort。
       //    ★ 2026-08-12 关键修订(第三刀修正): FF01 与 FF03 是两条不同 write 特征，Android 对它们的
       //      WRITE 属性缓存分别刷新、不同步。固定延时(300ms)不可靠——系统热身慢时 FF01 自己都撞 10007
@@ -4927,6 +5147,30 @@ export const useBleStore = defineStore('ble', {
       } finally {
         // ★ 第七刀: FF03 落地(成功/失败均算) → 整条 AUTH:OK 后下发链收尾，
         //   放行电池兜底读取去占用 GATT 事务槽。
+        this._postAuthWritesInFlight = false
+      }
+    },
+
+    /**
+     * ★ 2026-08-18 P-RSSI-COLD: 仅下发 RSSISET（配置 FF01 已先行下发完）。
+     *   触发时机：① AUTH:OK 后收到首帧「真实 FF02 状态包」(_parseSingleStatus 入口)；
+     *            ② 2.5s 超时兜底(_armPostAuthWrites 的 _rssiAwaitTimer)。
+     *   此刻写通道已热（真实状态包能送达 = ATT 槽已让出），RSSISET 一次命中、零 1007。
+     */
+    async _flushRssiOnly() {
+      if (!this._rssiAwaitRealFf02) return   // 已发过或无待发
+      this._rssiAwaitRealFf02 = false
+      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
+      if (!this.deviceId || !this.connected) return
+      if (this._lastPushedUnlock === this.unlockThreshold && this._lastPushedLock === this.lockThreshold) {
+        console.log('[Store] RSSISET 跳过(阈值未变，真实状态包触发)')
+        return
+      }
+      console.log('[Store] 真实 FF02 状态包已到，下发 RSSISET（写通道已热，零 1007）')
+      this._postAuthWritesInFlight = true
+      try {
+        await this._pushRssiThresholds()
+      } finally {
         this._postAuthWritesInFlight = false
       }
     },
@@ -4954,9 +5198,15 @@ export const useBleStore = defineStore('ble', {
       // ★ 2026-08-17 密集重试（与 _requestNonce 同源策略）:
       //   AUTH:OK 后固件 ATT 写通道仍有约 1.8s 静默期（UART 日志 ret=16 ATT忙 实证），期间 RSSISET 一律
       //   10007。底层默认 retries:2 + 400ms 会让每笔撞窗写阻塞 800ms 才 reject，节奏太慢。
-      //   改关底层阻塞重试(retries:0)，本层 150ms×30 密集重试覆盖窗口，窗口一开立刻命中（省约 0.5s）。
-      const _RSSI_RETRY_MS = 150
-      const _RSSI_MAX_TRIES = 30
+      //   改关底层阻塞重试(retries:0)，本层 150ms 密集重试覆盖窗口，窗口一开立刻命中。
+      // ★ 2026-08-18 分流：RSSISET 是 best-effort（阈值已存设备 Flash，失败不致命），故：
+      //   - property not support（GATT 缓存未就绪，首连冷窗口典型）→ 指数退避(400/800/1600/2400ms 封顶)，
+      //     不霸占 _gattChain，给 Android 缓存热身、让出通道给 FF01 配置写；封顶 6 次足够。
+      //   - ATT 忙 / operate fail（事务槽冲突）→ 150ms 密集重试快速命中。
+      //   降级 _RSSI_MAX_TRIES 30→12：避免 13 次密集刷霸链，实测首连冷窗 ~2s 内缓存即热、指数退避即可覆盖。
+      const _RSSI_HOT_MS = 150
+      const _RSSI_EXP_BASE = 400
+      const _RSSI_MAX_TRIES = 12
       const _tryOnce = async () => {
         for (let i = 0; i < _RSSI_MAX_TRIES; i++) {
           if (!this.connected) return false
@@ -4964,7 +5214,12 @@ export const useBleStore = defineStore('ble', {
             await enqueueWrite(() => rawSendCommand(this.deviceId, cmd, { retries: 0 }))
             return true
           } catch (e) {
-            if (i < _RSSI_MAX_TRIES - 1) await new Promise((r) => setTimeout(r, _RSSI_RETRY_MS))
+            if (i < _RSSI_MAX_TRIES - 1) {
+              const wait = isPropNotSupport(e)
+                ? Math.min(_RSSI_EXP_BASE * Math.pow(2, Math.floor(i / 2)), 2400)
+                : _RSSI_HOT_MS
+              await new Promise((r) => setTimeout(r, wait))
+            }
           }
         }
         return false
@@ -4991,7 +5246,7 @@ export const useBleStore = defineStore('ble', {
       this._lastPushedLock = null
       this.deviceBound = false
       B._sessionSalt = null; B._cmdSeq = 0
-      if (this.serialNumber) this._clearBindKey(this.serialNumber)
+      if (this.serialNumber) this._clearBindKey(this.serialNumber, this.deviceId)   // ★ 2026-08-18: 双清 deviceId 键
       this.needsRebind = true
       this.bindHint = reason || '设备已重置，请重新绑定'
       // ★ 2026-08-09 P1-①: 设备已失效(复位/解绑)，不再是有效 owner → 移出已知设备集合
@@ -5135,7 +5390,7 @@ export const useBleStore = defineStore('ble', {
 
       if (bound) {
         B._bindKey = key
-        this._saveBindKey(sn, key)
+        this._saveBindKey(sn, key, this.deviceId)   // ★ 2026-08-18: 双写 deviceId 键
         this.serialNumber = sn         // ★ 确保 serialNumber 立即可用，verifyBindCode 依赖它做本地 KDF 验证
         this.isBound = true
         this.sessionAuthed = true
@@ -5232,7 +5487,7 @@ export const useBleStore = defineStore('ble', {
         this.isBound = false
         this.sessionAuthed = false
         B._bindKey = null
-        if (this.serialNumber) this._clearBindKey(this.serialNumber)
+        if (this.serialNumber) this._clearBindKey(this.serialNumber, this.deviceId)   // ★ 2026-08-18: 双清 deviceId 键
         this.bindHint = '已解绑'
         // ★ 解绑/恢复出厂 联动关闭「无 App 模式」：设备端加密配对上下文会被清除，
         //   本地期望态一并归零并尽力下发 ENCRYPT:0（未连接/链路被删配对打断时，
@@ -5322,7 +5577,7 @@ export const useBleStore = defineStore('ble', {
           const gk = deriveBindKey(newCode, sn)
           const key = (this.fwSec >= 2) ? derivePhoneKey(gk, this._getPhoneId().bytes) : gk
           B._bindKey = key
-          this._saveBindKey(sn, key)
+          this._saveBindKey(sn, key, this.deviceId)   // ★ 2026-08-18: 双写 deviceId 键
           // ★ 改码后固件 s_sessionAuthed 仍=1（基于旧码 nonce 标记），但内部 s_nonceValid=0，
           //   且 slot0 key 已是新码派生。下一次 NONCE→AUTH 用新 key 才能正确通过。
           this.sessionAuthed = true
