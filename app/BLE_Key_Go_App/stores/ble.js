@@ -2716,6 +2716,21 @@ export const useBleStore = defineStore('ble', {
       //   双保险: ① 下方所有 read 已改走 enqueueRead 与写共用同一串行链（治本）；
       //          ② 此处再等 _postAuthWritesPending 落幕，避免电池读长期占用事务槽把
       //             配置下发挤到后面排队（治时序，保证「绑定验证 → 配置下发」这条主链最快）。
+      // ★ 2026-08-18 P-AUTH-PRIORITY: 电池读必须让位给「AUTH 握手(NONCE/AUTH 写)」本身。
+      //   实测(11:48 日志): _fetchBatteryLevel 在 _finalizeConnection 的 FF02 订阅后即刻发起，
+      //   其 enqueueRead 与 AUTH 的 enqueueWrite 共用同一条 _gattChain 串行链；当电池 read 先抢到链，
+      //   AUTH 写被排到电池 read 飞行窗口之后 → NONCE通知→AUTH写 出现 ~1.5s 空白 → 握手整体慢 3~5s。
+      //   修复: 电池读开始(2.5s delay 之前)先等 AUTH 会话建立(sessionAuthed 或 B._autoAuthRunning 结束)，
+      //   确保 AUTH 握手的 NONCE/AUTH 写 100% 先于电池 read 占用 GATT 链，彻底消除争链导致的握手拖慢。
+      {
+        const _authWaitStart = Date.now()
+        // 等待 AUTH 会话建立完成（sessionAuthed=true）再读电池，确保 AUTH 握手的 NONCE/AUTH 写
+        // 100% 先于电池 read 占用 GATT 链。若本连接不走 AUTH 或握手异常，6s 超时兜底放行，避免饿死。
+        while (!this.sessionAuthed && Date.now() - _authWaitStart < 6000) {
+          await new Promise(r => setTimeout(r, 100))
+          if (this.deviceId !== deviceId || !this.connected) return
+        }
+      }
       await new Promise(r => setTimeout(r, 2500)) // 先等状态 Notify 把电量送上来
       if (this.deviceId !== deviceId || !this.connected) return
       // 等待 AUTH:OK 后的挂起写全部下发完毕（最多再等 4s，防极端情况饿死电池读取）

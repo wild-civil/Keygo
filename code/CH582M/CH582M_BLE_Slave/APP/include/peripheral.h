@@ -1,4 +1,5 @@
 /********************************** (C) COPYRIGHT *******************************
+/********************************** (C) COPYRIGHT *******************************
  * File Name          : peripheral.h
  * Author             : KeyGo v3.13 (CH582M)
  * Date               : 2026/07/02
@@ -150,6 +151,16 @@ extern "C" {
  *   若仍需更快 → LATENCY=0（追求最小延迟）；更省电 → LATENCY=3（需验证 AUTH 不超时）。 */
 #define DEFAULT_DESIRED_SLAVE_LATENCY        2
 #define DEFAULT_DESIRED_CONN_TIMEOUT         2000  // 20s     连接超时   = N × 10ms       （范围 10~3,200 → 100ms~32s）
+
+/* ★★ 连接前广播声明快值组（2026-08-18 绑定验证提速）
+ *   用于广播/扫描响应里的 Slave Connection Interval Range 字段，让手机**发起连接时**
+ *   就按快间隔建立（AUTH 全程在快节奏下跑，绑定验证 ~3s → ~1~1.5s）。
+ *   - 仅影响"连接建立瞬间的初始间隔"，手机可采纳也可忽略（个别 ROM 忽略→收益打折但不退化）。
+ *   - AUTH 完成后由 SBP_PARAM_UPDATE_EVT 用下方 DEFAULT_DESIRED_* 调回 160~320ms/LAT=2 省电，机制零改动。
+ *   - 注意：这是"声明"不是"请求"，不触发规范对从机参数更新请求的频率限制（规避 30s 拒绝窗）。
+ *   - 单值组 MIN==MAX 缩小手机协商空间，提高快间隔采纳率；LAT=0 不跳事件，最低延迟。 */
+#define ADV_FAST_MIN_CONN_INTERVAL    24    // 30ms    连接前广播声明：初始间隔下限
+#define ADV_FAST_MAX_CONN_INTERVAL    48    // 60ms    连接前广播声明：初始间隔上限（MIN==MAX 同值）
 
 // Company Identifier: WCH
 #define WCH_COMPANY_ID                       0x07D7

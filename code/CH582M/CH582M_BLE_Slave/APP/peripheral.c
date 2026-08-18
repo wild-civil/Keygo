@@ -224,10 +224,12 @@ static void Peripheral_BuildScanRspData(void)
 
     scanRspData[idx++] = 0x05;                              // length
     scanRspData[idx++] = GAP_ADTYPE_SLAVE_CONN_INTERVAL_RANGE;
-    scanRspData[idx++] = LO_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL);
-    scanRspData[idx++] = HI_UINT16(DEFAULT_DESIRED_MIN_CONN_INTERVAL);
-    scanRspData[idx++] = LO_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL);
-    scanRspData[idx++] = HI_UINT16(DEFAULT_DESIRED_MAX_CONN_INTERVAL);
+    /* ★ 2026-08-18 绑定验证提速：连接前声明快间隔（ADV_FAST_*），手机发起连接即快节奏；
+     *   AUTH 完成后由 SBP_PARAM_UPDATE_EVT 调回 DEFAULT_DESIRED_*(160~320ms/LAT=2) 省电。 */
+    scanRspData[idx++] = LO_UINT16(ADV_FAST_MIN_CONN_INTERVAL);
+    scanRspData[idx++] = HI_UINT16(ADV_FAST_MIN_CONN_INTERVAL);
+    scanRspData[idx++] = LO_UINT16(ADV_FAST_MAX_CONN_INTERVAL);
+    scanRspData[idx++] = HI_UINT16(ADV_FAST_MAX_CONN_INTERVAL);
 
     scanRspData[idx++] = 0x02;                              // length
     scanRspData[idx++] = GAP_ADTYPE_POWER_LEVEL;
