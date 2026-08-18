@@ -29,6 +29,7 @@ static uint8_t g_powerHoldForever = 0; // ★ 2026-08-14: HOLD_UNTIL_LOCK 模式
  * ───────────────────────────────────────────────────────────────── */
 
 #define SPIKE_DISCARD_COUNT         2
+#define SPIKE_RECOVER_LIMIT         6     // 连续毛刺上限：超过后强制接受一次样本，防止永久死锁（连接参数切换时 RSSI 跳变易触发）
 // ★ v3.6-fixH: 从 3000ms → 8000ms，匹配 App 端 8s 冷却
 // ★ v3.7: MANUAL_COOLDOWN_MS 从宏改为 uint16_t 变量 g_manualCooldownMs，
 //         可在运行时通过 App 下发 "cooldown_ms=N" 修改，并持久化到 DataFlash
@@ -723,6 +724,14 @@ void KeyGo_RssiProcess(int8_t rssi)
     if (g_spikeConsecutive < SPIKE_DISCARD_COUNT) {
         g_filteredRSSI = UpdateKalman(r);
         g_rssiUpdated = 1;   // ★ 标记：新 Kalman 样本已产出
+    } else if (g_spikeConsecutive >= SPIKE_RECOVER_LIMIT) {
+        // ★ 2026-08-18 修复毛刺死锁：连续毛刺超过上限后强制接受一次样本，
+        //   重设基线并清零计数，防止 f 永久卡在 -999（连接参数切换时 RSSI 跳变易触发）。
+        g_filteredRSSI = UpdateKalman(r);
+        g_rssiUpdated = 1;
+        g_spikeConsecutive = 0;
+        g_lastRawRSSI = r;
+        PRINT("[RSSI] spike deadlock recovered (forced accept)\n");
     }
 }
 

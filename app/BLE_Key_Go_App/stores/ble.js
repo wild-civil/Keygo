@@ -4034,6 +4034,13 @@ export const useBleStore = defineStore('ble', {
         if (!_stagedDisplay) _stagedDisplay = {}
         _stagedDisplay.f = data.f
         this._lastFf02AnyMs = Date.now()   // ★ 看门狗用「真实包到达时刻」，保持即时（不随提交延迟）
+      } else if (data.r !== undefined && data.r > -999) {
+        // ★ 2026-08-18 兜底：固件 f(Kalman 滤波值) 在初始化/连续毛刺误判期间可能恒为 -999（哨兵），
+        //   App 端 f 过滤不通过 → displayRssi 一直 ---。此时若 r(原始 RSSI) 有真实值，用 r 兜底 f，
+        //   保证 UI 至少显示原始 RSSI，不再 ---。纯显示兜底，不动阈值判定逻辑（阈值仍用固件 g_filteredRSSI）。
+        if (!_stagedDisplay) _stagedDisplay = {}
+        _stagedDisplay.f = data.r
+        this._lastFf02AnyMs = Date.now()
       }
 
       if (data.st !== undefined) {
@@ -5079,9 +5086,10 @@ export const useBleStore = defineStore('ble', {
           this._flushRssiOnly()
         }
       }, 2500)
-      if (this._postAuthWriteTimer) { clearTimeout(this._postAuthWriteTimer); this._postAuthWriteTimer = null }
-      if (this._rssiAwaitTimer) { clearTimeout(this._rssiAwaitTimer); this._rssiAwaitTimer = null }
-      this._rssiAwaitRealFf02 = false
+      // ★ 注意：上方 5071 行已设 _rssiAwaitRealFf02=true 并启动 2.5s 超时兜底 _rssiAwaitTimer。
+      //   此处【不得】再清除这两个标志——此前版本误在此处重复 clearTimeout + 置 false，
+      //   导致 _parseSingleStatus 首帧 FF02 触发 _flushRssiOnly 永不成立、2.5s 超时也不触发 →
+      //   RSSISET 永远不下发（per-phone 阈值失效回归）。已删除该冗余清除块。
       // ★ 2026-08-13 第六刀(决定性): AUTH:OK 包本身就是 FF02 实时 notify，已证明 FF02 通道通。
       //   之前依赖「下一包 FF02 到达(3541 首帧加速)」触发 flush——但 AUTH:OK 解析时 _postAuthWritesPending
       //   还 false(4074 行在解析后才设)，AUTH:OK 这包错过自我触发；之后下一包 FF02 时机不可控(实测重连

@@ -1083,6 +1083,11 @@ uint8_t Bonding_HandleAuthResp(uint16_t connHandle, const uint8_t *peerAddr,
     s_sessionAuthed = 1;
     /* ★ 方案A（2026-07-12）：AUTH 成功 → 取消未鉴权计时（车主重连照常长连） */
     KeyGo_CancelUnauthTimer();
+    /* ★ 2026-08-18 AUTH 期间 fast 参数收尾：AUTH 成功后延迟切回 DEFAULT 省电参数。
+     *   先 delay 200ms 让上方 AUTH:OK（KeyGo_SendRawNotify）走 FAST 窗口发出去，再切省电。
+     *   若手机拒绝参数更新则维持现状，无退化。 */
+    tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT, SBP_AUTH_BACK_TO_SLOW_DELAY);
+    PRINT("[AUTH] OK → schedule back-to-slow param in %dms\n", SBP_AUTH_BACK_TO_SLOW_DELAY);
     s_nonceValid    = 0;   /* 一次性 */
     /* ★ P0-2：复用本次 AUTH 握手的 nonce 作为 C1 会话盐（App 已知该 nonce），建立签名会话。 */
     tmos_memcpy(s_sessionSalt, s_nonce, BOND_NONCE_LEN);

@@ -535,6 +535,18 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         return (events ^ SBP_PARAM_UPDATE_EVT);
     }
 
+    /* ★ 2026-08-18 AUTH 期间 fast 参数：连接建立后发一次 FAST（LAT=0，30~60ms），
+     *   让 NONCE/AUTH:OK 走快窗口。AUTH 成功后由 bonding.c 触发 SBP_PARAM_UPDATE_EVT 切回 DEFAULT 省电。
+     *   不周期重复：FAST 只在 AUTH 握手期需要，生效后无需保活。 */
+    if (events & SBP_AUTH_FAST_PARAM_EVT) {
+        GAPRole_PeripheralConnParamUpdateReq(peripheralConnList.connHandle,
+                AUTH_FAST_MIN_CONN_INTERVAL, AUTH_FAST_MAX_CONN_INTERVAL,
+                AUTH_FAST_SLAVE_LATENCY, AUTH_FAST_CONN_TIMEOUT,
+                Peripheral_TaskID);
+        PRINT("[CONN] fast param req (AUTH window): int 30/60ms LAT=0\n");
+        return (events ^ SBP_AUTH_FAST_PARAM_EVT);
+    }
+
 /* ── 2026-08-05 清理：降速链（慢速/超慢）已废弃 ──────────────────────
  * 以下 SBP_ADV_SLOWDOWN_EVT / SBP_ADV_ULTRA_SLOW_EVT 处理分支为死代码：
  * KeyGo_AdvEnterFastWindow() 在断连态主动 tmos_stop_task 取消这两个事件，
@@ -836,7 +848,10 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         tmos_stop_task(Peripheral_TaskID, SBP_DISCONNECT_LOCK_EVT);
 
         tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT,      SBP_PERIODIC_EVT_PERIOD);
-        tmos_start_task(Peripheral_TaskID, SBP_PARAM_UPDATE_EVT,  SBP_PARAM_UPDATE_DELAY);
+        /* ★ 2026-08-18 AUTH 期间 fast 参数：连接后先发 FAST（LAT=0，30~60ms），
+         *   让 NONCE/AUTH:OK 走快窗口；AUTH 成功后由 bonding.c 触发 SBP_PARAM_UPDATE_EVT 切回 DEFAULT 省电。
+         *   （原此处直接发 DEFAULT 省电，AUTH 全程慢窗口 → 改成先 FAST） */
+        tmos_start_task(Peripheral_TaskID, SBP_AUTH_FAST_PARAM_EVT, SBP_AUTH_FAST_PARAM_DELAY);
         /* ★ fix22: SBP_READ_RSSI_EVT 已移除 — RSSI 由状态机内联读取，启动时不再单排定时器 */
         tmos_start_task(Peripheral_TaskID, SBP_STATE_MACHINE_EVT, SBP_STATE_MACHINE_PERIOD);
         tmos_start_task(Peripheral_TaskID, SBP_BATTERY_CHECK_EVT, SBP_BATTERY_CHECK_PERIOD);

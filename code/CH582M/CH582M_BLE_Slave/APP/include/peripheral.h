@@ -28,8 +28,18 @@ extern "C" {
 /* ★ fix22: 0x0004 原为 SBP_READ_RSSI_EVT（独立定期读 RSSI，每 500ms 一次唤醒）。
  *   现 RSSI 读取已合并到 KeyGo_ProcessStateMachine 内联（每 2 tick 读一次），
  *   消除一个独立睡眠→唤醒周期，省 ~40µA。0x0004 位释放可用。 */
-#define SBP_ADV_ULTRA_SLOW_EVT      0x0004  // [废弃] fix24 超慢广播降速事件；2026-08-05 停用（无任何启动源，处理分支已 #if 0）
-#define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数
+#define SBP_ADV_ULTRA_SLOW_EVT      0x0004  // [废弃] fix24 超慢广播降速事件；2026-08-05 停用（无任何启动源，处理分支已 #if 0）。
+                                           //   ★ 2026-08-18: 此 0x0004 位现与 SBP_AUTH_FAST_PARAM_EVT 共享（该位空闲可用）。
+                                           //     因本事件无启动源且无 tmos_start_task，不会误触发 fast 参数；断连清理里的 tmos_stop_task 顺带停 fast 事件亦无害。
+#define SBP_PARAM_UPDATE_EVT        0x0008  // 更新连接参数（AUTH 成功后→省电 DEFAULT）
+/* ★ 2026-08-18 AUTH 期间 fast 连接参数：连接建立后先发 FAST（LAT=0，60~100ms），
+ *   让 NONCE/AUTH:OK 全程走快窗口；AUTH 成功后由 SBP_PARAM_UPDATE_EVT 切回 DEFAULT 省电。
+ *   ★ 2026-08-18 修正（严重 bug）：原误用 0x0080，与 SBP_STATE_MACHINE_EVT(0x0080) 撞位！
+ *     导致状态机每 1s tick 都同时命中 fast 参数分支 → GAPRole_PeripheralConnParamUpdateReq
+ *     每 1s 重复发送，持续抢占 HCI 通道 → GAPRole_ReadRssiCmd 被持续拒绝/排队 →
+ *     peripheralRssiCB 永远不来 → g_latestRSSI/g_filteredRSSI 永久 -999 → App RSSI 显示 ---。
+ *     现改到 0x0004（注释明确标注"位释放可用"，且 SBP_ADV_ULTRA_SLOW_EVT 已 #if 0 停用、无启动源）。 */
+#define SBP_AUTH_FAST_PARAM_EVT     0x0004  // AUTH 期间 fast 连接参数请求（★ 避开 0x0080 状态机位）
 /* ★ v3.36.3-fix19 (P6 低功耗): 复用 0x0010 位作为「广播降速」定时器事件。
  *   原 SBP_PHY_UPDATE_EVT(0x0010) 从未作为 TMOS 任务事件被 tmos_start_task/事件处理使用
  *   （PHY 更新走 GAP_MSG_EVENT 的 GAP_PHY_UPDATE_EVENT 消息分支，与任务事件位是两套命名空间），
@@ -161,6 +171,18 @@ extern "C" {
  *   - 单值组 MIN==MAX 缩小手机协商空间，提高快间隔采纳率；LAT=0 不跳事件，最低延迟。 */
 #define ADV_FAST_MIN_CONN_INTERVAL    24    // 30ms    连接前广播声明：初始间隔下限
 #define ADV_FAST_MAX_CONN_INTERVAL    48    // 60ms    连接前广播声明：初始间隔上限（MIN==MAX 同值）
+
+/* ★ 2026-08-18 AUTH 期间运行期 fast 参数（连接建立后由从机发起 Connection Parameter
+ *   Update 请求，区别于上面的广播"声明"）。AUTH 全程走该快窗口，AUTH 成功后切回 DEFAULT 省电。
+ *   - MIN/MAX=24/48(30/60ms) 单值组，提高手机采纳率；LAT=0 不跳事件，AUTH:OK 回包最坏=1 个间隔。
+ *   - 手机可忽略/拉回，最坏持平无退化。
+ *   - 连接后即发，不沿用 SBP_PARAM_UPDATE_DELAY（否则 AUTH 前已切省电，失效）。 */
+#define AUTH_FAST_MIN_CONN_INTERVAL   32    // 40ms（保守下限：部分手机拒绝 <30ms，拒绝会导致协商异常→RSSI采样被抑制→显示---）
+#define AUTH_FAST_MAX_CONN_INTERVAL   64    // 80ms
+#define AUTH_FAST_SLAVE_LATENCY       0     // 不跳事件，最低延迟
+#define AUTH_FAST_CONN_TIMEOUT        600   // 6s（4s 过紧，接近规范下限易被手机/协议栈判为超时异常）
+#define SBP_AUTH_FAST_PARAM_DELAY     80    // 连接后 80ms 即发 FAST 请求（等 GAP 稳定）
+#define SBP_AUTH_BACK_TO_SLOW_DELAY   200   // AUTH 成功后 200ms 再切回 DEFAULT（让 AUTH:OK 先走快窗发出）
 
 // Company Identifier: WCH
 #define WCH_COMPANY_ID                       0x07D7
