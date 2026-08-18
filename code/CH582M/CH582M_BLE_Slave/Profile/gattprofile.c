@@ -12,7 +12,7 @@
  */
 #include "CONFIG.h"
 #include "gattprofile.h"
-#include "keygo_core.h"   // ★ 2026-08-17 [1007DIAG]: 访问诊断时间戳变量 + Peripheral_GetSystemMs()
+#include "keygo_core.h"   // ★ 2026-08-17 [1007DIAG]: 访问诊断时间戳变量 + Peripheral_GetSystemMs() + KeyGo_NotifyStatus() + g_ff02CccdEnabled(extern 声明见 keygo_core.h)
 
 /*********************************************************************
  * CONSTANTS
@@ -514,6 +514,22 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
                       pAttr->handle, len,
                       (len >= 2) ? (uint16_t)(pValue[0] | (pValue[1] << 8)) : 0,
                       (int)status);
+                /* ★ 2026-08-18 [FF02零无效推送]: CCCD 使能状态维护 + 订阅瞬间首发。
+                 *   - 写成 0x0001 → 使能：置 g_ff02CccdEnabled，并立即 KeyGo_NotifyStatus()
+                 *     首发一帧（App 订阅完成的同拍就能拿到首帧，比等下一个 1s 周期早一拍）；
+                 *     同时 KeyGo_NotifyStatus 入口守卫看到使能位后才真正发送。
+                 *   - 写成 0x0000 → 取消订阅：清 g_ff02CccdEnabled，后续周期不再推 FF02。
+                 *   连接初期(CCCD 未使能)的周期推送因入口守卫直接 return，彻底消除
+                 *   之前 Android 首 ATT 延迟 3s 窗口里的 3 次 bleIncorrectMode 无效推送。 */
+                if (status == SUCCESS && len >= 2) {
+                    uint16_t cccd = (uint16_t)(pValue[0] | (pValue[1] << 8));
+                    if (cccd & GATT_CLIENT_CFG_NOTIFY) {
+                        g_ff02CccdEnabled = 1;
+                        KeyGo_NotifyStatus();   // 订阅瞬间首发，App 立即收到首帧
+                    } else {
+                        g_ff02CccdEnabled = 0;
+                    }
+                }
                 break;
 
             default:

@@ -113,6 +113,10 @@ void KeyGo_ProcessStateMachine(void);
 // JSON 状态通知 (FF02 Notify)
 void KeyGo_NotifyStatus(void);
 
+// ★ 2026-08-18 [FF02零无效推送]: FF02 CCCD 使能标志（gattprofile.c 维护，
+//   KeyGo_NotifyStatus 入口守卫据此跳过未订阅阶段的周期推送）。
+extern uint8_t g_ff02CccdEnabled;
+
 // ★ 绑定层回写报文（FF02 Notify）：BIND:/NONCE:/AUTH:/UNBIND:/DENY: 等短消息
 void KeyGo_SendRawNotify(const char *msg);
 void KeyGo_FlushRawNotify(void);   // ★ 2026-07-11: 延迟发送队列消费（SBP_DEFERRED_RAW_EVT 任务内调用）

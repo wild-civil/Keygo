@@ -930,6 +930,15 @@ void KeyGo_ProcessStateMachine(void)
 
 static uint8_t s_statusRetry = 0;  // ★ 2026-07-11 fix2: 状态通知发送失败重试计数
 
+/* ★ 2026-08-18 [FF02零无效推送] CCCD 使能标志：
+ *   连接后固件 1s 周期即启动 KeyGo_NotifyStatus()，但 App 的 CCCD 写要等
+ *   Android 首 ATT 延迟(~3s)才到固件。此前会让 FF02 在「CCCD 未使能」阶段
+ *   连发 3 次 bleIncorrectMode(0x17) 失败（噪点 + 无效 ATT 尝试）。
+ *   gattprofile.c 在 CCCD 被写成 0x0001 时置 1、写 0x0000 时清 0；
+ *   此处入口守卫：未使能时整函数直接 return，周期任务照常跑但不发 FF02，
+ *   把连接初期的无效推送彻底归零。CCCD 使能瞬间由 gattprofile.c 主动首发一帧。 */
+uint8_t g_ff02CccdEnabled = 0;
+
 /* ★ 2026-08-17 [1007 治本] ATT 事务槽自适应退避：
  *   实测 AUTH 阶段 FF02(1s/次,224B) 与 App 的 NONCE/AUTH/配置/RSSISET 写抢同一 ATT 事务槽，
  *   固件端 simpleProfile_Notify 反复 blePending(0x16=ATT忙)，同时 App 侧 FF03 写被协议栈拒(1007)。
@@ -967,6 +976,12 @@ int16_t KeyGo_ReadTemperatureC(void)
 void KeyGo_NotifyStatus(void)
 {
     if (!g_deviceConnected || peripheralConnList.connHandle == GAP_CONNHANDLE_INIT)
+        return;
+
+    /* ★ 2026-08-18 [FF02零无效推送]: CCCD 未使能(连接初期 App 订阅尚未到达
+     *   或已取消订阅)时，跳过 FF02 构造/发送，避免 bleIncorrectMode 无效 ATT 尝试。
+     *   1s 周期任务仍正常运行，仅在此守卫处跳过，不改变调度时序。 */
+    if (!g_ff02CccdEnabled)
         return;
 
     // ★ 2026-08-17 [1007 治本]: ATT 事务槽退避期——刚撞过 ATT忙，让位给 App 写，避免继续抢槽致 1007
