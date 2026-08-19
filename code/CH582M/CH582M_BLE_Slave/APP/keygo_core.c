@@ -119,8 +119,8 @@ static uint8_t g_powerHoldForever = 0; // ★ 2026-08-14: HOLD_UNTIL_LOCK 模式
  *    由 App 通过 FF01 下发 "unlock=-30 lock=-45 uc=2..." 更新
  *    默认值与 App 端 store 初始值保持一致
  * ───────────────────────────────────────────────────────────────── */
-int16_t  g_cfgUnlockThreshold   = -45;   // RSSI 解锁阈值
-int16_t  g_cfgLockThreshold     = -65;   // RSSI 锁车阈值
+int16_t  g_cfgUnlockThreshold   = -55;   // RSSI 解锁阈值
+int16_t  g_cfgLockThreshold     = -75;   // RSSI 锁车阈值
 uint8_t  g_cfgUnlockCount       = 2;     // 解锁需连续满足次数
 uint8_t  g_cfgLockCount         = 3;     // 锁车需连续满足次数
 uint16_t g_cfgDisconnectLockMs  = 5000;  // 断连自动锁车延时 ms
@@ -1685,11 +1685,19 @@ void KeyGo_LoadConfig(void)
     }
 
     // 合理性校验（使用命名常量替代魔术数字）
-    if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < RSSI_THRESHOLD_MIN) g_cfgUnlockThreshold = -45;
-    if (g_cfgLockThreshold >= 0 || g_cfgLockThreshold < RSSI_THRESHOLD_MIN)     g_cfgLockThreshold   = -65;
+    if (g_cfgUnlockThreshold >= 0 || g_cfgUnlockThreshold < RSSI_THRESHOLD_MIN) g_cfgUnlockThreshold = -55; // ★ 与默认/App 初始值对齐
+    if (g_cfgLockThreshold >= 0 || g_cfgLockThreshold < RSSI_THRESHOLD_MIN)     g_cfgLockThreshold   = -75; // ★ 与默认/App 初始值对齐
     if (g_cfgUnlockCount < COUNT_MIN || g_cfgUnlockCount > COUNT_MAX)           g_cfgUnlockCount     = 2;
     if (g_cfgLockCount < COUNT_MIN || g_cfgLockCount > COUNT_MAX)               g_cfgLockCount       = 3;
     if (g_cfgDisconnectLockMs > DLOCK_MAX_MS)                                   g_cfgDisconnectLockMs = 5000;
+
+    // ★ 防反转保护：解锁阈值必须严格小于锁车阈值，否则两者重叠/反转会导致
+    //   状态机在边界处直接判解锁（unlockTh>=lockTh 时 RSSI 落入解锁区）。
+    //   此处钳制为"锁车阈值比解锁阈值至少低 5dB"，与 App 端 hystDb 一致。
+    if (g_cfgUnlockThreshold >= g_cfgLockThreshold) {
+        g_cfgUnlockThreshold = g_cfgLockThreshold + 5;
+        if (g_cfgUnlockThreshold >= 0) g_cfgUnlockThreshold = -55; // 极端越界兜底回默认
+    }
 
     // ★ 2026-08-14: 读取钥匙供电模式 (buf[15])
     //   旧格式(无此字节) buf[15]=0 → 视为 HOLD_UNTIL_LOCK(1) 以兼容旧设备默认行为;

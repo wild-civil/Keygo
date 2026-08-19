@@ -220,11 +220,11 @@ export const useBleStore = defineStore('ble', {
     autoLockEnabled: -1,          // ★ v3.24-fixb: 固件自动锁使能状态(FF02 al 字段)，-1=未知/未同步，0=关闭(手动模式)，1=开启
     keyPowerMode: -1,             // ★ 2026-08-14: 钥匙供电策略(FF02 kpm 字段), -1=未同步, 0=TIMEOUT(15s), 1=HOLD_UNTIL_LOCK(默认)
     statusStale: false,            // ★ v3.15-#13: 超时未收到 Status Notify → 连接可能已中断
-    unlockThreshold: -45,
-    lockThreshold: -65,
+    unlockThreshold: -55,    // 对应 固件侧 g_cfgUnlockThreshold（默认 -55）
+    lockThreshold: -75,      // 对应 固件侧 g_cfgLockThreshold（默认 -75）
     hystDb: 5,
-    unlockCountRequired: 3,
-    lockCountRequired: 5,
+    unlockCountRequired: 2,  // 对应 固件侧 g_cfgUnlockCount（默认 2）
+    lockCountRequired: 3,    // 对应 固件侧 g_cfgLockCount（默认 3）
     rssiReadPeriodMs: 500,         // ★ v3.13: 固件 RSSI 读取间隔 ms（设备侧 GAP 读取周期）
     disconnectLockDelayMs: 5000,
     kalmanR: 15,                    // ★ 与 CH582M / ESP32C3 默认 kf_r=15.0 一致
@@ -655,7 +655,7 @@ export const useBleStore = defineStore('ble', {
             if (source === '旧版全局') this._globalRestoreLogged = true
           }
         } else {
-          console.log('[Store] 使用默认配置 (unlock=-45 lock=-65 uc=3 lc=5 interval=800)')
+          console.log('[Store] 使用默认配置 (unlock=-55 lock=-75 uc=2 lc=3 interval=800)')
         }
 
         if (sn) this._restoredForSn = sn
