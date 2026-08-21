@@ -205,8 +205,13 @@ static simpleProfileCBs_t Peripheral_SimpleProfileCBs = {
 
 static void Peripheral_BuildBroadcastName(char *out, uint8_t outSize)
 {
+    /* ★ 2026-08-21 修复重名: CH582 GetMACAddress 返回【小端】, g_deviceMac[0..5]=BB D8 5C E5 66 E4
+     *   (数组[0]=MAC 字符串末字节)。NIC(设备唯一段, 同批次不同)在 [0][1][2], 含变化的末字节(BB/B9);
+     *   [3][4][5]=E5 66 E4 是 OUI(厂商标识, 同批次必相同) → 旧代码取此段致所有设备重名 KeyGo-E5566E4。
+     *   改取 [0][1][2](NIC 末3字节): ...:BB→KeyGo-BBD85C, ...:B9→KeyGo-B9D85C, 可区分不误连。
+     *   思路与荣耀手环(取 MAC 末2字节低12位做短编码)一致: 设备名必须用 NIC 段, 绝不用 OUI。 */
     snprintf(out, outSize, "KeyGo-%02X%02X%02X",
-             g_deviceMac[3], g_deviceMac[4], g_deviceMac[5]);
+             g_deviceMac[0], g_deviceMac[1], g_deviceMac[2]);
 }
 
 static void Peripheral_BuildScanRspData(void)
@@ -1033,6 +1038,23 @@ static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent)
         KeyGo_AdvEnterFastWindow();   // 设恒定广播间隔（不开关广播）
 #endif
         {
+            /* ★ 2026-08-21 [scanRsp 丢失根因修复]:
+             *   现象: 任意中心设备(nRF Connect / App)连接一次→断开后, 设备名变 N/A,
+             *         App 按名过滤扫不到; 复位/清绑(重新 Init)才恢复。
+             *   根因: CH582M 协议栈在【被连接期间】会改写 GAPROLE_SCAN_RSP_DATA
+             *         指向的 scanRspData 缓冲; 断连恢复广播时复用的是被破坏的缓冲
+             *         → 广播出的 scanRsp 无设备名。
+             *         NoApp 模式连接正常, 是因为 HID 库(hidDev)在断连时自带 scanRsp
+             *         重装载钩子; 而普通 GATT 连接断连路径(LinkTerminated)只 enable
+             *         不重载 → 顾名丢失。该 bug 与 CPU 主频无关(60MHz/30MHz 均复现)。
+             *   修复: 断连恢复广播前, 先重建并重新装载 advertData + scanRspData,
+             *         再 enable=TRUE(绝不先 FALSE, 遵循"切间隔/恢复广播不闪烁"铁律)。
+             *         仅在断连时执行一次, 不影响稳态功耗。 */
+            Peripheral_BuildAdvertData();
+            Peripheral_BuildScanRspData();
+            GAPRole_SetParameter(GAPROLE_ADVERT_DATA, advertLen, advertData);
+            GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, scanRspLen, scanRspData);
+
             // ★ 启动/恢复广播（与旧行为一致：仅 enable=TRUE，绝不先 FALSE）。
             //   断连态 GAP 栈已停广播，enable=TRUE 即按刚设好的快间隔重新广播。
             uint8_t advertising_enable = TRUE;
