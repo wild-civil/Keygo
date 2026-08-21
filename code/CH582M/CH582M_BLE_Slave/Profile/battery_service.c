@@ -4,7 +4,7 @@
  * Date               : 2026/07/03
  * Description        : BLE Battery Service (0x180F) 实现
  *                      电量默认走内部 VBAT ADC(通道14, V03 经 LDO 显示~100%)；
- *                      V04 起支持外部电池 ADC: PB3=BAT_ADC_EN(闸门)+PA3/AIN6=BAT_ADC(模拟输入)，
+ *                      V04 起支持外部电池 ADC: V04=PB3 / V0.8=PB5 作 BAT_ADC_EN(闸门)+PA3/AIN6=BAT_ADC(模拟输入)，
  *                      由 BOARD_HAS_EXT_BAT_ADC 编译开关启用。
  *
  * GATT 属性表结构:
@@ -161,7 +161,7 @@ void Battery_Notify(void)
 /*******************************************************************************
  * @fn      Battery_ADC_Init
  *
- * @brief   V04 外部电池 ADC GPIO 初始化: PB3=BAT_ADC_EN(闸门输出), PA3=BAT_ADC(模拟输入)
+ * @brief   V0.8 外部电池 ADC GPIO 初始化: PB5=BAT_ADC_EN(闸门输出, V04 为 PB3), PA3=BAT_ADC(模拟输入)
  *
  * @note    CH582M 无 GPIO_ModeAIN, 模拟输入用 GPIO_ModeIN_Floating(高阻)。
  *          闸门默认关断(省电), 采样前再打开。

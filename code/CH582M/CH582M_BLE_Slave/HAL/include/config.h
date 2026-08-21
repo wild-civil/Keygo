@@ -22,19 +22,23 @@
 #include "CH58x_common.h"
 
 /* ─────────────────────────────────────────────────────────────────
- * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件) — 自定义 PCB V03/V04
- *   Unlock=PB5, Lock=PB7, Trunk/Cycling=PB6, Other(喇叭/寻车)=PB4
- *   KEY_POWER(给钥匙供电/驱动PMOS导通)=PB0
- *   LED_R=PB15, LED_B=PB14
- *   PB22 = BIND 按键, RST=PB23, BOOT=PB22(长按恢复出厂)
+ * ★ KeyGo v3.5 GPIO 引脚定义 (CH582M 硬件) — 自定义 PCB V0.8
+ *   ★ V0.8 管脚重映射(原理图 schematic_pinout_2026-08-21_V0.8.md):
+ *     Unlock=PB3, Lock=PB1, Trunk/Cycling=PB2, Other(喇叭/寻车)=PB4
+ *     BAT_ADC_EN=PB5 (V04 为 PB3, V0.8 让 PB3 给 Unlock, EN 移到 PB5)
+ *     KEY_POWER(给钥匙供电/驱动PMOS导通)=PB0
+ *     LED_R=PB15, LED_B=PB14
+ *     PB22=BIND/BOOT(长按恢复出厂), RST=PB23
+ *   ★ TMUX1112 模拟开关: SEL3=Unlock(PB3)/SEL4=Lock(PB1)/SEL2=Other(PB4)/S1-S4
+ *     电平跟随型 → 固件脉冲(SetBits 导通=模拟按下, 脉冲结束 ResetBits=松手)即点动语义。
  * ───────────────────────────────────────────────────────────────── */
-#define PIN_UNLOCK_GPIO             GPIO_Pin_5   // PB5 → 解锁
-#define PIN_LOCK_GPIO               GPIO_Pin_7   // PB7 → 上锁
-#define PIN_TRUNK_GPIO              GPIO_Pin_6   // PB6 → 后备箱/骑行
-#define PIN_OTHER_GPIO              GPIO_Pin_4   // PB4 → 第4键(喇叭/寻车)
-#define PIN_KEYPOWER_GPIO           GPIO_Pin_0   // PB0 → KEY_POWER\(给钥匙供电, 驱动 PMOS 导通)
-/* ★ ebike RIDE 输出引脚。复用 TRUNK 脚(PB6)——电动车模式 RIDE 触发线接此处 */
-#define PIN_RIDE_GPIO               GPIO_Pin_6   // PB6 → 电瓶车 RIDE(快速双击)
+#define PIN_UNLOCK_GPIO             GPIO_Pin_3   // PB3 → 解锁 (V0.8, TMUX SEL3)
+#define PIN_LOCK_GPIO               GPIO_Pin_1   // PB1 → 上锁 (V0.8, TMUX SEL4)
+#define PIN_TRUNK_GPIO              GPIO_Pin_2   // PB2 → 后备箱/骑行 (V0.8)
+#define PIN_OTHER_GPIO              GPIO_Pin_4   // PB4 → 第4键(喇叭/寻车) (V0.8, TMUX SEL2)
+#define PIN_KEYPOWER_GPIO           GPIO_Pin_0   // PB0 → KEY_POWER(给钥匙供电, 驱动 PMOS 导通)
+/* ★ ebike RIDE 输出引脚。复用 TRUNK 脚(PB2)——电动车模式 RIDE 触发线接此处 */
+#define PIN_RIDE_GPIO               GPIO_Pin_2   // PB2 → 电瓶车 RIDE(快速双击)
 
 #define PIN_UNLOCK_PORT             GPIOB
 #define PIN_LOCK_PORT               GPIOB
@@ -214,18 +218,22 @@ extern uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
 extern const uint8_t MacAddr[6];
 
 /* ─────────────────────────────────────────────────────────────────
- * ★ 电池电量采样 — 自定义 PCB (V03 / V04)
+ * ★ 电池电量采样 — 自定义 PCB (V04 / V0.8)
  *   V03 (已焊): 无外部 ADC → 不定义 BOARD_HAS_EXT_BAT_ADC → 走内部 VBAT
  *               (经 LDO 恒 3.3V, 显示~100%)。
- *   V04 (在途): PB3=BAT_ADC_EN(闸门 GPIO 输出), PA3/AIN6=BAT_ADC(模拟输入)。
- *   打 V04 板时, 在 MRS 预处理(或下方) #define BOARD_HAS_EXT_BAT_ADC 即启用外部采样。
+ *   V04/V0.8: 外部电池 ADC: PA3/AIN6=BAT_ADC(模拟输入) 不变;
+ *             BAT_ADC_EN(闸门) V04=PB3, V0.8 让 PB3 给 Unlock → 移到 PB5。
+ *   仍用 BOARD_HAS_EXT_BAT_ADC 编译开关启用。
+ *   ★ 两版焊接: (a) R27/R28=51k+51k, (b) R27/R28=100k+100k。
+ *     两者分压比都是 1:1(Vbat/2), PGA/比值/两点校准不变; 仅 RC 时间常数不同
+ *     (51k×100nF≈5ms vs 100k×100nF≈10ms)。settle 取到 300ms 覆盖 100k 版留 3× 余量。
  * ───────────────────────────────────────────────────────────────── */
-#define BOARD_HAS_EXT_BAT_ADC             /* ← V04 已打板且焊接 R27/R28=51k+51k 分压, 启用外部电池 ADC */
+#define BOARD_HAS_EXT_BAT_ADC             /* ← V0.8 仍保留外部电池 ADC (PA3 模拟输入 + PB5 闸门) */
 
 #ifdef BOARD_HAS_EXT_BAT_ADC
-#define BAT_ADC_EN_PIN                  GPIO_Pin_3   // PB3 → BAT_ADC_EN (闸门输出)
-#define BAT_ADC_EN_ACTIVE_LEVEL         1            /* ★ 高有效: PB3高→NMOS栅极高→NMOS导通→PMOS栅极拉低→PMOS导通→分压上电; 拉高PB3=开闸 */
-#define BAT_ADC_EN_SETTLE_MS            200          // ★ 拉高 EN 后等待分压稳定: 51k+51k 分压 + PA3 端 100nF 电容 → RC≈5ms; 但 CH582M 外部 ADC 单次采样前模拟通道切换+采样电容充电需额外时间, 且从 Sleep 唤醒时模拟域起来也需时间。实测 50ms 偶发饱和(100%), 提到 200ms 留足余量。
+#define BAT_ADC_EN_PIN                  GPIO_Pin_5   // ★ V0.8: PB5 → BAT_ADC_EN (闸门输出, V04 时为 PB3)
+#define BAT_ADC_EN_ACTIVE_LEVEL         1            /* ★ 高有效: PB5高→NMOS栅极高→NMOS导通→PMOS栅极拉低→PMOS导通→分压上电; 拉高PB5=开闸 */
+#define BAT_ADC_EN_SETTLE_MS            300          // ★ 拉高 EN 后等分压稳定: 51k+51k/100k+100k 版 RC≈5/10ms, 但 ADC 通道切换+采样电容充电+Sleep 唤醒模拟域需额外时间; 300ms 兼容两版留足余量(100k 版实测 200ms 偶发饱和)。
 #define BAT_ADC_AIN_PIN                 GPIO_Pin_3   // PA3 → AIN6 (BAT_ADC 模拟输入)
 #define BAT_ADC_CHANNEL                 CH_EXTIN_6   // PA3 对应 ADC 外部通道 6
 #define BAT_ADC_REF_MV                  1050         // CH582M 内部基准 1.05V

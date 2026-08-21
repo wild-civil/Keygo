@@ -231,7 +231,7 @@ void KeyGo_GPIO_Init(void)
     GPIOB_ModeCfg(PIN_KEYPOWER_GPIO, GPIO_ModeOut_PP_5mA);
 
 #ifdef BOARD_HAS_EXT_BAT_ADC
-    Battery_ADC_Init();   // ★ V04 外部电池 ADC: PB3 闸门 + PA3 模拟输入
+    Battery_ADC_Init();   // ★ V0.8 外部电池 ADC: PB5 闸门(BAT_ADC_EN) + PA3 模拟输入
 #endif
 
     GPIOB_ResetBits(PIN_UNLOCK_GPIO);
@@ -250,7 +250,7 @@ void KeyGo_GPIO_Init(void)
     GPIOB_ResetBits(GPIO_Pin_14);    // 蓝 LED 初始灭
     GPIOB_ResetBits(GPIO_Pin_15);    // 红 LED 初始灭
     KeyGo_FactoryReset_GPIO_Init();                   // ★ 隐藏按键(PB22/BOOT) 长按恢复出厂轮询任务
-    PRINT("[GPIO] Initialized (PB5=UNLOCK, PB7=LOCK, PB6=TRUNK, PB4=OTHER, PB0=KEY_POWER, PB14=LED_B(蓝), PB15=LED_R(红), PB22=FR_BTN)\n");
+    PRINT("[GPIO] Initialized (V0.8: PB3=UNLOCK, PB1=LOCK, PB2=TRUNK, PB4=OTHER, PB5=BAT_ADC_EN, PB0=KEY_POWER, PB14=LED_B(蓝), PB15=LED_R(红), PB22=FR_BTN)\n");
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -384,7 +384,7 @@ static void KeyGo_FactoryReset_Poll(void)
         if (now >= g_frConfirmMs) {
             KeyGo_FactoryReset_DoErase();
             /* 复位前拉低控制引脚防误动(与看门狗/adv 重启复位一致) */
-            GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+            GPIOB_ResetBits(PIN_UNLOCK_GPIO | PIN_LOCK_GPIO | PIN_TRUNK_GPIO | PIN_OTHER_GPIO);
             GPIOB_ResetBits(PIN_LED_BLUE_GPIO | PIN_LED_RED_GPIO);   // 双 LED 灭
             SYS_ResetExecute();   // 完整重启 → 以出厂默认(未绑定/car/默认阈值)重新初始化
         }

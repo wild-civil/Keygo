@@ -718,12 +718,12 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
              *         输入+内部上拉(弱高电平) → PB4~PB7 控制线不确定、PB15 LED 短暂亮起
              *   修复：提前将控制引脚拉低为输出低电平，确保复位窗口内输出安全状态
              *   ─────────────────────────────────────────────────────────────
-             *   引脚说明 (自定义 PCB V03/V04)：
-             *     PB5 = UNLOCK, PB7 = LOCK, PB6 = TRUNK, PB4 = OTHER(喇叭/寻车)
+             *   引脚说明 (自定义 PCB V0.8)：
+             *     PB3 = UNLOCK, PB1 = LOCK, PB2 = TRUNK, PB4 = OTHER(喇叭/寻车)
              *     PB0 = KEY_POWER(供电), PB14 = LED_B(蓝,常规), PB15 = LED_R(红,重大)
              *   ─────────────────────────────────────────────────────────────
-             *   GPIO_Pin_4/5/6/7 = (1<<4)~(1<<7) 在 PA 和 PB 端口上值是相同的 */
-            GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+             *   用 PIN_* 宏而非裸 GPIO_Pin_x, 改板只需动 config.h */
+            GPIOB_ResetBits(PIN_UNLOCK_GPIO | PIN_LOCK_GPIO | PIN_TRUNK_GPIO | PIN_OTHER_GPIO);
             GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);   // ★ 双 LED(PB14蓝/PB15红) 复位前灭
 
             SYS_ResetExecute();

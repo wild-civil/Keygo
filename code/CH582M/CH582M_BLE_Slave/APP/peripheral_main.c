@@ -114,9 +114,9 @@ void WDOG_BAT_IRQHandler(void)
             {
                 /* ★ 复位前安全措施：拉低所有 GPIO 控制引脚
                  *   防止复位过程中引脚电平抖动 → 车锁误动作
-                 *   PB5/PB7/PB6/PB4(OTHER) 是 KeyGo 的按键输出引脚, PB0=KEY_POWER(供电)
+                 *   V0.8: PB3=Unlock/PB1=Lock/PB2=Trunk/PB4=Other 是按键输出引脚, PB0=KEY_POWER(供电)
                  *   PB14=LED_B(蓝,常规), PB15=LED_R(红,重大) */
-                GPIOB_ResetBits(GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7);
+                GPIOB_ResetBits(PIN_UNLOCK_GPIO | PIN_LOCK_GPIO | PIN_TRUNK_GPIO | PIN_OTHER_GPIO);
                 GPIOB_ResetBits(GPIO_Pin_14 | GPIO_Pin_15);   // ★ 双 LED 复位前灭
 
                 /* 执行软件复位 — 芯片完全重启，等效于上电复位 */
@@ -189,11 +189,13 @@ int main(void)
     /* ★2026-07-31 修复：CLK_OSC32K=0 用外部 32.768K 晶振(PA10/PA11)时，此二脚是晶振专用，
      *   绝不能配成数字 GPIO（输入上拉会破坏起振 → RTC 无时钟 → 永远不睡）。
      *   故从 GPIO_Pin_All 中排除 PA10/PA11；CLK_OSC32K=1(片内RC)时它们可作普通 IO，排除后浮空也无害。
-     * ★2026-08-08 修复：PA3 是 V04 外部电池 ADC(AIN6)，焊接了 R27/R28=51k+51k 分压网。
+     * ★2026-08-08 修复：PA3 是 V04/V0.8 外部电池 ADC(AIN6)，焊接了 R27/R28=51k+51k 或 100k+100k 分压网。
      *   若把 PA3 配成数字输入上拉(GPIO_ModeIN_PU)，内部施密特缓冲器会把 ~Vbat/2 的模拟中点
      *   判成中间态、CMOS 缓冲器反复翻转振荡 → mA 级漏电（实测 3mA+）。
      *   必须从 GPIO_Pin_All 排除 PA3，使其保持复位后的浮空高阻(模拟输入态)；
-     *   启用 BOARD_HAS_EXT_BAT_ADC 时 Battery_ADC_Init() 会进一步显式配 GPIO_ModeIN_Floating。 */
+     *   启用 BOARD_HAS_EXT_BAT_ADC 时 Battery_ADC_Init() 会进一步显式配 GPIO_ModeIN_Floating。
+     * ★ V0.8 注：BAT_ADC_EN 为 PB5(输出闸门)，非模拟脚，不在此排除；其输出低关断态由
+     *   Battery_ADC_Init() 在 Peripheral_Init 阶段设定，休眠唤醒保持（CH582M 休眠不丢 GPIO 配置）。 */
     GPIOA_ModeCfg(GPIO_Pin_All & ~(GPIO_Pin_3 | GPIO_Pin_10 | GPIO_Pin_11), GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
 #endif
