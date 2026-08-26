@@ -161,15 +161,19 @@
          ★ v3.36.3fix11.6: v-show→v-if，防御 MP 上 connected 过渡态时卡片残余（_onUniBtAdapterStateChange
          在设 btState='off' 与 _handleBtOff→connected=false 之间,DOM 可能暂存 v-show 的 display:none 未刷）。
          v-if 在 connected 变为 truthy 时将卡片彻底从 DOM 移除，消除跨端渲染不一致。 -->
-    <!-- 整个重连卡片容器绑 @tap=onListTap：点卡片内任意空白(含「已知设备」标题、列表空隙)→ 收起展开项。
-         连接/删除/⋯ 按钮均 @tap.stop 拦截，不会冒泡到这里，故不会误收起。 -->
-    <view class="reconnect-card" v-if="!bleStore.connected && bleStore.knownDevicesList.length" @tap="onListTap">
+    <!-- ★ 2026-08-26: 侧边书脊布局 ——「已知设备 (N)」作为左侧竖排小标签（紧贴卡片左边，
+         像书的书脊），与右侧设备卡组成 row 布局。点空白处（含书脊与卡片间隙）→ 收起展开项；
+         按钮 @tap.stop 不冒泡。 -->
+    <view class="known-section" v-if="!bleStore.connected && bleStore.knownDevicesList.length" @tap="onListTap">
+      <!-- 左侧书脊：「已知设备 / (N)」竖排两行 -->
+      <view class="reconnect-label">
+        <text class="reconnect-title">已知设备</text>
+        <text class="reconnect-count">({{ bleStore.knownDevicesList.length }})</text>
+      </view>
+      <!-- 右侧：设备卡容器（多设备/单设备共用） -->
+      <view class="known-section-body">
       <!-- 多设备：展开为可滚动列表 -->
       <template v-if="bleStore.knownDevicesList.length > 1">
-        <view class="reconnect-label">
-          <text class="reconnect-title">已知设备</text>
-          <text class="reconnect-count">({{ bleStore.knownDevicesList.length }})</text>
-        </view>
         <scroll-view class="known-list" scroll-y @tap="onListTap">
           <!-- ★ 2026-08-09 P1-②(改): iOS 风左滑。前景 foreground 层随手指左移，露出背后 default/remove 按钮；
                右侧 ⋯ 图标点击=toggleItem 滑动展开(与左滑同一套 UI，不再弹 ActionSheet)；
@@ -238,10 +242,6 @@
           <view class="known-item-front" :style="{ transform: (openMac === bleStore.knownDeviceId ? 'translateX(-' + backWidth + 'px)' : 'translateX(0)') }"
             @tap="onFrontTap(bleStore.knownDeviceId)">
             <view class="reconnect-info">
-              <view class="reconnect-label">
-                <text class="reconnect-title">已知设备</text>
-                <text class="reconnect-count">({{ bleStore.knownDevicesList.length }})</text>
-              </view>
               <text class="reconnect-name">{{ bleStore.knownDeviceName }}</text>
               <text class="reconnect-mac">{{ bleStore.knownDeviceId }}</text>
               <view v-if="bleStore.customNameForMac(bleStore.knownDeviceId) || isDefaultDevice(bleStore.knownDeviceId)" class="device-tags">
@@ -256,6 +256,7 @@
           </view>
         </view>
       </template>
+      </view><!-- /.known-section-body -->
     </view>
 
     <!-- 设备扫描区域 -->
@@ -1110,25 +1111,47 @@ async function handleSetName() {
   margin-bottom: 30rpx;
 }
 
-/* ★ 2026-07-22: 手动断开后"重新连接"卡片 — 与 .section/.status-card 等宽对齐 */
-.reconnect-card {
+/* ★ 2026-08-26: 侧边书脊布局 ——「已知设备 (N)」作为左侧竖排小标签（紧贴卡片左缘，
+   无底色无边框，仅两行小字浮在 card 背景上）。.known-section-body 承载设备卡堆。 */
+.known-section {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: row;
+  align-items: stretch;
   background: var(--bg-card);
   border-radius: 16rpx;
-  padding: 24rpx;
-  margin: 0 0 30rpx;          /* 横向无外边距 → 与上/下卡片等宽；纵向 30rpx 保持节奏一致 */
+  margin: 0 0 30rpx;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+/* 左侧书脊：固定宽盒，竖排两行（"已知设备" / "(N)"）均水平居中于容器中央。
+   无背景色无边框，仅两行小字浮在 card 背景上。
+   ★ 调宽只需改下面这一处 width（如 120rpx→110rpx），其余不依赖该值。 */
+.reconnect-label {
+  flex: 0 0 auto;
+  width: 110rpx;               /* ★ 书脊宽度（与右侧间距见 .known-section-body 的 padding-left） */
+  padding: 24rpx 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4rpx;
   box-sizing: border-box;
 }
+.reconnect-title { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; line-height: 1.2; }
+.reconnect-count { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; line-height: 1.2; }
+/* 右侧：设备卡容器（多设备/单设备共用）
+   ★ 左 padding 控制「书脊右缘 → 卡片内容」的水平间隙：书脊总宽(width) + 此值 = 实际间隙。
+     若上面 width 调整，建议同步改这里保持视觉间距一致（如 width 120→110，可保持 12rpx 不变，或缩到 8rpx 让间距更紧凑）。 */
+.known-section-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 24rpx 24rpx 24rpx 6rpx;   /* ★ 第四个值 = 书脊与卡片间隙（随 width 调整时可微调） */
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
 .reconnect-info { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; } /* ★ flex:1 占满剩余空间 → 强制把按钮顶到最右 */
-/* ★ 2026-08-12: 对齐控制页观感 —— "已知设备"一行，(N) 在其正下方居中。
-   用 inline-flex 让容器宽度收缩到"已知设备"四个字宽度（不撑满卡片），
-   内部 column + 居中 → (N) 以四字中心对齐（落在"知""设"下方），而非整行居中。
-   字号/颜色同控制页：22rpx / text-tertiary。 */
-.reconnect-label { display: inline-flex; flex-direction: column; align-items: center; gap: 2rpx; margin-bottom: 8rpx; margin-right: 12rpx;}
-.reconnect-title { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; }
-.reconnect-count { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; }
 .reconnect-name { font-size: 28rpx; color: var(--text-primary); font-weight: 600; line-height: 1.3; }
 .reconnect-mac { font-size: 22rpx; color: var(--text-tertiary); margin-top: 2rpx; }
 .reconnect-btn {
@@ -1145,7 +1168,7 @@ async function handleSetName() {
 .reconnect-btn:active { opacity: 0.7; }
 
 /* ★ 2026-07-23 ②④ / 2026-08-09 改: 多设备重连列表（iOS 风左滑） */
-.known-list { max-height: 320rpx; margin-top: 10rpx; }
+.known-list { max-height: 320rpx; }   /* ★ 2026-08-26: 去 margin-top；标题已迁到外层 section-header，无需补偿 */
 /* 外层：相对定位 + 溢出隐藏，承载「前景层 + 背后操作层」 */
 .known-item {
   position: relative;
@@ -1154,7 +1177,7 @@ async function handleSetName() {
   border-top: 1rpx solid var(--border);
 }
 .known-item:first-child { border-top: none; }
-.single-item { margin-top: 10rpx; }   /* 单设备卡与多设备列表首项视觉间距一致 */
+/* ★ 2026-08-26: .single-item 移除 margin-top（标题已迁到外层 section-header，与多设备视觉节奏一致） */
 /* 背后操作层：铺在右侧，前景左移时露出 */
 .known-item-back {
   position: absolute;
