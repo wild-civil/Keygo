@@ -179,6 +179,7 @@ static void peripheralParamUpdateCB(uint16_t connHandle, uint16_t interval,
 static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent);
 static void Peripheral_LinkTerminated(gapRoleEvent_t *pEvent);
 static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len);
+static void simpleProfileCccdEnabledCB(void);   // ★ 2026-08-26 [FF02-FAST-FIRST]: FF02 订阅即推首帧
 
 /* ─────────────────────────────────────────────────────────────────
  * 回调表
@@ -195,7 +196,8 @@ static gapRolesBroadcasterCBs_t Broadcaster_BroadcasterCBs = {
 };
 
 static simpleProfileCBs_t Peripheral_SimpleProfileCBs = {
-    simpleProfileChangeCB
+    simpleProfileChangeCB,
+    simpleProfileCccdEnabledCB   // ★ 2026-08-26: FF02 CCCD 使能 → 立即派发首帧状态
 };
 
 /*********************************************************************
@@ -1368,6 +1370,20 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
  *   FF01 (RSSI)   → keygo_core
  *   FF03 (Command) → Peripheral_HandleFF03（绑定/鉴权 + 门控）
  *********************************************************************/
+
+/*********************************************************************
+ * ★ 2026-08-26 [FF02-FAST-FIRST]: FF02(CHAR2) CCCD 被 App 使能 notify 时回调。
+ *   App 订阅成功后，立即派发一帧状态(SBP_DEFERRED_STATUS_EVT → KeyGo_NotifyStatus)，
+ *   让 App 侧 _waitFf02Ready 守卫近乎零等待(NONCE 立即可发)，省去等周期(~758ms)。
+ *   用 tmos_set_event(非同步调 KeyGo_NotifyStatus)避免 CCCD 写到达瞬间 ATT 事务槽
+ *   忙(blePending)导致首发被拒；KeyGo_NotifyStatus 幂等(去重)不会刷屏。
+ *********************************************************************/
+static void simpleProfileCccdEnabledCB(void)
+{
+    if (g_deviceConnected) {
+        tmos_set_event(Peripheral_TaskID, SBP_DEFERRED_STATUS_EVT);
+    }
+}
 
 static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len)
 {

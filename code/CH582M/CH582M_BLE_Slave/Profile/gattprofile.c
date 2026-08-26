@@ -514,6 +514,19 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t 
                       pAttr->handle, len,
                       (len >= 2) ? (uint16_t)(pValue[0] | (pValue[1] << 8)) : 0,
                       (int)status);
+                /* ── [FF02-FAST-FIRST] 2026-08-26: CCCD 使能即推首帧状态 ──
+                 * 旧行为: CCCD 写成功只更新配置，固件傻等下一个 SBP_PERIODIC_EVT
+                 * (默认 ~1s 周期) 才推首帧 FF02 → App 侧 _waitFf02Ready 阻塞 ~758ms。
+                 * 新行为: App 订阅 FF02 成功后，通过回调通知 peripheral.c 立即派发一帧状态，
+                 * 让 App 的 _waitFf02Ready 守卫近乎零等待（NONCE 立即可发）。
+                 * 仅对 FF02(CHAR2) CCCD 使能生效；回调可空(向后兼容)。 */
+                if (status == SUCCESS &&
+                    pAttr->handle == simpleProfileAttrTbl[SIMPLEPROFILE_CHAR2_CCCD_POS].handle &&
+                    len >= 2 && (pValue[0] | (pValue[1] << 8)) == GATT_CLIENT_CFG_NOTIFY) {
+                    if (simpleProfile_AppCBs && simpleProfile_AppCBs->pfnCccdEnabled) {
+                        simpleProfile_AppCBs->pfnCccdEnabled();
+                    }
+                }
                 break;
 
             default:

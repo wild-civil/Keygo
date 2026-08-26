@@ -55,9 +55,15 @@ extern "C" {
 // Callback when a characteristic value has changed
 typedef void (*simpleProfileChange_t)(uint8_t paramID, uint8_t *pValue, uint16_t len);
 
+// ★ 2026-08-26 [FF02-FAST-FIRST]: 回调——FF02(CHAR2) CCCD 被 App 使能 notify 时触发。
+//   用于让固件在订阅成功后立即推一帧状态(而非等周期)，压缩 App 侧 _waitFf02Ready 等待。
+//   返回 void，调用方(peripheral.c)负责安全地派发 TMOS 事件。
+typedef void (*simpleProfileCccdEnabled_t)(void);
+
 typedef struct
 {
     simpleProfileChange_t pfnSimpleProfileChange; // Called when characteristic value changes
+    simpleProfileCccdEnabled_t pfnCccdEnabled;    // ★ 2026-08-26: FF02 CCCD 使能回调(可空)
 } simpleProfileCBs_t;
 
 /*********************************************************************
