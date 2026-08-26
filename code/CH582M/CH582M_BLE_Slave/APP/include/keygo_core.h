@@ -134,7 +134,9 @@ void KeyGo_CancelUnauthTimer(void);       // AUTH/BIND 成功时调用，取消�
  *   触发 OS 弹配对框，修复 X8 原版(snvBonds>0 判据)在 forget 场景失效的 bug。
  *   配合 Bonding_ApplyPairingMode 恒 WAIT_FOR_REQ：固件永不主动 INITIATE，从而已配对重连
  *   不再被强拖成完整 SMP(3s+)。 */
-#define SECURITY_DETECT_MS        1500    // 连接后检测 LINK_ENCRYPTED 的窗口(ms)；>Android 自加密耗时(300~500ms)，<用户感知阈值
+#define SECURITY_DETECT_MS        1500    // 连接后检测 LINK_ENCRYPTED 的窗口(ms)；>Android 自加密耗时(300~500ms)。
+                                        // 注意：检测放在 KeyGo_ProcessStateMachine 每拍(≈1s)轮询里，故【实际触发延迟≈2s】
+                                        // (第2拍 dt≥1500ms 才发 Security Request)，非精确 1.5s。如需精确 1.5s 改独立 tmos 定时器。
 extern uint32_t g_linkEstMs;             // 连接建立时刻(ms)，Peripheral_LinkEstablished 写入；断连清零
 
 

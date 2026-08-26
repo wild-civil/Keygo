@@ -1257,7 +1257,15 @@ static void Peripheral_HandleFF03(const uint8_t *pValue, uint16_t len)
          *   回包 ENCRYPT:OK / ENCRYPT:OFF 供 App 确认。 */
         uint8_t ev = (len > 8 && pValue[8] == '1') ? 1 : 0;
         g_encRequired = ev;
-        KeyGo_SaveEncrypt(ev);
+        // ★ 2026-08-26 幂等: App 端 APP 模式(now noAppMode=false)改为每次连接都发 ENCRYPT:0 兜底，
+        //   若固件已是目标值则跳过 KeyGo_SaveEncrypt(整页擦 DataFlash，磨损寿命)。
+        //   仅当值真正变化时才持久化；g_encRequired 运行态已先赋值，故这里判等安全。
+        if ((ev && g_encRequired) || (!ev && !g_encRequired)) {
+            // 运行态已一致，无需重擦 DataFlash（Bonding_ApplyPairingMode 幂等，配对模式恒 WAIT_FOR_REQ 无副作用）
+            PRINT("[ENCRYPT] already encRequired=%d, skip DataFlash erase\n", ev);
+        } else {
+            KeyGo_SaveEncrypt(ev);
+        }
         Bonding_ApplyPairingMode();
         /* ★ [v3.36.2-fix-2] 启用无App模式时自动开一次配对窗。
          *   窗口时长由默认 30s 提至 60s：覆盖「ENCRYPT→断GATT→createBond→重连→AUTH」

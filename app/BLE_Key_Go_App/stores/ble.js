@@ -2827,9 +2827,9 @@ export const useBleStore = defineStore('ble', {
           //   被全局监听器误判为「设备已切换」而跳过清理/搅乱状态机。
           const prevDeviceId = this.deviceId
           this.deviceId = targetId
-          try { await new Promise((resolve) => {
-            try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (_) { resolve() }
-          }) } catch (_) {}
+          // ★ 2026-08-26 修正(trae 审查 A): 原裸 uni.closeBLEConnection 在 GATT 僵死时 complete 永不回调
+          //   → Promise 永不 resolve → 卡死。改用 disconnectDevice 封装，自带 3s 硬超时兜底，确保收口。
+          try { await disconnectDevice(targetId) } catch (_) {}
           await new Promise(r => setTimeout(r, 700))
           try {
             // ★ 重试必须有独立短超时(5s)：否则复用 connectDevice 内部的 18s 硬超时，GATT 仍僵死时
@@ -2843,6 +2843,9 @@ export const useBleStore = defineStore('ble', {
             console.log('[Store] ⛧ 10012 重试成功，连接已恢复')
             return
           } catch (e2) {
+            // ★ 2026-08-26 修正(trae 审查 B): race 5s 失败后 connectDevice 内部的 18s 硬超时仍在跑，
+            //   无人 await → unhandled rejection。此处拆链让 connectDevice 内部尽快失败收口。
+            await disconnectDevice(targetId).catch(() => {})
             console.warn('[Store] ⛧ 10012 重试仍失败(或超时)，交上层:', e2?.message || e2?.errMsg || e2)
             throw e2 || e
           } finally {
@@ -5997,11 +6000,18 @@ export const useBleStore = defineStore('ble', {
     //   (150ms×30) 覆盖 SMP 握手窗口 → 本次连接尾巴即把固件拉回期望态，下次连接直走 fast path。
     //   与 status 对账(4143-)互补：对账处理「设备推送 pair 与实际不符」，本方法处理「连接后第一时间下发」。
     //   防御：仅 dirty 且有通道时发；失败仅 log，由 status 对账兜底再尝试，不引入额外负优化。
+    // ★ 2026-08-26 修正(trae 审查死锁隐患): 原 `if (!this._noAppModeDirty) return` 在「用户从未在 App 上
+    //   切过 NoApp 开关(_noAppModeDirty 初始 false) + 固件 DataFlash 残留 g_encRequired=1(之前测试/刷固件)」
+    //   时直接 return → 固件永远卡在 1 → 状态机 ~2s 后发 Security Request 触发 SMP 3s+，且无法自愈。
+    //   故改为：noAppMode=false(APP 模式) 时**每次连接都发 ENCRYPT:0 兜底**，不依赖 dirty；
+    //   noAppMode=true(NoApp 模式) 时仍依赖 dirty，避免无意义重发 + 配对窗口反复开启。
+    //   固件侧 ENCRYPT 命令已加幂等(已是目标值则跳过 DataFlash 擦写)，故每次发 ENCRYPT:0 不会磨损 Flash。
     _flushPendingNoAppMode() {
-      if (!this._noAppModeDirty) return
       if (!this.connected || !this.deviceId) return
+      // ★ APP 模式(noAppMode=false): 强制校正兜底(堵死固件态残留=1 的死锁)；NoApp 模式仍依赖 dirty。
+      if (this.noAppMode && !this._noAppModeDirty) return
       const on = !!this.noAppMode
-      console.log('[Store] 连接后主动校正无 App 模式 ENCRYPT:' + (on ? '1' : '0') + ' (dirty=true)')
+      console.log('[Store] 连接后主动校正无 App 模式 ENCRYPT:' + (on ? '1' : '0') + ' (dirty=' + this._noAppModeDirty + ')')
       enqueueWrite(() => rawSendCommand(this.deviceId, on ? 'ENCRYPT:1' : 'ENCRYPT:0'))
         .then(() => {
           this._noAppModeDirty = false
