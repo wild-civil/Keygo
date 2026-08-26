@@ -17,6 +17,7 @@
 | 6 | [蓝牙开启交互：modal 双弹 vs banner 引导](./2026-07-25_蓝牙开启交互modal双弹与banner引导.md) | 被动流程不弹系统框，改用红 banner 引导避免双弹 | 主动操作才 modal，被动/后台流程走内联引导 |
 | 7 | [前端单位选择：rpx / em / vh-vw](./2026-07-25_前端单位选择rpx-em-vh-vw取舍.md) | rpx 管布局、em 管排版、vh 慎用于滚动页 | 布局 rpx、排版 em、滚动页高度用 100%+border-box |
 | 8 | [蓝牙 banner 全局横幅组件化与跨页条件渲染](./2026-07-25_蓝牙banner全局横幅组件化与跨页条件渲染.md) | `BtStateBanner` 抽组件 + 壳层 `v-show` 跨 tab 门控 + 组件内互斥用 `v-if` | 重复 UI+共享状态→抽零 props 组件；壳层门控 v-show（MP 改 `:class`）；组件内互斥用 `v-if` |
+| 9 | [侧边书脊布局与 flex column 居中](./2026-08-26_侧边书脊布局与flex-column居中详解.md) | 「已知设备 (N)」从卡顶/卡内改为左侧书脊小标签；`flex-direction:column` 下 `align-items` 管水平居中 | column 布局 `align-items`=水平/`justify-content`=垂直；`padding` 两值=`<上下><左右>`；书脊宽与右侧间距用 body `padding-left` 解耦 |
 
 ---
 

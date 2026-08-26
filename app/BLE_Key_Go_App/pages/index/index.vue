@@ -1,5 +1,8 @@
 <template>
-  <view class="page-index" :class="themeClass">
+  <!-- ★ 2026-08-26: 根容器绑定 @tap=onListTap → 点击全屏任意非 @tap.stop 区域，
+       都会冒泡到此处收起 known-section 中展开的「⋯」操作层（互斥，仅一个展开）。
+       按钮/reconnect/默认/删除/⋯ 均 @tap.stop，不会触发收起。 -->
+  <view class="page-index" :class="themeClass" @tap="onListTap">
 
     <!-- ★ 顶部状态卡片 -->
     <view class="status-card" :class="{
@@ -1129,12 +1132,12 @@ async function handleSetName() {
 .reconnect-label {
   flex: 0 0 auto;
   width: 110rpx;               /* ★ 书脊宽度（与右侧间距见 .known-section-body 的 padding-left） */
-  padding: 24rpx 0;
+  padding: 24rpx 0;            /*两值：padding: <上下> <左右>;*/
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4rpx;
+  gap: 4rpx;                  /*已知设备 与 (N) 的间距*/
   box-sizing: border-box;
 }
 .reconnect-title { font-size: 22rpx; color: var(--text-tertiary); white-space: nowrap; line-height: 1.2; }
@@ -1145,7 +1148,7 @@ async function handleSetName() {
 .known-section-body {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 24rpx 24rpx 24rpx 6rpx;   /* ★ 第四个值 = 书脊与卡片间隙（随 width 调整时可微调） */
+  padding: 24rpx 24rpx 24rpx 6rpx;   /* ★ 第四个值 = 书脊与卡片间隙（随 width 调整时可微调） */ /* padding: <上> <右> <下> <左>; */
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
