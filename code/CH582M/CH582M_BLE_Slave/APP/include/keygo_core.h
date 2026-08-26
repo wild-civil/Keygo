@@ -127,6 +127,17 @@ void KeyGo_FlushRawNotify(void);   // ★ 2026-07-11: 延迟发送队列消费�
 extern uint32_t g_unauthConnStartMs;      // 连接建立时记时戳；AUTH/BIND 成功或断连清零(=0)
 void KeyGo_CancelUnauthTimer(void);       // AUTH/BIND 成功时调用，取消计时
 
+/* ★ 2026-08-26 X8 修正版(治无App模式日常重连3s+):
+ *   连接建立后给一个窗口等待 OS 用 SNV LTK 自动加密(LINK_ENCRYPTED 上升)。
+ *   窗口内已加密(已配对/bonded 设备)→ 不抢，走 fast path(0.3~0.6s)。
+ *   窗口超时仍无加密(未配对 / 用户「忽略此设备」清掉系统 LTK)→ 手动发 Security Request
+ *   触发 OS 弹配对框，修复 X8 原版(snvBonds>0 判据)在 forget 场景失效的 bug。
+ *   配合 Bonding_ApplyPairingMode 恒 WAIT_FOR_REQ：固件永不主动 INITIATE，从而已配对重连
+ *   不再被强拖成完整 SMP(3s+)。 */
+#define SECURITY_DETECT_MS        1500    // 连接后检测 LINK_ENCRYPTED 的窗口(ms)；>Android 自加密耗时(300~500ms)，<用户感知阈值
+extern uint32_t g_linkEstMs;             // 连接建立时刻(ms)，Peripheral_LinkEstablished 写入；断连清零
+
+
 // 命令处理 (NAME/TRUNK/UNLOCK/LOCK)
 void KeyGo_HandleCommand(const char *cmd, uint16_t len);
 

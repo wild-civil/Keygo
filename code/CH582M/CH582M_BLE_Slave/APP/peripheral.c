@@ -844,6 +844,7 @@ static void Peripheral_LinkEstablished(gapRoleEvent_t *pEvent)
         // ★ 方案A（2026-07-12）：启动未鉴权连接计时（防 DoS 占槽）。
         //   连上即开始算，AUTH/BIND 成功由 KeyGo_CancelUnauthTimer 清零；超时强断（见状态机事件）。
         g_unauthConnStartMs = Peripheral_GetSystemMs();
+        g_linkEstMs          = Peripheral_GetSystemMs();  // ★ 2026-08-26 X8 修正版: 记录连接建立时刻，供 SEC-DET 窗口判定
 
 #ifdef KEYGO_1007_DIAG
         // ★ 2026-08-17: 记录连接建立时刻，并重置窗口计时标志（窗口①起点）

@@ -278,20 +278,24 @@ void Bonding_TickPairingWindow(void)
  *   在 Bonding_Init(上电) 与 ENCRYPT 命令(运行时) 两处调用。 */
 void Bonding_ApplyPairingMode(void)
 {
-    /* ★ [v3.36.2-fix-2] 配对窗口门控由 Bonding_PasscodeCB 兜底，故配对模式恢复为
-     *   encRequired=1 → INITIATE / encRequired=0 → WAIT_FOR_REQ：
-     *   ① INITIATE 让设备在连接瞬间主动发 Security Request → 手机立刻配对加密，
-     *      恢复「无App模式」下快速绑定验证（v3.36.2-fix-2 误改成 WAIT_FOR_REQ 导致变慢）；
-     *   ② 安全仍由 PasscodeCB 的「配对窗口」保障：已绑 owner 用 SNV 旧 LTK 自动重连
-     *      (不触发 PasscodeCB)，无App自动解锁不受影响；陌生手机在窗口关闭时 PasscodeCB
-     *      返回 FAILURE → 配对被拒，知道 PIN 也配不上。
-     *   ③ 指纹采集(per-phone阈值)：INITIATE 使 AUTH 时链路已加密，
-     *      Bonding_CaptureLinkLtk 能取到 LTK → s_ltkFp 正常播种 → 无App重连可反查识别 owner。 */
-    uint8_t pm = g_encRequired ? GAPBOND_PAIRING_MODE_INITIATE
-                               : GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
+    /* ★ 2026-08-26 X8 修正版(治无App模式日常重连3s+):
+     *   配对模式恒为 WAIT_FOR_REQ —— 设备永不主动 INITIATE(连接瞬间发 Security Request)。
+     *   原 INITIATE 模式会把【每次重连】(含已配对/bonded 设备)都强拖成完整 SMP 协商(3s+)，
+     *   即使用户手机已存有 SNV LTK、本可 OS 自动加密走 fast path(0.3~0.6s)。
+     *   改 WAIT_FOR_REQ 后：
+     *   ① 已配对/bonded 设备 → OS 用 SNV LTK 自动加密(LINK_ENCRYPTED 上升) → fast path，无弹框；
+     *   ② 未配对 / 「忽略此设备」清掉 LTK 设备 → 连接后由 KeyGo_ProcessStateMachine 的
+     *      SECURITY_DETECT_MS 窗口检测超时，调 GAPBondMgr_PeriSecurityReq 手动触发 OS 弹配对框
+     *      (见 keygo_core.c)，标准基座/多端(iOS/小程序/鸿蒙)均可用，不依赖 App 侧 createBond。
+     *   ③ 安全仍由 PasscodeCB「配对窗口」兜底：陌生手机在窗口关闭时 PasscodeCB 返回 FAILURE→
+     *      配对被拒，知道 PIN 也配不上。
+     *   ④ 指纹采集(per-phone阈值)不受影响：已配对 OS 自动加密同样触发 LINK_ENCRYPTED 上升沿 →
+     *      Bonding_OnLinkEncrypted → Bonding_CaptureLinkLtk 正常播种 s_ltkFp → 无App重连可识别 owner。
+     *   注：WAIT_FOR_REQ 下首次配对延迟 = SECURITY_DETECT_MS(1.5s)，仅未配对场景发生，可接受。 */
+    uint8_t pm = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
     GAPBondMgr_SetParameter(GAPBOND_PERI_PAIRING_MODE, sizeof(uint8_t), &pm);
-    PRINT("[BOND] pairing mode = %s (encRequired=%d, new-bond gated by PAIRWIN)\n",
-          g_encRequired ? "INITIATE" : "WAIT_FOR_REQ", g_encRequired);
+    PRINT("[BOND] pairing mode = WAIT_FOR_REQ (X8-fixed, encRequired=%d, new-bond gated by %ums SEC-DET + PAIRWIN)\n",
+          g_encRequired, SECURITY_DETECT_MS);
 
     /* ★ [v3.36.2-fix-4] 多手机绑定：关闭「配对表达到上限自动擦最旧 bond」(GAPBOND_ERASE_AUTO)。
      *   该参数默认=1(开启)：bond 表满(当前 SNV 仅容 ~1 条)再来新配对会静默擦掉最旧一条，

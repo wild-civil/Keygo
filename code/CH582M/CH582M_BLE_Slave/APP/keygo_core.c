@@ -205,6 +205,12 @@ uint32_t Peripheral_GetSystemMs(void)
  *   AUTH/BIND 成功(KeyGo_CancelUnauthTimer)或断连(Peripheral_LinkTerminated)清零。 */
 uint32_t g_unauthConnStartMs = 0;
 
+/* ★ 2026-08-26 X8 修正版：连接建立时刻(ms)，用于窗口检测 LINK_ENCRYPTED 是否及时上升。
+ *   仅 g_encRequired=1(无App模式)时启动窗口；断连(KeyGo_ResetState)清零。 */
+uint32_t g_linkEstMs = 0;
+/* 窗口超时后是否已手动发过 Security Request（防止每拍重复发）。加密上升沿或断连清零。 */
+static uint8_t s_secReqSent = 0;
+
 /* ★ 方案A（2026-07-12）：AUTH/BIND 成功 → 取消未鉴权计时（合法用户长连不受限） */
 void KeyGo_CancelUnauthTimer(void)
 {
@@ -682,6 +688,11 @@ void KeyGo_ResetState(void)
     KeyGo_KeyPower(0);
     g_powerOn = 0;
     g_powerOffAtMs = 0;
+
+    /* ★ 2026-08-26 X8 修正版: 断连/重连复位窗口检测状态，避免跨连接误触发 Security Request。
+     *   g_linkEstMs 清零表示"无有效连接起点"；s_secReqSent 清零允许下次连接重新判定。 */
+    g_linkEstMs = 0;
+    s_secReqSent = 0;
     g_powerHoldForever = 0;   // ★ 2026-08-14: 清保持标志, 断连即终止 HOLD_UNTIL_LOCK 通电
 }
 
@@ -772,6 +783,27 @@ void KeyGo_ProcessStateMachine(void)
             PRINT("[OBS] LINK_PLAIN (encryption dropped)\n");
         }
         g_obsLinkEncrypted = encNow;
+
+        /* ★ 2026-08-26 X8 修正版(治无App模式日常重连3s+):
+         *   Bonding_ApplyPairingMode 已恒 WAIT_FOR_REQ(永不主动 INITIATE)。本段在状态机每拍(≈1s)检测：
+         *   - 已加密(encNow=1) → OS 用 SNV LTK 自动重连成功(bonded 设备)，不抢，fast path 保留；
+         *     清零 s_secReqSent 允许下次连接重新判定。
+         *   - 未加密且 g_encRequired=1 且连接已超 SECURITY_DETECT_MS 窗口且尚未发过 →
+         *   手动 GAPBondMgr_PeriSecurityReq 触发 OS 弹配对框（未配对 / 用户「忽略此设备」清掉 LTK 场景）。
+         *   修复 X8 原版(snvBonds>0 判据)在 forget 后误判"已配对不触发"的 bug：此处看的是
+         *   【当前连接实际是否加密】，与 SNV 里有多少 LTK 无关。
+         *   防御：g_linkEstMs==0(连接起点未记录)时不触发，避免异常态误发。 */
+        if (encNow) {
+            if (s_secReqSent) s_secReqSent = 0;   // 已加密，复位标记供下次连接使用
+        } else if (g_encRequired && g_linkEstMs != 0 && !s_secReqSent) {
+            uint32_t dt = (Peripheral_GetSystemMs() - g_linkEstMs);
+            if (dt >= SECURITY_DETECT_MS) {
+                bStatus_t st = GAPBondMgr_PeriSecurityReq(peripheralConnList.connHandle);
+                s_secReqSent = 1;
+                PRINT("[SEC-DET] 窗口 %ums 未加密 → 手动 Security Request (st=%d, enc=%d)\n",
+                      (unsigned int)dt, st, encNow);
+            }
+        }
 
         /* ★ 2026-07-30: 移除 OS 重连蓝 LED 3 短闪提示（用户要求，与 APP 手动操作保持一致）。
          *   LED 现在只在真实脉冲(KeyGo_Unlock/Lock/Ride/...)与 OTA 时亮，无 App 重连仅靠下方 RSSI 日志观测。 */

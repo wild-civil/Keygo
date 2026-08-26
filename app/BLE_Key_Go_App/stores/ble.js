@@ -488,14 +488,19 @@ export const useBleStore = defineStore('ble', {
       return state._customNamesByMac[key] || ''
     },
 
-    // 本机已配对(曾连接/使用)设备判定，供扫描列表「✓ 已配对」徽章。
-    // 以 knownDeviceId(本机连过的设备) 为准——与 OS 绑定意涵一致，且避免把扫到的陌生设备误标。
-    // ★ 优化：复用 knownDeviceId getter，避免重复读 storage。
+    // 本机已配对(真 owner)设备判定，供扫描列表「✓ 已配对」徽章。
+    // ★ 2026-08-26 修正(负优化修复)：此前以 knownDeviceId(=lastDeviceId/ble_last_device_id)为准，
+    //   而 lastDeviceId 在「任何设备连接成功」时都会被无条件写入(见 _finalizeConnection /
+    //   _doReconnect / disconnectDevice 多处) → 新设备只连一下(未绑定/未命名)也会标「已配对」，
+    //   与 OS bond 意涵不符，用户误以为已配对实则只是连过。
+    //   现改为以 knownDevices 真集合为准——该集合仅由 AUTH:OK / BIND:OK 调 _touchKnownDevice 写入
+    //   (2026-08-09 P1-①)，代表本机真正鉴权/绑定的 owner。重连锚点 lastDeviceId 语义保持不变
+    //   (连过即可重连)，两者解耦，互不污染。
     isPairedDevice: (state) => (mac) => {
       if (!mac) return false
       const key = String(mac).replace(/:/g, '').toUpperCase()
-      const known = (state.knownDeviceId || '').replace(/:/g, '').toUpperCase()
-      return !!known && key === known
+      const set = state.knownDevices || {}
+      return !!set[key]
     },
 
     // 连接态展示名：有自定义名 → 「自定义名 ( 出厂名 )」；否则出厂名（用于连接态顶部/扫描列表等）
@@ -2339,6 +2344,10 @@ export const useBleStore = defineStore('ble', {
       this._enableStatusNotify()
         .then(() => _readSnAndApply())
         .catch(() => _readSnAndApply())
+
+      // ★ 2026-08-26 (层2加固): 连接成功即主动校正无 App 模式期望态（见 _flushPendingNoAppMode）。
+      //   放在 FF02 订阅发起之后、连接初始化末尾，enqueueWrite 自带 1007 重试覆盖 SMP 握手窗口。
+      this._flushPendingNoAppMode()
 
       uni.showToast({ title: '已自动连接', icon: 'success', duration: 1500 })
     },
@@ -5927,6 +5936,27 @@ export const useBleStore = defineStore('ble', {
       enqueueWrite(() => rawSendCommand(this.deviceId, on ? 'ENCRYPT:1' : 'ENCRYPT:0'))
         .then(() => console.log('[Store] 无 App 模式已下发 ENCRYPT:' + (on ? '1' : '0')))
         .catch((e) => console.error('[Store] 下发 ENCRYPT 失败:', e))
+    },
+
+    // ★ 2026-08-26 (层2加固): 连接成功后主动校正无 App 模式期望态。
+    //   背景：setNoAppMode 在未连接时只置 _noAppModeDirty 标记，依赖连上后 status.pair 对账下发。
+    //   但 status 推送受固件广播/连接时序影响，且旧对账重发仅发一次、失败不重试 → 用户关开关后
+    //   首次连接仍慢（固件 g_encRequired 仍 1，触发 SMP 协商 3s+，本次连接已慢，下次才快）。
+    //   本方法在 _finalizeConnection 末尾主动把期望态推给设备，enqueueWrite 自带 10007 密集重试
+    //   (150ms×30) 覆盖 SMP 握手窗口 → 本次连接尾巴即把固件拉回期望态，下次连接直走 fast path。
+    //   与 status 对账(4143-)互补：对账处理「设备推送 pair 与实际不符」，本方法处理「连接后第一时间下发」。
+    //   防御：仅 dirty 且有通道时发；失败仅 log，由 status 对账兜底再尝试，不引入额外负优化。
+    _flushPendingNoAppMode() {
+      if (!this._noAppModeDirty) return
+      if (!this.connected || !this.deviceId) return
+      const on = !!this.noAppMode
+      console.log('[Store] 连接后主动校正无 App 模式 ENCRYPT:' + (on ? '1' : '0') + ' (dirty=true)')
+      enqueueWrite(() => rawSendCommand(this.deviceId, on ? 'ENCRYPT:1' : 'ENCRYPT:0'))
+        .then(() => {
+          this._noAppModeDirty = false
+          console.log('[Store] 无 App 模式已落盘 pair =', on)
+        })
+        .catch((e) => console.error('[Store] 主动校正 ENCRYPT 失败(等 status 对账兜底):', e))
     },
 
     // ★ 2026-07-19: 设置电瓶车「靠近直接进入骑行模式」(固件侧持久化, 仅 ebike 模式有效)。
