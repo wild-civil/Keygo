@@ -690,6 +690,11 @@ export const useBleStore = defineStore('ble', {
             return
           }
           console.log('[Store] 收到断连事件（全局监听器），系统级确认是否真断连')
+          // ★ 2026-08-26 修复(10012/18s 硬超时根因): 记录真实断连时刻。OS GATT 上下文释放与 App
+          //   的 connected=false 不同步——刚断连立即重连时 OS 仍占用半死 GATT → createBLEConnection
+          //   既不 success 也不 fail → 卡到 18s 硬超时。connect() 用此时间戳判断"刚断连瞬态"，
+          //   仍走 closeBLEConnection + 700ms 拆链净场，确保 GATT 干净再建连。
+          this._lastDisconnectAt = Date.now()
           // ★ 2026-07-25 修复（MP/Android 假断连）：BLE 栈在连上后/锁屏后可能多发一次 false 事件，
           //   但 GATT 实际仍活（控件仍可用、RSSI 仍显示）。若直接 _handleDisconnect 会立即把
           //   connected 翻 false → 控制页"已知设备"卡重现、deviceState 被误复位、状态错乱。
@@ -2805,6 +2810,46 @@ export const useBleStore = defineStore('ble', {
       try {
         await connectDevice(targetId)
       } catch (e) {
+        // ★ 2026-08-26 (10012 兜底): createBLEConnection:fail operate time out (code 10012)。
+        //   根因：Android 蓝牙栈 GATT 上下文未真正释放（上一条连接的逻辑断连事件已到，但物理/协议层
+        //   GATT 拆链尚在进行），此时立即建新连 → 被栈拒绝/瞬态超时，报 10012。这是瞬态，不是设备不可连。
+        //   处理：强拆一次 GATT（即使认为已断也强制调，吞异常）+ 700ms 净场，再重试一次。
+        //   防御：① 仅单次重试，失败即 throw 让上层走指数退避，避免设备真不可连时干等；② 不影响正常路径——
+        //   成功连接根本不进此 catch，零新增耗时；③ btState=off 时（系统蓝牙真关）直接 throw 不重试。
+        const is10012 = e && (e.code === 10012 || String(e.errMsg || '').includes('operate time out'))
+        if (is10012) {
+          if (this.btState === 'off') {
+            console.log('[Store] ⛧ 10012 但 btState=off，跳过拆链重试（系统蓝牙已关）')
+            throw e
+          }
+          console.log('[Store] ⛧ 捕获 10012 瞬态(GATT 未释放)，强制拆链 + 700ms 净场后重试一次')
+          // ★ 防卡死：重试前把 this.deviceId 钉住，避免下方 closeBLEConnection 触发的断连事件
+          //   被全局监听器误判为「设备已切换」而跳过清理/搅乱状态机。
+          const prevDeviceId = this.deviceId
+          this.deviceId = targetId
+          try { await new Promise((resolve) => {
+            try { uni.closeBLEConnection({ deviceId: targetId, complete: () => resolve() }) } catch (_) { resolve() }
+          }) } catch (_) {}
+          await new Promise(r => setTimeout(r, 700))
+          try {
+            // ★ 重试必须有独立短超时(5s)：否则复用 connectDevice 内部的 18s 硬超时，GATT 仍僵死时
+            //   会整整卡 18s 才 reject，UI 一直「连接中」转圈。5s 内未连上即放弃，交上层立即报错。
+            const RETRY_TIMEOUT = 5000
+            const retryWithTimeout = Promise.race([
+              connectDevice(targetId),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('10012_RETRY_TIMEOUT')), RETRY_TIMEOUT))
+            ])
+            await retryWithTimeout
+            console.log('[Store] ⛧ 10012 重试成功，连接已恢复')
+            return
+          } catch (e2) {
+            console.warn('[Store] ⛧ 10012 重试仍失败(或超时)，交上层:', e2?.message || e2?.errMsg || e2)
+            throw e2 || e
+          } finally {
+            // 还原 deviceId 钉住值（若本次连接最终成功，connect() 主流程会再次正确设置）
+            if (this.deviceId === targetId && prevDeviceId !== targetId) this.deviceId = prevDeviceId
+          }
+        }
         // ★ 2026-07-30: ALREADY_CONNECT_STALE(GATT 僵死) 或 CONNECT_HARD_TIMEOUT(蓝牙开关循环后
         //   createBLEConnection 平台超时失效、Promise 永久挂起) → 重置适配器并重试一次。
         //   这等价于"重启 App"对适配器的重绑效果，免去用户手动重启。
@@ -3467,7 +3512,12 @@ export const useBleStore = defineStore('ble', {
         //        已断开则整段跳过，直接放行 connect，省约 2.7s。
         //   注意：不能用 getBLEDeviceServices 伪成功判断（设备重启后 OS 缓存会秒回成功，见 MEMORY 铁律），
         //        以 connected 状态为准（与 _doReconnect 路径对齐）。
-        if (this.connected) {
+        // ★ 2026-08-26 修正(10012/18s 硬超时根因): 仅凭 this.connected 不准——OS GATT 释放与 connected=false
+        //   不同步。若"刚断连 (<1.5s)"就重连，OS 仍占用半死 GATT → createBLEConnection 卡死。
+        //   故补判 `_lastDisconnectAt`：刚断连瞬态仍走 close + 700ms 拆链净场；断连已久(>1.5s)才跳过
+        //   （此时 OS 早已释放 GATT，close 实为无操作，跳过省 2.7s，保原优化）。
+        const justDisconnected = (Date.now() - (this._lastDisconnectAt || 0)) < 1500
+        if (this.connected || justDisconnected) {
           try {
             await Promise.race([
               new Promise((resolve) => {
@@ -3480,10 +3530,10 @@ export const useBleStore = defineStore('ble', {
             ])
             console.log('[Store] connect: 已预清理旧连接句柄')
           } catch (e) { /* ignore */ }
-          // 仍连着 → 等 OS 真正销毁旧 GATT 再连，避免复用 stale 上下文
+          // 仍连着 / 刚断连 → 等 OS 真正销毁旧 GATT 再连，避免复用 stale 上下文
           await new Promise(r => setTimeout(r, 700))
         } else {
-          console.log('[Store] connect: 上一次已断开，跳过 closeBLEConnection + 2s 兜底 + 700ms 拆链等待')
+          console.log('[Store] connect: 上一次已断开且 GATT 已释放(>1.5s)，跳过 closeBLEConnection + 2s 兜底 + 700ms 拆链等待')
         }
 
         // ★ 方案A (2026-07-18): 重置本连接初始化幂等守卫，允许本次连接由 _finalizeConnection 初始化一次。
@@ -3620,6 +3670,7 @@ export const useBleStore = defineStore('ble', {
       // ★ v3.17: 用户主动断开 → 停止前台服务
       this._stopForegroundService()
       this.connected = false
+      this._lastDisconnectAt = Date.now()   // ★ 2026-08-26: 主动断开也记时刻，避免「断开后立刻点重连」撞半死 GATT
       // ★ P0-②: 保留 lastDeviceId（重连直连锚点）；清空 deviceId 仅表示「当前无活动连接」，
       //   不破坏重连能力（重连入口用 lastDeviceId）。
       this.deviceId = ''
