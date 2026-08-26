@@ -759,48 +759,51 @@ export function connectDevice(deviceId) {
       console.warn('[BLE] createBLEConnection 硬超时(' + (HARD_TIMEOUT_MS/1000) + 's)，强制收口', deviceId)
       finish(() => reject(new Error('CONNECT_HARD_TIMEOUT')))
     }, HARD_TIMEOUT_MS)
-    stopScan()
-      .catch(() => {})  // ★ v3.6: 防止 stopScan reject 导致 Promise 链断裂
-      .then(() => {
-        if (settled) return  // ★ 已硬超时收口，不再发起连接
-        uni.createBLEConnection({
+    // ★ 2026-08-26 修复(手动连接 2.7s 慢根因实证):
+    //   原逻辑先 stopScan() 再 createBLEConnection。Android 上 createBLEConnection 走定向连接，
+    //   底层需先经一次扫描发现设备才能发 CONNECT_IND；若 App 刚主动停扫描，系统要重新调度扫描窗口，
+    //   该"停→重起"切换在部分机型/uni-app 封装上引入 1~3s 延迟（实测 41.870 停扫描 → 44.550 连上 = 2.7s）。
+    //   改：连接建立期间保持扫描活跃，让 createBLEConnection 立即在扫描窗口捕获广播；连接 success 后再停扫描。
+    //   扫描中发起连接通常更快（系统已在监听广播），且不影响后续 GATT 流程。
+    if (settled) return  // ★ 已硬超时收口，不再发起连接
+    uni.createBLEConnection({
+      deviceId,
+      timeout: 10000,
+      success: () => {
+        console.log('[BLE] 连接成功', deviceId)
+        stopScan().catch(() => {})  // ★ 连接已建立，再停扫描（避免带宽占用，不影响连接建立）
+        _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE   // ★ 连接后 10007 宽限期（加密握手窗口）
+        // ★ 2026-07-30: MTU 协商改为「尽力而为 + 自身超时」，绝不再阻塞连接建立。
+        //   原实现在 setBLEMTU 的 complete 里才 finish(resolve)，但设备重启后重连，
+        //   createBLEConnection 已 success 而 setBLEMTU 的 complete 不回调（uni-app/固件 MTU 时序问题）
+        //   → connectDevice 永不 resolve → _doReconnect 永久卡死 → _reconnecting 恒 true →
+        //     后续所有重连(含手动点击)被"重入被拦"挡掉，表现为"不能自动重连 / 点了没反应"。
+        //   现：连接成功即 resolve（MTU 默认 20 字节已可工作），MTU 设置异步重试、独立 3s 超时兜底。
+        const mtuTimer = setTimeout(() => {
+          console.warn('[BLE] setBLEMTU 超时(3s)，连接已建立，跳过 MTU 协商（使用默认 MTU）')
+        }, 3000)
+        uni.setBLEMTU({
           deviceId,
-          timeout: 10000,
-          success: () => {
-            console.log('[BLE] 连接成功', deviceId)
-            _connectGraceUntil = Date.now() + _CONNECT_GUIDE_GRACE   // ★ 连接后 10007 宽限期（加密握手窗口）
-            // ★ 2026-07-30: MTU 协商改为「尽力而为 + 自身超时」，绝不再阻塞连接建立。
-            //   原实现在 setBLEMTU 的 complete 里才 finish(resolve)，但设备重启后重连，
-            //   createBLEConnection 已 success 而 setBLEMTU 的 complete 不回调（uni-app/固件 MTU 时序问题）
-            //   → connectDevice 永不 resolve → _doReconnect 永久卡死 → _reconnecting 恒 true →
-            //     后续所有重连(含手动点击)被"重入被拦"挡掉，表现为"不能自动重连 / 点了没反应"。
-            //   现：连接成功即 resolve（MTU 默认 20 字节已可工作），MTU 设置异步重试、独立 3s 超时兜底。
-            const mtuTimer = setTimeout(() => {
-              console.warn('[BLE] setBLEMTU 超时(3s)，连接已建立，跳过 MTU 协商（使用默认 MTU）')
-            }, 3000)
-            uni.setBLEMTU({
-              deviceId,
-              mtu: 512,
-              success: (res) => { console.log('[BLE] MTU 设置成功:', res.mtu) },
-              fail: (err) => { console.warn('[BLE] MTU 设置失败（使用默认20字节）:', err.errMsg) },
-              complete: () => { clearTimeout(mtuTimer) }
-            })
-            finish(() => resolve())
-          },
-          fail: (err) => {
-            const msg = String(err?.errMsg || '')
-            // ★ v3.6-fixG: "already connect" → Android GATT 句柄僵死
-            //   抛出让 Store 层接管适配器重置（Store 需要用 _adapterResetting 标记压制状态事件）
-            if (msg.includes('already connect')) {
-              console.warn('[BLE] already connect → 交 Store 层处理适配器重置')
-              finish(() => reject(new Error('ALREADY_CONNECT_STALE')))
-              return
-            }
-            console.error('[BLE] 连接失败', err)
-            finish(() => reject(err))
-          }
+          mtu: 512,
+          success: (res) => { console.log('[BLE] MTU 设置成功:', res.mtu) },
+          fail: (err) => { console.warn('[BLE] MTU 设置失败（使用默认20字节）:', err.errMsg) },
+          complete: () => { clearTimeout(mtuTimer) }
         })
-      })
+        finish(() => resolve())
+      },
+      fail: (err) => {
+        const msg = String(err?.errMsg || '')
+        // ★ v3.6-fixG: "already connect" → Android GATT 句柄僵死
+        //   抛出让 Store 层接管适配器重置（Store 需要用 _adapterResetting 标记压制状态事件）
+        if (msg.includes('already connect')) {
+          console.warn('[BLE] already connect → 交 Store 层处理适配器重置')
+          finish(() => reject(new Error('ALREADY_CONNECT_STALE')))
+          return
+        }
+        console.error('[BLE] 连接失败', err)
+        finish(() => reject(err))
+      }
+    })
   })
 }
 

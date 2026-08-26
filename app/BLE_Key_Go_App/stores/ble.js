@@ -3403,21 +3403,14 @@ export const useBleStore = defineStore('ble', {
         //   "重新扫描连接"也卡死（日志三次 connect 全被"复用其 Promise"卡住）。修复：加 3s 超时，
         //   超时即强制接管（清 _reconnecting 令牌自己连），用户手动意图必须优先于卡死的自动重连。
         if (this._reconnecting && this._reconnectPromise) {
-          console.log('[Store] connect: 检测到进行中的重连，最多等 3s 收口')
-          try {
-            await Promise.race([
-              this._reconnectPromise,
-              new Promise((_, reject) => setTimeout(() => reject(new Error('RECONNECT_TIMEOUT')), 3000))
-            ])
-            if (this.connected && this.deviceId === deviceId) {
-              console.log('[Store] connect: 进行中的重连已连上本设备，直接复用')
-              return
-            }
-          } catch (e) {
-            // 超时或重连失败：强制接管，自己重新连
-            console.log('[Store] connect: 重连未及时收口(' + (e?.message || 'fail') + ')，强制接管重新连')
-          }
-          // ★ 强制接管：清掉卡死的重连令牌，让本次 connect 自己发起 createBLEConnection
+          // ★ 2026-08-26 修复(手动连接 1.5s 真空根因):
+          //   原逻辑 await 最多 3s 等重连收口。日志实测用户手动点 connect 时，旧重连(_reconnecting 未清)
+          //   仍为真，导致 connect() 傻等 ~1.5s（01.742 点 → 03.253 才发起 createBLEConnection）。
+          //   手动连接语义是"用户现在就要连这个设备"，优先级应高于可能已卡死/慢的自动重连。
+          //   改：立即强制接管，清掉重连令牌直接往下走自己的 connect，不再傻等。
+          //   旧重连(_doReconnect)内部有 guard/_screenOnScanGuard/connected 多重保护，跑完会自行 return，
+          //   不会污染本次手动连接。
+          console.log('[Store] connect: 检测到进行中的重连，用户手动连接优先 → 立即接管(不等收口)')
           this._reconnecting = false
           this._reconnectPromise = null
         }
@@ -3457,27 +3450,31 @@ export const useBleStore = defineStore('ble', {
         //   ① closeBLEConnection 加 2s 硬超时兜底(Android 可能不回调 complete，与 _doReconnect 一致)，避免静默挂起;
         //   ② 拆链等待从 300ms 提到 700ms，确保 OS 真正销毁旧 GATT，下次 connect 强制新建(首连路径，写就绪 ~0.4s)。
         //   注: 手动 disconnect() 已把 connected 置 false，此处 close 仅为清理可能的 stale ACL，2s 超时兜底放行安全。
-        try {
-          await Promise.race([
-            new Promise((resolve) => {
-              uni.closeBLEConnection({ deviceId, complete: () => resolve() })
-            }),
-            new Promise((resolve) => setTimeout(() => {
-              console.warn('[Store] connect: closeBLEConnection 硬超时(2s)，强制放行')
-              resolve()
-            }, 2000))
-          ])
-          console.log('[Store] connect: 已预清理旧连接句柄')
-        } catch (e) { /* ignore */ }
-        // ★ 2026-08-18 (App②): 700ms 拆链等待条件化。
-        //   仅当上一次连接仍处 connected（OS 侧确有可能残留 stale ACL）时才等 700ms 确保旧 GATT 销毁；
-        //   若已 connected===false（显式/异常断连，OS 多半已释放），跳过盲等，省约 0.7s。
+        // ★ 2026-08-26 优化(连接慢根因实证):
+        //   日志实测点击 connect → 连上 ≈ 3.65s，其中 2s 是被 closeBLEConnection 的 2s 硬超时硬占
+        //   （Android 上 connected===false 时 closeBLEConnection 的 complete 不回调，只能等满定时器）。
+        //   该 2s 等待独占 54% 的连接耗时，且此时 OS 多半已释放旧 GATT，close 实为无操作。
+        //   改：仅当本次仍 connected（确有可能残留 stale ACL）才 close + 2s 兜底 + 700ms 拆链；
+        //        已断开则整段跳过，直接放行 connect，省约 2.7s。
         //   注意：不能用 getBLEDeviceServices 伪成功判断（设备重启后 OS 缓存会秒回成功，见 MEMORY 铁律），
-        //   以 connected 状态为准已足够（与 _doReconnect 路径对齐）。
+        //        以 connected 状态为准（与 _doReconnect 路径对齐）。
         if (this.connected) {
+          try {
+            await Promise.race([
+              new Promise((resolve) => {
+                uni.closeBLEConnection({ deviceId, complete: () => resolve() })
+              }),
+              new Promise((resolve) => setTimeout(() => {
+                console.warn('[Store] connect: closeBLEConnection 硬超时(2s)，强制放行')
+                resolve()
+              }, 2000))
+            ])
+            console.log('[Store] connect: 已预清理旧连接句柄')
+          } catch (e) { /* ignore */ }
+          // 仍连着 → 等 OS 真正销毁旧 GATT 再连，避免复用 stale 上下文
           await new Promise(r => setTimeout(r, 700))
         } else {
-          console.log('[Store] connect: 上一次已断开，跳过 700ms 拆链等待')
+          console.log('[Store] connect: 上一次已断开，跳过 closeBLEConnection + 2s 兜底 + 700ms 拆链等待')
         }
 
         // ★ 方案A (2026-07-18): 重置本连接初始化幂等守卫，允许本次连接由 _finalizeConnection 初始化一次。
